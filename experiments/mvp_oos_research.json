@@ -1,0 +1,2278 @@
+{
+  "comparison_decision_count": 21,
+  "config_sha256": "782341becfe3f06b96c0cf3453f3efbcc5ad884b6e12824add89b9988267b3c7",
+  "cost_sensitivity": {
+    "0x": {
+      "adaptive_fusion": {
+        "annualized_return": -0.11521388535991972,
+        "annualized_volatility": 0.25141146006282183,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 1,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 4187,
+        "final_nav_cny": 948493.0323966737,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.16832697565567478,
+        "maximum_observed_symbol_weight": 0.037747101631359914,
+        "mean_cash_weight": 0.049992417326187595,
+        "minimum_cash_weight": 0.047257765859402806,
+        "one_way_turnover_over_average_nav": 10.432479763731099,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.36194323137909806,
+        "sortino_rf_zero": -0.4930160523356049,
+        "start_date": "2026-04-21",
+        "total_return": -0.05150696760332629,
+        "total_traded_notional_cny": 20678217.905592088,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 20.864959527462197
+      },
+      "adaptive_inverse_volatility": {
+        "annualized_return": -0.06199454378477054,
+        "annualized_volatility": 0.23796277259579554,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 1,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 4085,
+        "final_nav_cny": 972730.912346261,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.1494824889290014,
+        "maximum_observed_symbol_weight": 0.048792770610456455,
+        "mean_cash_weight": 0.04995793212767517,
+        "minimum_cash_weight": 0.047257765859402806,
+        "one_way_turnover_over_average_nav": 10.434559440450075,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.15084645339557365,
+        "sortino_rf_zero": -0.2078726893025695,
+        "start_date": "2026-04-21",
+        "total_return": -0.027269087653739033,
+        "total_traded_notional_cny": 21005470.020273417,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 20.86911888090015
+      },
+      "equal_fusion": {
+        "annualized_return": 0.03798508449210258,
+        "annualized_volatility": 0.261504207787949,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 0,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3843,
+        "final_nav_cny": 1016235.9651504465,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.1727616368779239,
+        "maximum_observed_symbol_weight": 0.03894849488786458,
+        "mean_cash_weight": 0.04992926998738113,
+        "minimum_cash_weight": 0.04697341067634632,
+        "one_way_turnover_over_average_nav": 10.54267059915282,
+        "partial_orders": 0,
+        "sharpe_rf_zero": 0.2721545982205353,
+        "sortino_rf_zero": 0.38919132044774474,
+        "start_date": "2026-04-21",
+        "total_return": 0.016235965150446452,
+        "total_traded_notional_cny": 22375758.612178035,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.08534119830564
+      },
+      "liquidity_confirmation": {
+        "annualized_return": 0.07801410341473147,
+        "annualized_volatility": 0.3041612202537869,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 0,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3512,
+        "final_nav_cny": 1032984.3912524808,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.1951894289212267,
+        "maximum_observed_symbol_weight": 0.03818283641312474,
+        "mean_cash_weight": 0.04993980701389814,
+        "minimum_cash_weight": 0.04505997035229836,
+        "one_way_turnover_over_average_nav": 10.356153704831552,
+        "partial_orders": 0,
+        "sharpe_rf_zero": 0.3978191749624195,
+        "sortino_rf_zero": 0.5649988893428308,
+        "start_date": "2026-04-21",
+        "total_return": 0.03298439125248076,
+        "total_traded_notional_cny": 21772116.693391815,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 20.712307409663104
+      },
+      "regime_fusion": {
+        "annualized_return": 0.27862536583639064,
+        "annualized_volatility": 0.32463418806177263,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 0,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3745,
+        "final_nav_cny": 1112021.316698995,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.17422625300389538,
+        "maximum_observed_symbol_weight": 0.03871695873039763,
+        "mean_cash_weight": 0.04982331292466968,
+        "minimum_cash_weight": 0.043927351935812854,
+        "one_way_turnover_over_average_nav": 10.486922370468791,
+        "partial_orders": 0,
+        "sharpe_rf_zero": 0.9177385445822773,
+        "sortino_rf_zero": 1.3989905056404692,
+        "start_date": "2026-04-21",
+        "total_return": 0.11202131669899495,
+        "total_traded_notional_cny": 22536194.72654802,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 20.973844740937583
+      },
+      "reversal": {
+        "annualized_return": -0.11279236705021045,
+        "annualized_volatility": 0.3171936341548939,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 1,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 4047,
+        "final_nav_cny": 949613.5795606605,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.22361123554594198,
+        "maximum_observed_symbol_weight": 0.038016815204112445,
+        "mean_cash_weight": 0.050009181212960156,
+        "minimum_cash_weight": 0.0438970118286793,
+        "one_way_turnover_over_average_nav": 10.686380584654641,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.2209143070823762,
+        "sortino_rf_zero": -0.32722458250682107,
+        "start_date": "2026-04-21",
+        "total_return": -0.0503864204393395,
+        "total_traded_notional_cny": 20395102.633142058,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.372761169309282
+      },
+      "ridge": {
+        "annualized_return": -0.2594705168200123,
+        "annualized_volatility": 0.3354419839536993,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 1,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3062,
+        "final_nav_cny": 878298.8152960043,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.28870134507920775,
+        "maximum_observed_symbol_weight": 0.04032833917510949,
+        "mean_cash_weight": 0.05006747716718206,
+        "minimum_cash_weight": 0.04339507099190211,
+        "one_way_turnover_over_average_nav": 10.71880091910456,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.7292267954165581,
+        "sortino_rf_zero": -1.0402960529885863,
+        "start_date": "2026-04-21",
+        "total_return": -0.12170118470399571,
+        "total_traded_notional_cny": 19637262.6554968,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.43760183820912
+      },
+      "static_fusion": {
+        "annualized_return": 0.033164383121080165,
+        "annualized_volatility": 0.2611309078701911,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 0,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3856,
+        "final_nav_cny": 1014194.3622981587,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.1727616368779239,
+        "maximum_observed_symbol_weight": 0.03894849488786458,
+        "mean_cash_weight": 0.04993392967066127,
+        "minimum_cash_weight": 0.04697341067634632,
+        "one_way_turnover_over_average_nav": 10.54328390930791,
+        "partial_orders": 0,
+        "sharpe_rf_zero": 0.25434324752121407,
+        "sortino_rf_zero": 0.36355740312604967,
+        "start_date": "2026-04-21",
+        "total_return": 0.014194362298158625,
+        "total_traded_notional_cny": 22373114.438217174,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.08656781861582
+      },
+      "trend": {
+        "annualized_return": -0.07382129185982855,
+        "annualized_volatility": 0.35726839946206423,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 2,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 0.0,
+          "slippage_per_side_bps": 0.0,
+          "stamp_duty_sell_bps": 0.0,
+          "transfer_fee_per_side_bps": 0.0
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 1149,
+        "final_nav_cny": 967413.5154428725,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.2920378534303737,
+        "maximum_observed_symbol_weight": 0.04283833869293108,
+        "mean_cash_weight": 0.04829814954250978,
+        "minimum_cash_weight": 0.014900751231378214,
+        "one_way_turnover_over_average_nav": 8.598504785875134,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.03757574693128201,
+        "sortino_rf_zero": -0.05344445297671203,
+        "start_date": "2026-04-21",
+        "total_return": -0.032586484557127426,
+        "total_traded_notional_cny": 19391587.076157447,
+        "total_transaction_cost_cny": 0.0,
+        "trading_days": 108,
+        "turnover_over_average_nav": 17.197009571750268
+      }
+    },
+    "2x": {
+      "adaptive_fusion": {
+        "annualized_return": -0.20081786938404167,
+        "annualized_volatility": 0.25170559363821426,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 1,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 4011,
+        "final_nav_cny": 907701.3269705168,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.18794630538771984,
+        "maximum_observed_symbol_weight": 0.03782269702818704,
+        "mean_cash_weight": 0.048006653842298845,
+        "minimum_cash_weight": 0.045330809251907495,
+        "one_way_turnover_over_average_nav": 10.470770141103129,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.7651411834944357,
+        "sortino_rf_zero": -1.0193997509934218,
+        "start_date": "2026-04-21",
+        "total_return": -0.09229867302948314,
+        "total_traded_notional_cny": 20289217.37455917,
+        "total_transaction_cost_cny": 42555.603360194116,
+        "trading_days": 108,
+        "turnover_over_average_nav": 20.941540282206258
+      },
+      "adaptive_inverse_volatility": {
+        "annualized_return": -0.15274094679852857,
+        "annualized_volatility": 0.23814513181168706,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 1,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 4075,
+        "final_nav_cny": 930899.9483686804,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.16951796807137265,
+        "maximum_observed_symbol_weight": 0.048897111443524856,
+        "mean_cash_weight": 0.047971163586347815,
+        "minimum_cash_weight": 0.045330809251907495,
+        "one_way_turnover_over_average_nav": 10.47400005021468,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.577541984303043,
+        "sortino_rf_zero": -0.778104273594147,
+        "start_date": "2026-04-21",
+        "total_return": -0.0691000516313196,
+        "total_traded_notional_cny": 20608998.06685118,
+        "total_transaction_cost_cny": 43234.545497837986,
+        "trading_days": 108,
+        "turnover_over_average_nav": 20.94800010042936
+      },
+      "equal_fusion": {
+        "annualized_return": -0.0632956768933941,
+        "annualized_volatility": 0.26258655326414154,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 0,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3874,
+        "final_nav_cny": 972147.7841977759,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.18189449305491157,
+        "maximum_observed_symbol_weight": 0.03902887195652131,
+        "mean_cash_weight": 0.047922576520814324,
+        "minimum_cash_weight": 0.045045312977875555,
+        "one_way_turnover_over_average_nav": 10.58312209485918,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.11881311273567823,
+        "sortino_rf_zero": -0.16653061108069506,
+        "start_date": "2026-04-21",
+        "total_return": -0.02785221580222408,
+        "total_traded_notional_cny": 21949405.94434305,
+        "total_transaction_cost_cny": 46078.71758061051,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.16624418971836
+      },
+      "liquidity_confirmation": {
+        "annualized_return": -0.025425447578012683,
+        "annualized_volatility": 0.30565232060117825,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 0,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3535,
+        "final_nav_cny": 988935.82307004,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.20396802705393957,
+        "maximum_observed_symbol_weight": 0.03825901121076108,
+        "mean_cash_weight": 0.047966090590147475,
+        "minimum_cash_weight": 0.04315486401797032,
+        "one_way_turnover_over_average_nav": 10.395740268449153,
+        "partial_orders": 0,
+        "sharpe_rf_zero": 0.0673514833739876,
+        "sortino_rf_zero": 0.09400842176163535,
+        "start_date": "2026-04-21",
+        "total_return": -0.011064176929959979,
+        "total_traded_notional_cny": 21365206.294679724,
+        "total_transaction_cost_cny": 44839.94418416408,
+        "trading_days": 108,
+        "turnover_over_average_nav": 20.791480536898305
+      },
+      "regime_fusion": {
+        "annualized_return": 0.15450933504265651,
+        "annualized_volatility": 0.3262062227218695,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 0,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3564,
+        "final_nav_cny": 1064034.471228082,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.1835140831881905,
+        "maximum_observed_symbol_weight": 0.038793345816266034,
+        "mean_cash_weight": 0.04782310670980299,
+        "minimum_cash_weight": 0.042041056992745705,
+        "one_way_turnover_over_average_nav": 10.52639811935265,
+        "partial_orders": 0,
+        "sharpe_rf_zero": 0.6016581376859259,
+        "sortino_rf_zero": 0.9006520776596606,
+        "start_date": "2026-04-21",
+        "total_return": 0.06403447122808203,
+        "total_traded_notional_cny": 22096767.91960631,
+        "total_transaction_cost_cny": 46393.119734057094,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.0527962387053
+      },
+      "reversal": {
+        "annualized_return": -0.20076194360202682,
+        "annualized_volatility": 0.3186816875862352,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 1,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 4093,
+        "final_nav_cny": 907728.7669882146,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.24354696082734606,
+        "maximum_observed_symbol_weight": 0.03809185583624973,
+        "mean_cash_weight": 0.04797193717671492,
+        "minimum_cash_weight": 0.04200977923869209,
+        "one_way_turnover_over_average_nav": 10.730828256861976,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.5457884428507761,
+        "sortino_rf_zero": -0.794139574150678,
+        "start_date": "2026-04-21",
+        "total_return": -0.09227123301178541,
+        "total_traded_notional_cny": 20004664.478484824,
+        "total_transaction_cost_cny": 41952.04623613641,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.461656513723952
+      },
+      "ridge": {
+        "annualized_return": -0.33319397355009706,
+        "annualized_volatility": 0.3369861528255348,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 1,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3011,
+        "final_nav_cny": 839397.7311737754,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.3075442187131584,
+        "maximum_observed_symbol_weight": 0.04041750697590579,
+        "mean_cash_weight": 0.04802684992065164,
+        "minimum_cash_weight": 0.041501064031917285,
+        "one_way_turnover_over_average_nav": 10.760576414523724,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -1.0350463934741796,
+        "sortino_rf_zero": -1.4543473608992454,
+        "start_date": "2026-04-21",
+        "total_return": -0.16060226882622464,
+        "total_traded_notional_cny": 19262489.974913776,
+        "total_transaction_cost_cny": 40376.10217503713,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.52115282904745
+      },
+      "static_fusion": {
+        "annualized_return": -0.06764922607083035,
+        "annualized_volatility": 0.2622086447542428,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 0,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 3880,
+        "final_nav_cny": 970193.3041844335,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.18189449305491157,
+        "maximum_observed_symbol_weight": 0.03902887195652131,
+        "mean_cash_weight": 0.04792719886862112,
+        "minimum_cash_weight": 0.045045312977875555,
+        "one_way_turnover_over_average_nav": 10.583762912049242,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.13712239929243328,
+        "sortino_rf_zero": -0.192112925022735,
+        "start_date": "2026-04-21",
+        "total_return": -0.029806695815566497,
+        "total_traded_notional_cny": 21946941.456130352,
+        "total_transaction_cost_cny": 46073.462487653545,
+        "trading_days": 108,
+        "turnover_over_average_nav": 21.167525824098483
+      },
+      "trend": {
+        "annualized_return": -0.14869890809169628,
+        "annualized_volatility": 0.3574289456729995,
+        "benchmark_annualized_return": -0.11299825251898654,
+        "benchmark_annualized_volatility": 0.20085809001534116,
+        "benchmark_final_nav_cny": 949518.3745701662,
+        "benchmark_maximum_drawdown": -0.12048600437080903,
+        "benchmark_sharpe_rf_zero": -0.4969906662464679,
+        "benchmark_total_return": -0.05048162542983381,
+        "blocked_orders": 2,
+        "cost_assumptions_bps": {
+          "commission_per_side_bps": 6.0,
+          "slippage_per_side_bps": 10.0,
+          "stamp_duty_sell_bps": 10.0,
+          "transfer_fee_per_side_bps": 0.2
+        },
+        "end_date": "2026-09-23",
+        "filled_orders": 1163,
+        "final_nav_cny": 932815.8960666648,
+        "initial_capital_cny": 1000000.0,
+        "liquidity_limited_orders": 0,
+        "liquidity_lookback_sessions": 20,
+        "maximum_daily_participation": 0.01,
+        "maximum_drawdown": -0.3082137463289324,
+        "maximum_observed_symbol_weight": 0.04292855021699641,
+        "mean_cash_weight": 0.04662997070436887,
+        "minimum_cash_weight": 0.013411125751967335,
+        "one_way_turnover_over_average_nav": 8.609656289331953,
+        "partial_orders": 0,
+        "sharpe_rf_zero": -0.27308772348248167,
+        "sortino_rf_zero": -0.3836641281340574,
+        "start_date": "2026-04-21",
+        "total_return": -0.06718410393333518,
+        "total_traded_notional_cny": 19096417.94558606,
+        "total_transaction_cost_cny": 40027.292530888044,
+        "trading_days": 108,
+        "turnover_over_average_nav": 17.219312578663907
+      }
+    }
+  },
+  "data": {
+    "adjusted_bars": 42427,
+    "end_date": "2026-09-23",
+    "execution_bars": 42427,
+    "index_bars": 133,
+    "manifest_sha256": "c22d5ea6796d7038aeec6efac936b3b2adca874609cc6b56bbfd46e806218d89",
+    "membership_snapshots": 28,
+    "source": "BaoStock only; no local scoring CSV",
+    "start_date": "2026-03-16",
+    "trading_days": 133
+  },
+  "decision_windows": 21,
+  "development_result_sha256": "8adfba5000f9f027b359ccdc7071727ed14b51b4c79e5f20d59d011f22fa064b",
+  "evaluated_label_windows": 21,
+  "latest_development_label_available_at": "2026-03-02",
+  "matured_rank_ic_windows_at_end": 120,
+  "observations": [
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.41917714662554206,
+        "reversal": 0.4141561867077913,
+        "trend": 0.16666666666666666
+      },
+      "cross_section": 299,
+      "decision_date": "2026-04-20",
+      "label_available_at": "2026-04-27",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.10058943682521156,
+          "top_decile_gross_return": 0.0032385433453342143
+        },
+        "equal_fusion": {
+          "rank_ic": 0.15213285568035417,
+          "top_decile_gross_return": 0.02951573873284523
+        },
+        "liquidity_confirmation": {
+          "rank_ic": 0.1100588213574137,
+          "top_decile_gross_return": 0.037133676515038294
+        },
+        "regime_fusion": {
+          "rank_ic": 0.12850755314134363,
+          "top_decile_gross_return": 0.008969516601468771
+        },
+        "reversal": {
+          "rank_ic": -0.05774483824659844,
+          "top_decile_gross_return": 0.003538001996388984
+        },
+        "ridge": {
+          "rank_ic": -0.11176404570043322,
+          "top_decile_gross_return": 0.008073643094558384
+        },
+        "static_fusion": {
+          "rank_ic": 0.15233759042377024,
+          "top_decile_gross_return": 0.02951573873284523
+        },
+        "trend": {
+          "rank_ic": 0.13625283383089043,
+          "top_decile_gross_return": 0.04111983934834056
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 58,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.39863851366197534,
+        "reversal": 0.37498539598086167,
+        "trend": 0.22637609035716302
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.4441658050366448,
+        "reversal": 0.3891675282966885,
+        "trend": 0.16666666666666666
+      },
+      "cross_section": 299,
+      "decision_date": "2026-04-27",
+      "label_available_at": "2026-05-07",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.26252298068763835,
+          "top_decile_gross_return": 0.029376439390494405
+        },
+        "equal_fusion": {
+          "rank_ic": 0.29653870836763147,
+          "top_decile_gross_return": 0.02476246270698089
+        },
+        "liquidity_confirmation": {
+          "rank_ic": 0.16572783615719575,
+          "top_decile_gross_return": 0.04665352432648708
+        },
+        "regime_fusion": {
+          "rank_ic": 0.265603046576178,
+          "top_decile_gross_return": 0.04315196657279534
+        },
+        "reversal": {
+          "rank_ic": 0.0786031915340153,
+          "top_decile_gross_return": 0.0430614885868156
+        },
+        "ridge": {
+          "rank_ic": 0.00019550629565063708,
+          "top_decile_gross_return": 0.03982799949536338
+        },
+        "static_fusion": {
+          "rank_ic": 0.2968652674430522,
+          "top_decile_gross_return": 0.02476246270698089
+        },
+        "trend": {
+          "rank_ic": 0.13537565210384275,
+          "top_decile_gross_return": 0.06942253553506043
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 59,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.4068436800048678,
+        "reversal": 0.24793373284904774,
+        "trend": 0.34522258714608434
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.46990204549127257,
+        "reversal": 0.313467576195559,
+        "trend": 0.21663037831316842
+      },
+      "cross_section": 299,
+      "decision_date": "2026-05-07",
+      "label_available_at": "2026-05-14",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.022185370557507366,
+          "top_decile_gross_return": 0.01532091567963441
+        },
+        "equal_fusion": {
+          "rank_ic": 0.12089881698944074,
+          "top_decile_gross_return": 0.028228587828233544
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.07854089280813618,
+          "top_decile_gross_return": -0.000779530544020975
+        },
+        "regime_fusion": {
+          "rank_ic": 0.0647307870668679,
+          "top_decile_gross_return": 0.016098169044139812
+        },
+        "reversal": {
+          "rank_ic": 0.01158632262656363,
+          "top_decile_gross_return": -0.007496963278144186
+        },
+        "ridge": {
+          "rank_ic": -0.15391356149742813,
+          "top_decile_gross_return": -0.01495461294102438
+        },
+        "static_fusion": {
+          "rank_ic": 0.12108178286435065,
+          "top_decile_gross_return": 0.028228587828233544
+        },
+        "trend": {
+          "rank_ic": 0.18292212651665174,
+          "top_decile_gross_return": 0.048590374605694195
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 60,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.42839368066187555,
+        "reversal": 0.2339178571282921,
+        "trend": 0.33768846220983234
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.3949121620967685,
+        "reversal": 0.3040120518183783,
+        "trend": 0.3010757860848532
+      },
+      "cross_section": 299,
+      "decision_date": "2026-05-14",
+      "label_available_at": "2026-05-21",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.09586182128347287,
+          "top_decile_gross_return": -0.01480705727814133
+        },
+        "equal_fusion": {
+          "rank_ic": 0.09742972469251021,
+          "top_decile_gross_return": -0.010426144181881666
+        },
+        "liquidity_confirmation": {
+          "rank_ic": 0.0850307344737292,
+          "top_decile_gross_return": -0.028382774379945012
+        },
+        "regime_fusion": {
+          "rank_ic": 0.10995263854907858,
+          "top_decile_gross_return": -0.013604839521937466
+        },
+        "reversal": {
+          "rank_ic": -0.1182962561176652,
+          "top_decile_gross_return": -0.04096507774486701
+        },
+        "ridge": {
+          "rank_ic": -0.13872236313438532,
+          "top_decile_gross_return": -0.04526761671579293
+        },
+        "static_fusion": {
+          "rank_ic": 0.0973880677855653,
+          "top_decile_gross_return": -0.010426144181881666
+        },
+        "trend": {
+          "rank_ic": 0.14572020220872825,
+          "top_decile_gross_return": 0.009568900602003334
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 61,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.406980959542537,
+        "reversal": 0.2556858976235392,
+        "trend": 0.3373331428339238
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.4221529031635335,
+        "reversal": 0.23554799670266205,
+        "trend": 0.3422991001338044
+      },
+      "cross_section": 299,
+      "decision_date": "2026-05-21",
+      "label_available_at": "2026-05-28",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.12054005521761577,
+          "top_decile_gross_return": 0.04924215589651031
+        },
+        "equal_fusion": {
+          "rank_ic": 0.10901462800086575,
+          "top_decile_gross_return": 0.04512892378770136
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.007364818675766996,
+          "top_decile_gross_return": 0.029024551364560076
+        },
+        "regime_fusion": {
+          "rank_ic": 0.10750555543085452,
+          "top_decile_gross_return": 0.043283521501146144
+        },
+        "reversal": {
+          "rank_ic": -0.1778651632808661,
+          "top_decile_gross_return": 0.013318218003492258
+        },
+        "ridge": {
+          "rank_ic": -0.255595609526161,
+          "top_decile_gross_return": -0.0024388468528748803
+        },
+        "static_fusion": {
+          "rank_ic": 0.10956378746559717,
+          "top_decile_gross_return": 0.04512892378770136
+        },
+        "trend": {
+          "rank_ic": 0.3235404731140144,
+          "top_decile_gross_return": 0.07173560098808478
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 62,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.3873563293235495,
+        "reversal": 0.28701708573069856,
+        "trend": 0.3256265849457519
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.3680872862873692,
+        "reversal": 0.16666666666666666,
+        "trend": 0.4652460470459642
+      },
+      "cross_section": 299,
+      "decision_date": "2026-05-28",
+      "label_available_at": "2026-06-04",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.05434942171867474,
+          "top_decile_gross_return": -0.0068648922221555275
+        },
+        "equal_fusion": {
+          "rank_ic": 0.018083197252772402,
+          "top_decile_gross_return": -0.0034467536756256725
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.014451315976131604,
+          "top_decile_gross_return": -0.017829268407057498
+        },
+        "regime_fusion": {
+          "rank_ic": 0.026125126764890858,
+          "top_decile_gross_return": -0.020065657074324016
+        },
+        "reversal": {
+          "rank_ic": -0.041938041290243804,
+          "top_decile_gross_return": -0.027894608747131188
+        },
+        "ridge": {
+          "rank_ic": -0.0540405620706939,
+          "top_decile_gross_return": -0.027415484035305002
+        },
+        "static_fusion": {
+          "rank_ic": 0.018183940373808116,
+          "top_decile_gross_return": -0.0034467536756256725
+        },
+        "trend": {
+          "rank_ic": 0.09835317857802771,
+          "top_decile_gross_return": -0.019792037353095582
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 63,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.37939078884902017,
+        "reversal": 0.26032209950273677,
+        "trend": 0.3602871116482431
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.414365178411065,
+        "reversal": 0.16666666666666666,
+        "trend": 0.41896815492226824
+      },
+      "cross_section": 299,
+      "decision_date": "2026-06-04",
+      "label_available_at": "2026-06-11",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": -0.12725984111459562,
+          "top_decile_gross_return": -0.03982996588800355
+        },
+        "equal_fusion": {
+          "rank_ic": -0.21128795431661318,
+          "top_decile_gross_return": -0.04434121985245269
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.12208711481623709,
+          "top_decile_gross_return": -0.034048019251856604
+        },
+        "regime_fusion": {
+          "rank_ic": -0.1750650602972322,
+          "top_decile_gross_return": -0.03824624489136692
+        },
+        "reversal": {
+          "rank_ic": -0.17997810373399134,
+          "top_decile_gross_return": -0.048799932523139786
+        },
+        "ridge": {
+          "rank_ic": -0.18817947439093022,
+          "top_decile_gross_return": -0.043348189748234754
+        },
+        "static_fusion": {
+          "rank_ic": -0.210890937986761,
+          "top_decile_gross_return": -0.04434121985245269
+        },
+        "trend": {
+          "rank_ic": 0.027684239493724363,
+          "top_decile_gross_return": -0.03713764073837338
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 64,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.3504984140514292,
+        "reversal": 0.2616661022468173,
+        "trend": 0.38783548370175347
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.4021328851361613,
+        "reversal": 0.16666666666666666,
+        "trend": 0.43120044819717207
+      },
+      "cross_section": 300,
+      "decision_date": "2026-06-11",
+      "label_available_at": "2026-06-18",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.2556952855031723,
+          "top_decile_gross_return": 0.05908193786372202
+        },
+        "equal_fusion": {
+          "rank_ic": 0.3582477717741345,
+          "top_decile_gross_return": 0.07269542925826264
+        },
+        "liquidity_confirmation": {
+          "rank_ic": 0.3233221739378811,
+          "top_decile_gross_return": 0.061362862106264675
+        },
+        "regime_fusion": {
+          "rank_ic": 0.3528780253443035,
+          "top_decile_gross_return": 0.08080233684957026
+        },
+        "reversal": {
+          "rank_ic": 0.37185476711404986,
+          "top_decile_gross_return": 0.06774625799111522
+        },
+        "ridge": {
+          "rank_ic": 0.3984684274269714,
+          "top_decile_gross_return": 0.07255442435604173
+        },
+        "static_fusion": {
+          "rank_ic": 0.358220102983624,
+          "top_decile_gross_return": 0.07269542925826264
+        },
+        "trend": {
+          "rank_ic": -0.14009601663307641,
+          "top_decile_gross_return": 0.06268861538135444
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 41,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.6666666666666666,
+        "reversal": 0.16666666666666666,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.4153436883283485,
+        "reversal": 0.19650832749950645,
+        "trend": 0.388147984172145
+      },
+      "cross_section": 300,
+      "decision_date": "2026-06-18",
+      "label_available_at": "2026-06-26",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.17261217849358274,
+          "top_decile_gross_return": -0.008075576250954664
+        },
+        "equal_fusion": {
+          "rank_ic": 0.13600840281765617,
+          "top_decile_gross_return": -0.017812284360734617
+        },
+        "liquidity_confirmation": {
+          "rank_ic": 0.056915762480393185,
+          "top_decile_gross_return": -0.011005641121592998
+        },
+        "regime_fusion": {
+          "rank_ic": 0.1900170424153743,
+          "top_decile_gross_return": 0.0002086804574946144
+        },
+        "reversal": {
+          "rank_ic": -0.08862480188659957,
+          "top_decile_gross_return": -0.04350823273855228
+        },
+        "ridge": {
+          "rank_ic": -0.06725631779382554,
+          "top_decile_gross_return": -0.0414090713235571
+        },
+        "static_fusion": {
+          "rank_ic": 0.13576099116186074,
+          "top_decile_gross_return": -0.017812284360734617
+        },
+        "trend": {
+          "rank_ic": 0.23906140259160893,
+          "top_decile_gross_return": 0.015044184906662213
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 65,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.3820513182656191,
+        "reversal": 0.18112191083510434,
+        "trend": 0.4368267708992766
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.40989863957819606,
+        "reversal": 0.17876989456645614,
+        "trend": 0.41133146585534774
+      },
+      "cross_section": 300,
+      "decision_date": "2026-06-26",
+      "label_available_at": "2026-07-03",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": -0.25917868633859276,
+          "top_decile_gross_return": -0.018791374398391732
+        },
+        "equal_fusion": {
+          "rank_ic": -0.18177468607102804,
+          "top_decile_gross_return": 0.0016738712060516395
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.10105513406317178,
+          "top_decile_gross_return": 2.5241746815296563e-05
+        },
+        "regime_fusion": {
+          "rank_ic": -0.0807949066983979,
+          "top_decile_gross_return": 0.03578723701313978
+        },
+        "reversal": {
+          "rank_ic": 0.27026903301915,
+          "top_decile_gross_return": 0.04444534389571058
+        },
+        "ridge": {
+          "rank_ic": 0.10497273358289975,
+          "top_decile_gross_return": 0.017878258958183627
+        },
+        "static_fusion": {
+          "rank_ic": -0.1814477414264892,
+          "top_decile_gross_return": 0.0016738712060516395
+        },
+        "trend": {
+          "rank_ic": -0.35562199086901086,
+          "top_decile_gross_return": -0.04051572459849419
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 42,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.5178499643890958,
+        "reversal": 0.31548336894423745,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.3728471392988225,
+        "reversal": 0.20497066386312707,
+        "trend": 0.42218219683805036
+      },
+      "cross_section": 299,
+      "decision_date": "2026-07-03",
+      "label_available_at": "2026-07-10",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": -0.2221180718991935,
+          "top_decile_gross_return": -0.04662271283831454
+        },
+        "equal_fusion": {
+          "rank_ic": -0.22377829025788237,
+          "top_decile_gross_return": -0.04582470108873929
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.07625153840646087,
+          "top_decile_gross_return": -0.003857024213948505
+        },
+        "regime_fusion": {
+          "rank_ic": -0.18640012264598857,
+          "top_decile_gross_return": -0.03600743935980737
+        },
+        "reversal": {
+          "rank_ic": -0.040228753717372376,
+          "top_decile_gross_return": -0.041034019515837024
+        },
+        "ridge": {
+          "rank_ic": -0.10316785328451997,
+          "top_decile_gross_return": -0.05005354543233778
+        },
+        "static_fusion": {
+          "rank_ic": -0.22386930686295214,
+          "top_decile_gross_return": -0.04582470108873929
+        },
+        "trend": {
+          "rank_ic": -0.21813028172887394,
+          "top_decile_gross_return": -0.06320682215296361
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 43,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.40556622970157663,
+        "reversal": 0.42776710363175663,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.38066102454065437,
+        "reversal": 0.1966363141705171,
+        "trend": 0.4227026612888285
+      },
+      "cross_section": 299,
+      "decision_date": "2026-07-10",
+      "label_available_at": "2026-07-17",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": -0.50881641265067,
+          "top_decile_gross_return": -0.08668748897940164
+        },
+        "equal_fusion": {
+          "rank_ic": -0.5036946104554789,
+          "top_decile_gross_return": -0.08548899183434552
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.33357541639497473,
+          "top_decile_gross_return": -0.09974966733843231
+        },
+        "regime_fusion": {
+          "rank_ic": -0.5109416174721106,
+          "top_decile_gross_return": -0.0823707216417333
+        },
+        "reversal": {
+          "rank_ic": -0.24230797072968419,
+          "top_decile_gross_return": -0.11762577745988313
+        },
+        "ridge": {
+          "rank_ic": -0.30804426387735406,
+          "top_decile_gross_return": -0.10396132115183628
+        },
+        "static_fusion": {
+          "rank_ic": -0.5036418001372146,
+          "top_decile_gross_return": -0.08548899183434552
+        },
+        "trend": {
+          "rank_ic": -0.3443392965365536,
+          "top_decile_gross_return": -0.12909108042489625
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 66,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.372294317846364,
+        "reversal": 0.2126970722699595,
+        "trend": 0.41500860988367644
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.33849200049843853,
+        "reversal": 0.16666666666666666,
+        "trend": 0.49484133283489484
+      },
+      "cross_section": 299,
+      "decision_date": "2026-07-17",
+      "label_available_at": "2026-07-24",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": -0.18940225808623826,
+          "top_decile_gross_return": 0.0026528842719277914
+        },
+        "equal_fusion": {
+          "rank_ic": -0.2530027870556036,
+          "top_decile_gross_return": -0.029766057071666678
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.14780364077125094,
+          "top_decile_gross_return": -0.03266182736283273
+        },
+        "regime_fusion": {
+          "rank_ic": -0.22691387398711588,
+          "top_decile_gross_return": -0.03372173635460876
+        },
+        "reversal": {
+          "rank_ic": -0.16921415905366882,
+          "top_decile_gross_return": -0.02934472670544281
+        },
+        "ridge": {
+          "rank_ic": -0.18163318444030438,
+          "top_decile_gross_return": -0.03560789388358497
+        },
+        "static_fusion": {
+          "rank_ic": -0.25292404929850176,
+          "top_decile_gross_return": -0.029766057071666678
+        },
+        "trend": {
+          "rank_ic": 0.01703396107831474,
+          "top_decile_gross_return": 0.013109371622207159
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 44,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.40298384512823204,
+        "reversal": 0.4303494882051013,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.2903385748687832,
+        "reversal": 0.16666666666666666,
+        "trend": 0.5429947584645501
+      },
+      "cross_section": 299,
+      "decision_date": "2026-07-24",
+      "label_available_at": "2026-07-31",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.23042400843976565,
+          "top_decile_gross_return": 0.0016865661226542613
+        },
+        "equal_fusion": {
+          "rank_ic": 0.1058233243210335,
+          "top_decile_gross_return": 0.016208039361257514
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.08547552243496218,
+          "top_decile_gross_return": -0.01756574248085579
+        },
+        "regime_fusion": {
+          "rank_ic": 0.08320845772261004,
+          "top_decile_gross_return": -0.01591448626749684
+        },
+        "reversal": {
+          "rank_ic": 0.09914234238763978,
+          "top_decile_gross_return": 0.0029898617306574576
+        },
+        "ridge": {
+          "rank_ic": -0.07794258265807726,
+          "top_decile_gross_return": -0.04382191789023603
+        },
+        "static_fusion": {
+          "rank_ic": 0.10585423962296497,
+          "top_decile_gross_return": 0.016208039361257514
+        },
+        "trend": {
+          "rank_ic": 0.27550717155619403,
+          "top_decile_gross_return": 0.0034860133961022682
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 45,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.3640989267288005,
+        "reversal": 0.46923440660453286,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.16971692675827563,
+        "reversal": 0.16666666666666666,
+        "trend": 0.6636164065750577
+      },
+      "cross_section": 299,
+      "decision_date": "2026-07-31",
+      "label_available_at": "2026-08-07",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": -0.5917279485210574,
+          "top_decile_gross_return": -0.008898259937282627
+        },
+        "equal_fusion": {
+          "rank_ic": -0.05720731034112245,
+          "top_decile_gross_return": 0.03362364025747043
+        },
+        "liquidity_confirmation": {
+          "rank_ic": 0.03790219653978813,
+          "top_decile_gross_return": 0.12083578470829508
+        },
+        "regime_fusion": {
+          "rank_ic": 0.15404778974560585,
+          "top_decile_gross_return": 0.1487407487081455
+        },
+        "reversal": {
+          "rank_ic": 0.45232764801138003,
+          "top_decile_gross_return": 0.1521031378225193
+        },
+        "ridge": {
+          "rank_ic": 0.4779369612071866,
+          "top_decile_gross_return": 0.15915654836226198
+        },
+        "static_fusion": {
+          "rank_ic": -0.0570468382587774,
+          "top_decile_gross_return": 0.03362364025747043
+        },
+        "trend": {
+          "rank_ic": -0.6636976335874761,
+          "top_decile_gross_return": -0.0012181226676737785
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 46,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.42548695277133963,
+        "reversal": 0.4078463805619936,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.16666666666666666,
+        "reversal": 0.6377084193198997,
+        "trend": 0.19562491401343352
+      },
+      "cross_section": 299,
+      "decision_date": "2026-08-07",
+      "label_available_at": "2026-08-14",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.012966270659622846,
+          "top_decile_gross_return": -0.004253934608044674
+        },
+        "equal_fusion": {
+          "rank_ic": -0.08301510964568622,
+          "top_decile_gross_return": -0.003007127703760034
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.14386464044840788,
+          "top_decile_gross_return": -0.024239264615177333
+        },
+        "regime_fusion": {
+          "rank_ic": 0.0015249946830571204,
+          "top_decile_gross_return": 0.000572633674989779
+        },
+        "reversal": {
+          "rank_ic": 0.08779763942289907,
+          "top_decile_gross_return": -0.00800628214431441
+        },
+        "ridge": {
+          "rank_ic": 0.14503700536298064,
+          "top_decile_gross_return": -0.006748683958781176
+        },
+        "static_fusion": {
+          "rank_ic": -0.08302729672304633,
+          "top_decile_gross_return": -0.003007127703760034
+        },
+        "trend": {
+          "rank_ic": -0.19419487387145268,
+          "top_decile_gross_return": -0.025612222614727276
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 47,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.25154050338337974,
+        "reversal": 0.5817928299499535,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.16666666666666666,
+        "reversal": 0.6666666666666666,
+        "trend": 0.16666666666666666
+      },
+      "cross_section": 300,
+      "decision_date": "2026-08-14",
+      "label_available_at": "2026-08-21",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.03748281228041824,
+          "top_decile_gross_return": 0.0030324396039845157
+        },
+        "equal_fusion": {
+          "rank_ic": -0.010556950208096475,
+          "top_decile_gross_return": 0.0011156601034754687
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.0020653565112230834,
+          "top_decile_gross_return": -0.012888625706859643
+        },
+        "regime_fusion": {
+          "rank_ic": -0.03801642662878796,
+          "top_decile_gross_return": 0.0028096287816209947
+        },
+        "reversal": {
+          "rank_ic": 0.06054535284733227,
+          "top_decile_gross_return": 0.004716024966864985
+        },
+        "ridge": {
+          "rank_ic": 0.04812342894070286,
+          "top_decile_gross_return": -0.020841595998576767
+        },
+        "static_fusion": {
+          "rank_ic": -0.01082350290164708,
+          "top_decile_gross_return": 0.0011156601034754687
+        },
+        "trend": {
+          "rank_ic": -0.036620431307305676,
+          "top_decile_gross_return": -0.013829924162680666
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 67,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.40743954417256856,
+        "reversal": 0.16666666666666666,
+        "trend": 0.4258937891607647
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.16666666666666666,
+        "reversal": 0.6666666666666666,
+        "trend": 0.16666666666666666
+      },
+      "cross_section": 300,
+      "decision_date": "2026-08-21",
+      "label_available_at": "2026-08-28",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": -0.06794112055493744,
+          "top_decile_gross_return": 0.012804772965049472
+        },
+        "equal_fusion": {
+          "rank_ic": -0.14730633109016825,
+          "top_decile_gross_return": 0.012481886191325764
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.0659865256250682,
+          "top_decile_gross_return": 0.0011551708896246533
+        },
+        "regime_fusion": {
+          "rank_ic": -0.07368882695239182,
+          "top_decile_gross_return": 0.010749506089542149
+        },
+        "reversal": {
+          "rank_ic": -0.010189673302891751,
+          "top_decile_gross_return": 0.01158219605364309
+        },
+        "ridge": {
+          "rank_ic": 0.078787550838071,
+          "top_decile_gross_return": 0.013513529406746948
+        },
+        "static_fusion": {
+          "rank_ic": -0.14737899549871292,
+          "top_decile_gross_return": 0.012481886191325764
+        },
+        "trend": {
+          "rank_ic": -0.1795931265450879,
+          "top_decile_gross_return": -0.009326798154006884
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 48,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.20178076508614284,
+        "reversal": 0.6315525682471904,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.16666666666666666,
+        "reversal": 0.6666666666666666,
+        "trend": 0.16666666666666666
+      },
+      "cross_section": 300,
+      "decision_date": "2026-08-28",
+      "label_available_at": "2026-09-04",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": -0.18381412651403056,
+          "top_decile_gross_return": -0.02365001990108009
+        },
+        "equal_fusion": {
+          "rank_ic": -0.2656697837208995,
+          "top_decile_gross_return": -0.0315722159840771
+        },
+        "liquidity_confirmation": {
+          "rank_ic": -0.16749545383736572,
+          "top_decile_gross_return": 0.004708686656550809
+        },
+        "regime_fusion": {
+          "rank_ic": -0.2850487544360238,
+          "top_decile_gross_return": -0.034608099381069284
+        },
+        "reversal": {
+          "rank_ic": -0.11477441188777918,
+          "top_decile_gross_return": 0.0022059898070037978
+        },
+        "ridge": {
+          "rank_ic": 0.06289426136893353,
+          "top_decile_gross_return": 0.0025250524992404765
+        },
+        "static_fusion": {
+          "rank_ic": -0.26568572657289186,
+          "top_decile_gross_return": -0.0315722159840771
+        },
+        "trend": {
+          "rank_ic": -0.2568166883669126,
+          "top_decile_gross_return": -0.02830091543224089
+        }
+      },
+      "regime": "risk_on",
+      "regime_matured_windows": 68,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.3442348827977011,
+        "reversal": 0.16666666666666666,
+        "trend": 0.48909845053563217
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.16666666666666666,
+        "reversal": 0.6666666666666666,
+        "trend": 0.16666666666666666
+      },
+      "cross_section": 300,
+      "decision_date": "2026-09-04",
+      "label_available_at": "2026-09-11",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.034133217717069654,
+          "top_decile_gross_return": -0.003171578005684772
+        },
+        "equal_fusion": {
+          "rank_ic": 0.11268845716221092,
+          "top_decile_gross_return": -0.02335497260812963
+        },
+        "liquidity_confirmation": {
+          "rank_ic": 0.044773840770195396,
+          "top_decile_gross_return": -0.005224835460423616
+        },
+        "regime_fusion": {
+          "rank_ic": 0.02991944687379288,
+          "top_decile_gross_return": -0.003171578005684772
+        },
+        "reversal": {
+          "rank_ic": -0.0002333359778077485,
+          "top_decile_gross_return": -0.0024123171102902186
+        },
+        "ridge": {
+          "rank_ic": -0.07750264752971164,
+          "top_decile_gross_return": -0.0011509592603210605
+        },
+        "static_fusion": {
+          "rank_ic": 0.11285287739838437,
+          "top_decile_gross_return": -0.025784804882944653
+        },
+        "trend": {
+          "rank_ic": 0.12295226868657158,
+          "top_decile_gross_return": -0.025016064844567445
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 49,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.19631194145830042,
+        "reversal": 0.6370213918750328,
+        "trend": 0.16666666666666666
+      }
+    },
+    {
+      "adaptive_weights": {
+        "liquidity_confirmation": 0.16666666666666666,
+        "reversal": 0.6666666666666666,
+        "trend": 0.16666666666666666
+      },
+      "cross_section": 300,
+      "decision_date": "2026-09-11",
+      "label_available_at": "2026-09-18",
+      "methods": {
+        "adaptive_fusion": {
+          "rank_ic": 0.09091003031713546,
+          "top_decile_gross_return": 0.007466160022366394
+        },
+        "equal_fusion": {
+          "rank_ic": -0.037302675593024213,
+          "top_decile_gross_return": -0.000466525847662258
+        },
+        "liquidity_confirmation": {
+          "rank_ic": 0.18116950578186203,
+          "top_decile_gross_return": 0.005685513470071191
+        },
+        "regime_fusion": {
+          "rank_ic": 0.1079147721972291,
+          "top_decile_gross_return": 0.007273520352674989
+        },
+        "reversal": {
+          "rank_ic": 0.15033128256306316,
+          "top_decile_gross_return": 0.004525060846229486
+        },
+        "ridge": {
+          "rank_ic": 0.3810970812953583,
+          "top_decile_gross_return": 0.02753427010012304
+        },
+        "static_fusion": {
+          "rank_ic": -0.03712208814954941,
+          "top_decile_gross_return": -0.000466525847662258
+        },
+        "trend": {
+          "rank_ic": -0.5223180753534056,
+          "top_decile_gross_return": -0.019743862210453888
+        }
+      },
+      "regime": "risk_off",
+      "regime_matured_windows": 50,
+      "regime_weight_source": "state_conditional",
+      "regime_weights": {
+        "liquidity_confirmation": 0.26348534039000165,
+        "reversal": 0.5698479929433317,
+        "trend": 0.16666666666666666
+      }
+    }
+  ],
+  "portfolio_results": {
+    "adaptive_fusion": {
+      "annualized_return": -0.1590469439483846,
+      "annualized_volatility": 0.2514727305311255,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 1,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 4109,
+      "final_nav_cny": 927900.4756815534,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.17818156235347493,
+      "maximum_observed_symbol_weight": 0.03778482597237133,
+      "mean_cash_weight": 0.049001401524001155,
+      "minimum_cash_weight": 0.0462960740638244,
+      "one_way_turnover_over_average_nav": 10.451597591345543,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 0.31993831225644276,
+        "annualized_return_difference_95pct_low": -0.2909220441721018,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.418,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": -0.5636861289806324,
+      "sortino_rf_zero": -0.7593166315108437,
+      "start_date": "2026-04-21",
+      "total_return": -0.07209952431844668,
+      "total_traded_notional_cny": 20482638.782044113,
+      "total_transaction_cost_cny": 21478.024475042486,
+      "trading_days": 108,
+      "turnover_over_average_nav": 20.903195182691086
+    },
+    "adaptive_inverse_volatility": {
+      "annualized_return": -0.10845839418883407,
+      "annualized_volatility": 0.23796310086965183,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 1,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 3995,
+      "final_nav_cny": 951614.7781566102,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.159545137345651,
+      "maximum_observed_symbol_weight": 0.04884484947254444,
+      "mean_cash_weight": 0.04896646245230741,
+      "minimum_cash_weight": 0.0462960740638244,
+      "one_way_turnover_over_average_nav": 10.454251247513184,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 0.3524345354002415,
+        "annualized_return_difference_95pct_low": -0.23034339978930304,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.498,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": -0.36422868744628956,
+      "sortino_rf_zero": -0.49626668603546686,
+      "start_date": "2026-04-21",
+      "total_return": -0.04838522184338978,
+      "total_traded_notional_cny": 20806142.872675505,
+      "total_transaction_cost_cny": 21821.37327428246,
+      "trading_days": 108,
+      "turnover_over_average_nav": 20.90850249502637
+    },
+    "equal_fusion": {
+      "annualized_return": -0.013883224247711268,
+      "annualized_volatility": 0.261960861356399,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 0,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 3882,
+      "final_nav_cny": 993978.626622417,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.17733408394278516,
+      "maximum_observed_symbol_weight": 0.0389886055901186,
+      "mean_cash_weight": 0.04892787887102504,
+      "minimum_cash_weight": 0.046011178317788115,
+      "one_way_turnover_over_average_nav": 10.562867560786113,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 0.6445334167878257,
+        "annualized_return_difference_95pct_low": -0.22286115281055166,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.72,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": 0.07646400862302152,
+      "sortino_rf_zero": 0.10825317215477347,
+      "start_date": "2026-04-21",
+      "total_return": -0.006021373377583017,
+      "total_traded_notional_cny": 22161401.635944333,
+      "total_transaction_cost_cny": 23258.875687181975,
+      "trading_days": 108,
+      "turnover_over_average_nav": 21.125735121572227
+    },
+    "liquidity_confirmation": {
+      "annualized_return": 0.02506405913258969,
+      "annualized_volatility": 0.3048364007937936,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 0,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 3499,
+      "final_nav_cny": 1010751.5937896897,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.19958450279897555,
+      "maximum_observed_symbol_weight": 0.03822085676808233,
+      "mean_cash_weight": 0.048954872973498854,
+      "minimum_cash_weight": 0.04410909392977229,
+      "one_way_turnover_over_average_nav": 10.37591768574349,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 0.7595119166622208,
+        "annualized_return_difference_95pct_low": -0.2183405461689487,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.764,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": 0.23238322320567417,
+      "sortino_rf_zero": 0.3271733955484131,
+      "start_date": "2026-04-21",
+      "total_return": 0.010751593789689817,
+      "total_traded_notional_cny": 21567556.68755263,
+      "total_transaction_cost_cny": 22629.417118434787,
+      "trading_days": 108,
+      "turnover_over_average_nav": 20.75183537148698
+    },
+    "regime_fusion": {
+      "annualized_return": 0.21506924420945173,
+      "annualized_volatility": 0.32535190420844134,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 0,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 3722,
+      "final_nav_cny": 1087796.4675160663,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.17887662539688742,
+      "maximum_observed_symbol_weight": 0.038755088693008796,
+      "mean_cash_weight": 0.04882512865677917,
+      "minimum_cash_weight": 0.042985774510321616,
+      "one_way_turnover_over_average_nav": 10.506619860082512,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 1.3433913366987313,
+        "annualized_return_difference_95pct_low": -0.1459907338560399,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.883,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": 0.759608005467339,
+      "sortino_rf_zero": 1.1474205036432978,
+      "start_date": "2026-04-21",
+      "total_return": 0.08779646751606629,
+      "total_traded_notional_cny": 22315214.3743433,
+      "total_transaction_cost_cny": 23422.916464919115,
+      "trading_days": 108,
+      "turnover_over_average_nav": 21.013239720165025
+    },
+    "reversal": {
+      "annualized_return": -0.15785893843912102,
+      "annualized_volatility": 0.3178659803367842,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 1,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 4101,
+      "final_nav_cny": 928466.5294665407,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.23337754237499597,
+      "maximum_observed_symbol_weight": 0.03805426914559371,
+      "mean_cash_weight": 0.048992643327205335,
+      "minimum_cash_weight": 0.042955064819789314,
+      "one_way_turnover_over_average_nav": 10.708567065910573,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 0.8785769566113119,
+        "annualized_return_difference_95pct_low": -0.40883973256335376,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.433,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": -0.38366049565552474,
+      "sortino_rf_zero": -0.5631992616358135,
+      "start_date": "2026-04-21",
+      "total_return": -0.07153347053345938,
+      "total_traded_notional_cny": 20198787.74731019,
+      "total_transaction_cost_cny": 21177.07434625551,
+      "trading_days": 108,
+      "turnover_over_average_nav": 21.417134131821147
+    },
+    "ridge": {
+      "annualized_return": -0.29724788981328865,
+      "annualized_volatility": 0.33614642725628185,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 1,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 3070,
+      "final_nav_cny": 858654.6623519992,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.29817252247247394,
+      "maximum_observed_symbol_weight": 0.04037285981707439,
+      "mean_cash_weight": 0.049049106532781286,
+      "minimum_cash_weight": 0.042449422390821195,
+      "one_way_turnover_over_average_nav": 10.739656168805588,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 0.6194857226443754,
+        "annualized_return_difference_95pct_low": -0.5110094563668274,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.286,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": -0.8825365541542556,
+      "sortino_rf_zero": -1.249445432388846,
+      "start_date": "2026-04-21",
+      "total_return": -0.14134533764800083,
+      "total_traded_notional_cny": 19448797.071280904,
+      "total_transaction_cost_cny": 20380.975505240007,
+      "trading_days": 108,
+      "turnover_over_average_nav": 21.479312337611177
+    },
+    "static_fusion": {
+      "annualized_return": -0.018464630656557457,
+      "annualized_volatility": 0.2615851558008658,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 0,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 3896,
+      "final_nav_cny": 991981.0414523218,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.17733408394278516,
+      "maximum_observed_symbol_weight": 0.0389886055901186,
+      "mean_cash_weight": 0.04893252180492765,
+      "minimum_cash_weight": 0.046011178317788115,
+      "one_way_turnover_over_average_nav": 10.563494701379751,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 0.6432465575028605,
+        "annualized_return_difference_95pct_low": -0.22360354073486924,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.717,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": 0.058399202515148955,
+      "sortino_rf_zero": 0.08264233719917441,
+      "start_date": "2026-04-21",
+      "total_return": -0.008018958547678201,
+      "total_traded_notional_cny": 22158848.446438234,
+      "total_transaction_cost_cny": 23256.154051458554,
+      "trading_days": 108,
+      "turnover_over_average_nav": 21.126989402759502
+    },
+    "trend": {
+      "annualized_return": -0.11200404902572325,
+      "annualized_volatility": 0.35730435971123037,
+      "benchmark_annualized_return": -0.11299825251898654,
+      "benchmark_annualized_volatility": 0.20085809001534116,
+      "benchmark_final_nav_cny": 949518.3745701662,
+      "benchmark_maximum_drawdown": -0.12048600437080903,
+      "benchmark_sharpe_rf_zero": -0.4969906662464679,
+      "benchmark_total_return": -0.05048162542983381,
+      "blocked_orders": 2,
+      "cost_assumptions_bps": {
+        "commission_per_side_bps": 3.0,
+        "slippage_per_side_bps": 5.0,
+        "stamp_duty_sell_bps": 5.0,
+        "transfer_fee_per_side_bps": 0.1
+      },
+      "end_date": "2026-09-23",
+      "filled_orders": 1160,
+      "final_nav_cny": 949977.9954419876,
+      "initial_capital_cny": 1000000.0,
+      "liquidity_limited_orders": 0,
+      "liquidity_lookback_sessions": 20,
+      "maximum_daily_participation": 0.01,
+      "maximum_drawdown": -0.30011224304663864,
+      "maximum_observed_symbol_weight": 0.04288335891394543,
+      "mean_cash_weight": 0.047465444427539895,
+      "minimum_cash_weight": 0.014157082637292163,
+      "one_way_turnover_over_average_nav": 8.604067350577214,
+      "paired_block_bootstrap_vs_benchmark": {
+        "annualized_return_difference_95pct_high": 1.5421366822713218,
+        "annualized_return_difference_95pct_low": -0.4311424675274695,
+        "block_sessions": 20,
+        "probability_annualized_return_exceeds_benchmark": 0.514,
+        "repetitions": 1000,
+        "seed": 20260925
+      },
+      "partial_orders": 0,
+      "sharpe_rf_zero": -0.15528948925275107,
+      "sortino_rf_zero": -0.21950588341714006,
+      "start_date": "2026-04-21",
+      "total_return": -0.05002200455801231,
+      "total_traded_notional_cny": 19243303.062150743,
+      "total_transaction_cost_cny": 20164.83395046735,
+      "trading_days": 108,
+      "turnover_over_average_nav": 17.208134701154428
+    }
+  },
+  "processed_artifacts": {
+    "adaptive_fusion_daily_nav": "data/processed/mvp/oos_adaptive_fusion_daily_nav.csv",
+    "adaptive_fusion_orders": "data/processed/mvp/oos_adaptive_fusion_orders.csv",
+    "adaptive_fusion_positions": "data/processed/mvp/oos_adaptive_fusion_positions.csv",
+    "adaptive_inverse_volatility_daily_nav": "data/processed/mvp/oos_adaptive_inverse_volatility_daily_nav.csv",
+    "adaptive_inverse_volatility_orders": "data/processed/mvp/oos_adaptive_inverse_volatility_orders.csv",
+    "adaptive_inverse_volatility_positions": "data/processed/mvp/oos_adaptive_inverse_volatility_positions.csv",
+    "decision_log": "data/processed/mvp/oos_decision_log.jsonl.gz",
+    "equal_fusion_daily_nav": "data/processed/mvp/oos_equal_fusion_daily_nav.csv",
+    "equal_fusion_orders": "data/processed/mvp/oos_equal_fusion_orders.csv",
+    "equal_fusion_positions": "data/processed/mvp/oos_equal_fusion_positions.csv",
+    "liquidity_confirmation_daily_nav": "data/processed/mvp/oos_liquidity_confirmation_daily_nav.csv",
+    "liquidity_confirmation_orders": "data/processed/mvp/oos_liquidity_confirmation_orders.csv",
+    "liquidity_confirmation_positions": "data/processed/mvp/oos_liquidity_confirmation_positions.csv",
+    "regime_fusion_daily_nav": "data/processed/mvp/oos_regime_fusion_daily_nav.csv",
+    "regime_fusion_orders": "data/processed/mvp/oos_regime_fusion_orders.csv",
+    "regime_fusion_positions": "data/processed/mvp/oos_regime_fusion_positions.csv",
+    "reversal_daily_nav": "data/processed/mvp/oos_reversal_daily_nav.csv",
+    "reversal_orders": "data/processed/mvp/oos_reversal_orders.csv",
+    "reversal_positions": "data/processed/mvp/oos_reversal_positions.csv",
+    "ridge_daily_nav": "data/processed/mvp/oos_ridge_daily_nav.csv",
+    "ridge_orders": "data/processed/mvp/oos_ridge_orders.csv",
+    "ridge_positions": "data/processed/mvp/oos_ridge_positions.csv",
+    "static_fusion_daily_nav": "data/processed/mvp/oos_static_fusion_daily_nav.csv",
+    "static_fusion_orders": "data/processed/mvp/oos_static_fusion_orders.csv",
+    "static_fusion_positions": "data/processed/mvp/oos_static_fusion_positions.csv",
+    "trend_daily_nav": "data/processed/mvp/oos_trend_daily_nav.csv",
+    "trend_orders": "data/processed/mvp/oos_trend_orders.csv",
+    "trend_positions": "data/processed/mvp/oos_trend_positions.csv"
+  },
+  "protocol": {
+    "costs_bps": {
+      "commission_per_side_bps": 3.0,
+      "slippage_per_side_bps": 5.0,
+      "stamp_duty_sell_bps": 5.0,
+      "transfer_fee_per_side_bps": 0.1
+    },
+    "daily_marking": "adjusted open/close price ratios; suspended positions carry last value",
+    "decision": "after close; targets execute at next session open",
+    "decision_step_sessions": 5,
+    "execution_boundary": "unadjusted BaoStock tradestatus; no board-limit queue model",
+    "initial_comparison_date": "2026-04-20",
+    "invested_weight": 0.95,
+    "label": "next-session open to fifth-session close adjusted-price return",
+    "liquidity_limit": "order notional capped by trailing mean traded amount times configured participation",
+    "maximum_one_way_turnover": 0.5,
+    "maximum_symbol_weight": 0.05,
+    "regime": "risk_on when CSI 300 20-session price return is nonnegative; otherwise risk_off",
+    "regime_fallback": "global reliability until the state has enough matured windows",
+    "reliability": "only matured five-session Rank IC before each after-close decision",
+    "ridge": "three existing Agent scores, standardized using matured training rows only",
+    "risk_allocator": "top-decile eligibility, inverse trailing volatility, weight and turnover caps",
+    "static_weights": "first configured number of matured development windows, then frozen",
+    "top_fraction": 0.1,
+    "universe": "historical BaoStock membership snapshots as visible at each decision date"
+  },
+  "training_rows_at_end": 35833,
+  "training_seed_sha256": "4e068a008fffb0082ec5eba19d29cc5c784446b5fe3f771c999ada78bc9ec3e1"
+}

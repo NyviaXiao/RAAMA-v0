@@ -1,76 +1,31 @@
 # Risk-Aware Adaptive Multi-Agent Portfolio Decision System
 
-本仓库从零开始，不复用旧项目代码。当前包含 BaoStock 时点数据层、三个确定性量化专家、五日成熟结果驱动的基础可靠性门控，以及开发区间和锁定时间外区间的滚动诊断。当前成本仅为声明假设的情景计算，完整订单执行、风险优化、市场状态与文本 LLM Agent 仍属于后续阶段。系统决策链与模块责任见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段顺序与验收门槛见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
+这是一个从零实现的沪深300量化多智能体研究项目。当前已完成 P3–P8 首个可重放研究 MVP：三个确定性量价专家、Ridge 基线、成熟结果驱动的融合、简单状态条件权重、Top-K/逆波动率组合，以及带交易成本与有限成交规则的日线名义账户模拟。完整实验协议、开发期与时间外数字、实现限制见 [MVP_RESEARCH.md](MVP_RESEARCH.md)；模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段计划见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
 
-## 数据入口
+当前实验显示开发区间的自适应融合未超过等权基线；时间外只有 21 个评价窗口，不足以支持稳定性结论。模拟采用名义金额账本，不记录真实股数或券商成交回报，也未实现涨跌停排队、完整协方差优化或 CVaR。结果用于研究，不构成实盘策略验证。尚未实现文本 LLM、新闻/基本面 Agent、辩论、记忆或强化学习。
 
-当前唯一研究数据入口读取指定数据目录中的 `train.csv`：
+## 数据边界
 
-```python
-from adaptive_mas.data import load_training_bars
+研究运行器通过 BaoStock P2 点时数据层读取训练期间行情与成分快照；本地 `train.csv` 用于训练期代码与日期边界。OOS 运行器只读取明确指定的 BaoStock 时间外缓存。研究源码不加载或引用 `test.csv`，该文件不进入训练、特征、决策、组合和调参。原始外部 CSV 保持在原目录，不复制、不修改；BaoStock 原始/派生缓存由 Git 忽略。
 
-bars = load_training_bars(r"C:\Users\xiao\Desktop\THU-BDC2026\data")
-```
+## 环境与验证
 
-加载器不读取 `test.csv` 或 `stock_data.csv`。源 CSV 保持在原目录，不复制到本项目。字段与时间点规则见 [DATA_CONTRACT.md](DATA_CONTRACT.md)，实测限制和审计结果见 [DATA_AUDIT.md](DATA_AUDIT.md)。
+在项目目录的 PowerShell 中运行：
 
-P2 研究数据层把信号用后复权日线、执行用未复权日线、沪深300指数和可用成分快照分开提供：
-
-```python
-from datetime import date
-from adaptive_mas.data import load_research_data
-
-research = load_research_data(
-    r"C:\Users\xiao\Desktop\THU-BDC2026\data",
-    r"data\raw\baostock\fetch-20260924T115050Z",
-)
-snapshot = research.snapshot_at(date(2024, 1, 2))
-```
-
-## BaoStock 原始数据
-
-采集脚本只从 `train.csv` 确定日期范围，读取周度沪深300历史成分快照、348 个历史成员的未复权日线、本地训练集未覆盖 48 个成员的后复权日线，以及 `sh.000300` 指数日线。原始响应、抓取时间与 SHA-256 保存在 `data/raw/baostock/`，该目录已排除在 Git 跟踪之外。续传可通过 `--resume-run-dir` 指向已有采集目录。
-
-本次数据包位于 `data/raw/baostock/fetch-20260924T115050Z/`，截至 2026-03-06；基础采集已完成，清单含 509 个响应。重跑时可使用：
-
-重新采集方式：
-
-```text
-python scripts/acquire_phase2_market_data.py --training-data-dir "C:\Users\xiao\Desktop\THU-BDC2026\data"
-```
-
-## 验证
-
-在获得 BaoStock 原始数据后运行第一组固定参数诊断：
-
-```text
-python scripts/run_momentum_diagnostic.py --training-data-dir "C:\Users\xiao\Desktop\THU-BDC2026\data" --baostock-run-dir "data\raw\baostock\fetch-20260924T115050Z"
-```
-
-当前结果见 [baseline_momentum.json](experiments/baseline_momentum.json)。这是每五个交易日抽样一次的历史横截面 Rank IC 诊断，不是扣成本后的交易回测或独立最终测试。
-
-量化 Agent 研究重放：
-
-```text
-python scripts/run_agent_research.py --training-data-dir "C:\Users\xiao\Desktop\THU-BDC2026\data" --baostock-run-dir "data\raw\baostock\fetch-20260924T115050Z"
-```
-
-实现了 20 日趋势、5 日反转和成交额确认三个独立打分专家。融合以等权为基线；自适应门控仅使用此前已成熟窗口的 Rank IC，前 20 个窗口等权暖启动。真实数据指标、权重轨迹、配置哈希和限制见 [AGENT_RESEARCH.md](AGENT_RESEARCH.md) 与 [agent_research.json](experiments/agent_research.json)。这些 Top-Decile 数字是未扣成本的信号诊断，不表示已验证可交易策略。
-
-冻结后的时间外区间使用 BaoStock 2026-03-16 至 2026-09-23 数据，独立于本地未来评分文件；采集和运行方式如下：
-
-```text
-python scripts/acquire_phase2_market_data.py --oos-start-date 2026-03-16 --oos-end-date 2026-09-23 --resume-run-dir "data\raw\baostock\fetch-20260924T150656Z"
-python scripts/run_oos_agent_research.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z"
-```
-
-21 个非重叠窗口及成本假设下的净收益见 [OOS_RESEARCH.md](OOS_RESEARCH.md) 和 [oos_agent_research.json](experiments/oos_agent_research.json)。这仍是 Top-Decile 收益诊断，没有模拟真实成交、停牌延期退出或按账户规模收取的最低佣金。
-
-在本项目目录的 PowerShell 中执行（需要 Python 3.11 或更新版本）：
-
-```text
+```powershell
 python -m pip install -e ".[dev]"
-python -m pytest -q
+python -m pytest -q -p no:cacheprovider
 ```
 
-测试采用 pytest 作为统一入口；覆盖本地训练数据边界、BaoStock 响应错误和格式错误、样本外独立加载、门控成熟历史初始化与成本公式。当前 22 项测试通过。真实 API 采集只在用户显式运行采集脚本或授权采集时执行。
+已验证项目虚拟环境下 30 项测试全部通过。
+
+## 重放研究实验
+
+依赖当前机器已有的 BaoStock 缓存；本次没有新增下载：
+
+```powershell
+.venv\Scripts\python.exe scripts\run_mvp_research.py --training-data-dir "C:\Users\xiao\Desktop\THU-BDC2026\data" --baostock-run-dir "data\raw\baostock\fetch-20260924T115050Z"
+.venv\Scripts\python.exe scripts\run_mvp_oos_research.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z"
+```
+
+公开实验汇总保存在 `experiments/`。大型逐日决策、订单、持仓及净值轨迹保存在 Git 忽略的 `data/processed/mvp/`。

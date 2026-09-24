@@ -1,0 +1,35 @@
+# Frozen first full-portfolio prototype protocol.
+decision_step_sessions = 5
+feature_trend_sessions = 20
+feature_reversal_sessions = 5
+feature_liquidity_return_sessions = 5
+feature_recent_amount_sessions = 5
+feature_reference_amount_sessions = 20
+evaluation_top_fraction = 0.10
+portfolio_top_fraction = 0.10
+invested_weight = 0.95
+initial_capital_cny = 1000000.0
+maximum_symbol_weight = 0.05
+maximum_one_way_turnover = 0.50
+liquidity_lookback_sessions = 20
+maximum_daily_participation = 0.01
+reliability_lookback_windows = 20
+reliability_minimum_windows = 20
+reliability_equal_weight_share = 0.50
+regime_lookback_sessions = 20
+regime_minimum_windows = 20
+ridge_alpha = 1.0
+ridge_minimum_training_rows = 300
+risk_lookback_sessions = 60
+risk_minimum_observations = 40
+
+# Illustrative assumptions, not broker-specific or a claim about current fees.
+commission_per_side_bps = 3.0
+transfer_fee_per_side_bps = 0.1
+stamp_duty_sell_bps = 5.0
+slippage_per_side_bps = 5.0
+
+# Research fills use adjusted prices for consistent total-return accounting and
+# BaoStock unadjusted tradestatus to decide whether a daily-bar order can fill.
+# Exact limit-price queues and board-specific order rules are out of scope here.
+# A daily order is capped at 1% of trailing mean traded amount, known at decision time.
