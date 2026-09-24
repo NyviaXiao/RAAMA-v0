@@ -1,0 +1,544 @@
+{
+  "protocol": {
+    "feature": "close(t) / close(t-20) - 1",
+    "decision": "after close; input bars available through decision_date",
+    "target": "adjusted_close(t+5) / adjusted_open(t+1) - 1",
+    "evaluation_step_sessions": 5,
+    "non_overlapping_targets": true,
+    "test_csv_loaded": false
+  },
+  "data": {
+    "start_date": "2024-01-02",
+    "end_date": "2026-03-06",
+    "trading_dates": 524,
+    "adjusted_bars": 181381,
+    "membership_snapshots": 112,
+    "baostock_manifest_sha256": "bbecb9dba4e16588d1c5b5cbfcc82d4b67eb85e753379df3cf79beef257cdaea"
+  },
+  "summary": {
+    "observations": 100,
+    "mean_rank_ic": -0.017981824153470306,
+    "median_rank_ic": 0.014774420198893997,
+    "positive_rank_ic_fraction": 0.53,
+    "mean_cross_section": 299.97
+  },
+  "by_year": {
+    "2024": {
+      "observations": 45,
+      "mean_rank_ic": -0.020326654984243332,
+      "positive_fraction": 0.5111111111111111
+    },
+    "2025": {
+      "observations": 48,
+      "mean_rank_ic": -0.02690435021649558,
+      "positive_fraction": 0.5
+    },
+    "2026": {
+      "observations": 7,
+      "mean_rank_ic": 0.05827512419081534,
+      "positive_fraction": 0.8571428571428571
+    }
+  },
+  "observations_by_date": [
+    {
+      "decision_date": "2024-01-30",
+      "rank_ic": 0.1810713452371693,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-02-06",
+      "rank_ic": -0.3274116379070879,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-02-21",
+      "rank_ic": -0.5118171601894352,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-02-28",
+      "rank_ic": -0.06540006726742197,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-03-06",
+      "rank_ic": 0.01903088657913568,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-03-13",
+      "rank_ic": 0.05551027066118018,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-03-20",
+      "rank_ic": -0.32087511252911105,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-03-27",
+      "rank_ic": 0.1376824951846873,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-04-03",
+      "rank_ic": 0.2143149209724413,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-04-12",
+      "rank_ic": 0.29064370611270374,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-04-19",
+      "rank_ic": -0.5461303715210853,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-04-26",
+      "rank_ic": -0.1490567672974144,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-05-08",
+      "rank_ic": 0.19216459537343097,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-05-15",
+      "rank_ic": -0.06509361938395127,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-05-22",
+      "rank_ic": -0.2576477802695357,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-05-29",
+      "rank_ic": -0.17039119367025005,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-06-05",
+      "rank_ic": 0.1355989605208596,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-06-13",
+      "rank_ic": 0.25134951649424564,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-06-20",
+      "rank_ic": 0.10780501691271768,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-06-27",
+      "rank_ic": 0.3296974777161409,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-07-04",
+      "rank_ic": -0.1297032477479221,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-07-11",
+      "rank_ic": 0.007836976837184555,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-07-18",
+      "rank_ic": 0.02109469289305015,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-07-25",
+      "rank_ic": -0.06808757450116147,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-08-01",
+      "rank_ic": -0.09373203450270179,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-08-08",
+      "rank_ic": -0.09042123694943743,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-08-15",
+      "rank_ic": -0.0236096009088103,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-08-22",
+      "rank_ic": -0.26366443871452644,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-08-29",
+      "rank_ic": -0.11538401281348923,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-09-05",
+      "rank_ic": 0.1572052469687822,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-09-12",
+      "rank_ic": 0.007048761433367349,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-09-23",
+      "rank_ic": 0.020481787682483127,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-09-30",
+      "rank_ic": -0.31048211646796076,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-10-14",
+      "rank_ic": 0.43105483739317785,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-10-21",
+      "rank_ic": -0.1665203131724044,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-10-28",
+      "rank_ic": -0.20607133884815107,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-11-04",
+      "rank_ic": 0.22127722364793956,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-11-11",
+      "rank_ic": -0.6725828812078933,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-11-18",
+      "rank_ic": 0.13312503472260803,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-11-25",
+      "rank_ic": -0.0951981794462366,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-12-02",
+      "rank_ic": -0.024326506031460606,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-12-09",
+      "rank_ic": 0.32977795970577367,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-12-16",
+      "rank_ic": 0.06031800353337259,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-12-23",
+      "rank_ic": 0.2953431624481506,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2024-12-30",
+      "rank_ic": 0.15947483802589654,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-01-07",
+      "rank_ic": -0.22819478904756257,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-01-14",
+      "rank_ic": 0.18119930488006805,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-01-21",
+      "rank_ic": -0.10799333191784098,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-02-05",
+      "rank_ic": -0.15602163584441875,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-02-12",
+      "rank_ic": -0.032211053199305055,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-02-19",
+      "rank_ic": 0.07221807401876469,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-02-26",
+      "rank_ic": -0.37679687566660935,
+      "cross_section": 299
+    },
+    {
+      "decision_date": "2025-03-05",
+      "rank_ic": -0.09935524375526171,
+      "cross_section": 299
+    },
+    {
+      "decision_date": "2025-03-12",
+      "rank_ic": -0.08967304618555268,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-03-19",
+      "rank_ic": -0.09767853803537539,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-03-26",
+      "rank_ic": 0.011147684373242747,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-04-02",
+      "rank_ic": 0.11939446424837553,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-04-10",
+      "rank_ic": 0.1258136972871666,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-04-17",
+      "rank_ic": -0.2733773492483935,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-04-24",
+      "rank_ic": -0.4472892680737012,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-05-06",
+      "rank_ic": -0.26003502268983353,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-05-13",
+      "rank_ic": 0.018401156024545246,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-05-20",
+      "rank_ic": 0.031205495978918158,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-05-27",
+      "rank_ic": 0.038716250976424726,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-06-04",
+      "rank_ic": 0.0445376554602609,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-06-11",
+      "rank_ic": 0.19251002372806528,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-06-18",
+      "rank_ic": -0.08675972199181843,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-06-25",
+      "rank_ic": -0.09374167001079292,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-07-02",
+      "rank_ic": 0.13562900609114295,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-07-09",
+      "rank_ic": -0.12762349360503175,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-07-16",
+      "rank_ic": -0.059129153994292374,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-07-23",
+      "rank_ic": 0.19874800817209295,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-07-30",
+      "rank_ic": -0.3879167277795505,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-08-06",
+      "rank_ic": 0.2018422672733642,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-08-13",
+      "rank_ic": 0.10810054041145976,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-08-20",
+      "rank_ic": 0.1410980749111018,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-08-27",
+      "rank_ic": 0.08377563474067638,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-09-03",
+      "rank_ic": -0.10081423628458717,
+      "cross_section": 299
+    },
+    {
+      "decision_date": "2025-09-10",
+      "rank_ic": 0.3104489399815261,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-09-17",
+      "rank_ic": 0.18279981008668317,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-09-24",
+      "rank_ic": 0.16564198770385244,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-10-09",
+      "rank_ic": -0.4884097420790638,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-10-16",
+      "rank_ic": -0.26289728935730533,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-10-23",
+      "rank_ic": 0.1582420634965704,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-10-30",
+      "rank_ic": 0.1550574679311092,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-11-06",
+      "rank_ic": 0.09874077335847635,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-11-13",
+      "rank_ic": -0.0968730763675152,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-11-20",
+      "rank_ic": -0.25258019820257843,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-11-27",
+      "rank_ic": -0.11663113847441132,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-12-04",
+      "rank_ic": -0.14358148592918632,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-12-11",
+      "rank_ic": 0.05872693999596954,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-12-18",
+      "rank_ic": -0.009713924566040538,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2025-12-25",
+      "rank_ic": 0.26989388078438376,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2026-01-05",
+      "rank_ic": 0.08244051736159601,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2026-01-12",
+      "rank_ic": 0.05191971107222196,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2026-01-19",
+      "rank_ic": 0.12523686400619294,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2026-01-26",
+      "rank_ic": -0.3555485134996742,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2026-02-02",
+      "rank_ic": 0.04211762588212012,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2026-02-09",
+      "rank_ic": 0.1567610967517048,
+      "cross_section": 300
+    },
+    {
+      "decision_date": "2026-02-24",
+      "rank_ic": 0.30499856776154577,
+      "cross_section": 300
+    }
+  ]
+}
