@@ -1,0 +1,10 @@
+evaluation_step_sessions = 5
+trend_lookback_sessions = 20
+reversal_lookback_sessions = 5
+liquidity_return_lookback_sessions = 5
+liquidity_recent_amount_sessions = 5
+liquidity_reference_amount_sessions = 20
+reliability_lookback_windows = 20
+reliability_minimum_history_windows = 20
+equal_weight_share = 0.5
+top_decile_fraction = 0.1

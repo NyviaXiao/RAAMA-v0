@@ -1,6 +1,6 @@
 # Risk-Aware Adaptive Multi-Agent Portfolio Decision System
 
-本仓库从零开始，不复用旧项目代码。当前包含数据审计、训练数据边界、BaoStock 单源接口、时点数据层、20 日动量与五日目标的诊断基线；尚未实现多 Agent、可靠性门控、风险优化或交易回测。系统决策链与模块责任见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段顺序与验收门槛见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
+本仓库从零开始，不复用旧项目代码。当前包含 BaoStock 时点数据层、三个确定性量化专家、五日成熟结果驱动的基础可靠性门控，以及真实训练区间上的滚动诊断。完整交易执行、交易成本、风险优化、市场状态与文本 LLM Agent 仍属于后续阶段。系统决策链与模块责任见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段顺序与验收门槛见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
 
 ## 数据入口
 
@@ -48,6 +48,14 @@ python scripts/run_momentum_diagnostic.py --training-data-dir "C:\Users\xiao\Des
 ```
 
 当前结果见 [baseline_momentum.json](experiments/baseline_momentum.json)。这是每五个交易日抽样一次的历史横截面 Rank IC 诊断，不是扣成本后的交易回测或独立最终测试。
+
+量化 Agent 研究重放：
+
+```text
+python scripts/run_agent_research.py --training-data-dir "C:\Users\xiao\Desktop\THU-BDC2026\data" --baostock-run-dir "data\raw\baostock\fetch-20260924T115050Z"
+```
+
+实现了 20 日趋势、5 日反转和成交额确认三个独立打分专家。融合以等权为基线；自适应门控仅使用此前已成熟窗口的 Rank IC，前 20 个窗口等权暖启动。真实数据指标、权重轨迹、配置哈希和限制见 [AGENT_RESEARCH.md](AGENT_RESEARCH.md) 与 [agent_research.json](experiments/agent_research.json)。这些 Top-Decile 数字是未扣成本的信号诊断，不表示已验证可交易策略。
 
 在本项目目录的 PowerShell 中执行（需要 Python 3.11 或更新版本）：
 
