@@ -129,4 +129,4 @@ P9 才接入财报/公告文本；P10 才考虑新闻/宏观；P11 的辩论/记
 
 ### 代码协作与 Git 同步
 
-本地仓库在 `main`，`origin` 已设为 [GitHub RAAMA-v0](https://github.com/NyviaXiao/RAAMA-v0.git)。每个里程碑保留可审查的代码与实验记录；本次样本外实现和报告待本轮验收后提交并同步到远端。用户提供的未跟踪 `base.md` 不纳入提交。
+本地仓库在 `main`，`origin` 已设为 [GitHub RAAMA-v0](https://github.com/NyviaXiao/RAAMA-v0.git)。本次样本外实现和报告已通过独立分支审查、快进整合，并于提交 `ba818c5` 推送至 `origin/main`。用户提供的未跟踪 `base.md` 未纳入提交。
