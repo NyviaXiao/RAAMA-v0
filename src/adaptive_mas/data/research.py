@@ -342,3 +342,103 @@ def load_research_data(data_dir: str | Path, baostock_run_dir: str | Path) -> Re
         index_bars,
         membership_snapshots,
     )
+
+
+def load_oos_research_data(baostock_run_dir: str | Path) -> ResearchData:
+    """Load only the explicitly acquired BaoStock out-of-sample period."""
+    run_dir = Path(baostock_run_dir)
+    index_path = run_dir / "index" / "sh.000300.csv"
+    index_rows = _read_rows(index_path, INDEX_FIELDS)
+    index_bars = []
+    seen_index_dates = set()
+    for row in index_rows:
+        trade_date = date.fromisoformat(row["date"])
+        if trade_date in seen_index_dates:
+            raise ValueError(f"沪深300指数存在重复交易日：{trade_date}")
+        seen_index_dates.add(trade_date)
+        index_bars.append(
+            {
+                "symbol": row["code"],
+                "trade_date": trade_date,
+                "available_at": trade_date,
+                "open": _number(row, "open", index_path),
+                "high": _number(row, "high", index_path),
+                "low": _number(row, "low", index_path),
+                "close": _number(row, "close", index_path),
+                "return_1d": _number(row, "pctChg", index_path),
+                "source": "BaoStock",
+                "source_ref": index_path.as_posix(),
+            }
+        )
+    trading_dates = tuple(sorted(seen_index_dates))
+    if not trading_dates:
+        raise ValueError(f"样本外沪深300指数没有交易日：{index_path}")
+
+    membership_snapshots = []
+    membership_codes: set[str] = set()
+    for path in sorted((run_dir / "membership").glob("asof-*.csv")):
+        query_date = date.fromisoformat(path.stem.removeprefix("asof-"))
+        rows = _read_rows(path, {"updateDate", "code", "code_name"})
+        if not rows:
+            raise ValueError(f"沪深300成分快照为空：{path}")
+        update_dates = {date.fromisoformat(row["updateDate"]) for row in rows}
+        if len(update_dates) != 1:
+            raise ValueError(f"同一成分快照含多个 updateDate：{path}")
+        update_date = next(iter(update_dates))
+        if update_date > query_date:
+            raise ValueError(f"成分快照 updateDate 晚于请求日期：{path}")
+        snapshot_members = frozenset(_symbol(row["code"], path) for row in rows)
+        if len(snapshot_members) != len(rows):
+            raise ValueError(f"成分快照存在重复股票代码：{path}")
+        membership_codes.update(row["code"] for row in rows)
+        available_index = bisect_right(trading_dates, update_date)
+        if available_index == len(trading_dates):
+            raise ValueError(f"成分快照之后没有可用的样本外交易日：{path}")
+        membership_snapshots.append(
+            MembershipSnapshot(
+                event_time=update_date,
+                available_at=trading_dates[available_index],
+                members=snapshot_members,
+                source_ref=path.as_posix(),
+            )
+        )
+    if not membership_codes:
+        raise ValueError(f"没有可用的样本外沪深300成分快照：{run_dir}")
+
+    expected_files = {f"{code}.csv" for code in membership_codes}
+    adjusted_dir = run_dir / "daily-adjusted"
+    adjusted_files = {path.name for path in adjusted_dir.glob("*.csv")}
+    if adjusted_files != expected_files:
+        raise ValueError(
+            "样本外后复权行情文件不完整或有多余文件："
+            f"缺少 {sorted(expected_files - adjusted_files)}，"
+            f"多余 {sorted(adjusted_files - expected_files)}"
+        )
+    adjusted_bars = _provider_bars(
+        adjusted_dir, adjusted_files, EQUITY_FIELDS, "1", trading_dates
+    )
+    expected_symbols = {_symbol(code, run_dir) for code in membership_codes}
+    if {str(row["symbol"]) for row in adjusted_bars} != expected_symbols:
+        raise ValueError("样本外后复权行情与成分股票池覆盖不一致")
+
+    execution_dir = run_dir / "daily-unadjusted"
+    execution_files = {path.name for path in execution_dir.glob("*.csv")}
+    if execution_files != expected_files:
+        raise ValueError(
+            "样本外未复权行情文件不完整或有多余文件："
+            f"缺少 {sorted(expected_files - execution_files)}，"
+            f"多余 {sorted(execution_files - expected_files)}"
+        )
+    execution_bars = _provider_bars(
+        execution_dir, execution_files, EQUITY_FIELDS, "3", trading_dates
+    )
+    if {str(row["symbol"]) for row in execution_bars} != expected_symbols:
+        raise ValueError("样本外未复权行情与成分股票池覆盖不一致")
+
+    return ResearchData(
+        list(trading_dates),
+        adjusted_bars,
+        execution_bars,
+        index_bars,
+        membership_snapshots,
+    )

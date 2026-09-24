@@ -45,7 +45,17 @@ def save_response(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--training-data-dir", type=Path, required=True)
+    parser.add_argument("--training-data-dir", type=Path)
+    parser.add_argument(
+        "--oos-start-date",
+        type=date.fromisoformat,
+        help="增量样本外数据起始日；设置后不读取本地训练或测试 CSV。",
+    )
+    parser.add_argument(
+        "--oos-end-date",
+        type=date.fromisoformat,
+        help="增量样本外数据结束日（应为已经完整收盘的交易日）。",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -58,16 +68,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    training_bars = load_training_bars(args.training_data_dir)
-    training_symbols = {str(row["symbol"]) for row in training_bars}
-    sessions = sorted({row["trade_date"] for row in training_bars})
-    start_date = sessions[0]
-    end_date = sessions[-1]
-    snapshots_by_week: dict[tuple[int, int], date] = {}
-    for trade_date in sessions:
-        iso_date = trade_date.isocalendar()
-        snapshots_by_week.setdefault((iso_date.year, iso_date.week), trade_date)
-    snapshot_dates = sorted(snapshots_by_week.values())
+    oos_mode = args.oos_start_date is not None or args.oos_end_date is not None
+    if oos_mode:
+        if args.oos_start_date is None or args.oos_end_date is None:
+            raise ValueError("样本外采集必须同时提供 --oos-start-date 和 --oos-end-date")
+        if args.oos_start_date > args.oos_end_date:
+            raise ValueError("样本外采集起始日不能晚于结束日")
+        start_date = args.oos_start_date
+        end_date = args.oos_end_date
+        training_symbols = set()
+        sessions = []
+    else:
+        if args.training_data_dir is None:
+            raise ValueError("常规历史采集必须提供 --training-data-dir")
+        training_bars = load_training_bars(args.training_data_dir)
+        training_symbols = {str(row["symbol"]) for row in training_bars}
+        sessions = sorted({row["trade_date"] for row in training_bars})
+        start_date = sessions[0]
+        end_date = sessions[-1]
 
     if args.resume_run_dir:
         run_dir = args.resume_run_dir
@@ -89,6 +107,43 @@ def main() -> None:
     for line in manifest_path.read_text(encoding="utf-8").splitlines():
         if line:
             completed_responses.add(json.loads(line)["response_file"])
+
+    index_relative_path = "index/sh.000300.csv"
+    index_path = run_dir / index_relative_path
+    if oos_mode:
+        if index_relative_path in completed_responses:
+            with index_path.open(encoding="utf-8", newline="") as cached:
+                index_rows = list(csv.DictReader(cached))
+        else:
+            if index_path.exists():
+                raise FileExistsError(f"响应文件已存在但未写入清单：{index_path}")
+            with BaoStockSource() as source:
+                fields, index_rows = source.index_daily("sh.000300", start_date, end_date)
+            if not index_rows:
+                raise RuntimeError(f"BaoStock 指数在样本外区间没有返回交易日：{start_date} 至 {end_date}")
+            save_response(
+                index_path,
+                fields,
+                index_rows,
+                manifest_path,
+                "query_history_k_data_plus",
+                {
+                    "code": "sh.000300",
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "frequency": "d",
+                },
+            )
+            completed_responses.add(index_relative_path)
+        sessions = sorted({date.fromisoformat(row["date"]) for row in index_rows})
+        if not sessions or sessions[0] < start_date or sessions[-1] > end_date:
+            raise ValueError("BaoStock 指数返回日期超出样本外采集区间")
+
+    snapshots_by_week: dict[tuple[int, int], date] = {}
+    for trade_date in sessions:
+        iso_date = trade_date.isocalendar()
+        snapshots_by_week.setdefault((iso_date.year, iso_date.week), trade_date)
+    snapshot_dates = sorted(snapshots_by_week.values())
 
     pending_snapshot_dates = []
     for query_date in snapshot_dates:
@@ -166,16 +221,19 @@ def main() -> None:
                         f"{daily_count}/{len(member_codes)}。"
                     )
 
-    missing_adjusted_codes = sorted(
-        code for code in member_codes if code.split(".", 1)[1] not in training_symbols
+    adjusted_codes = sorted(
+        member_codes
+        if oos_mode
+        else (code for code in member_codes if code.split(".", 1)[1] not in training_symbols)
     )
+    adjusted_directory = "daily-adjusted" if oos_mode else "daily-adjusted-missing"
     completed_adjusted = sum(
-        path.startswith("daily-adjusted-missing/") for path in completed_responses
+        path.startswith(f"{adjusted_directory}/") for path in completed_responses
     )
     adjusted_count = completed_adjusted
     pending_adjusted_codes = []
-    for code in missing_adjusted_codes:
-        relative_path = f"daily-adjusted-missing/{code}.csv"
+    for code in adjusted_codes:
+        relative_path = f"{adjusted_directory}/{code}.csv"
         response_path = run_dir / relative_path
         if relative_path in completed_responses:
             continue
@@ -190,7 +248,7 @@ def main() -> None:
                 fields, rows = source.daily_bars(
                     code, start_date, end_date, adjustflag="1"
                 )
-                response_path = run_dir / "daily-adjusted-missing" / f"{code}.csv"
+                response_path = run_dir / adjusted_directory / f"{code}.csv"
                 save_response(
                     response_path,
                     fields,
@@ -206,15 +264,13 @@ def main() -> None:
                     },
                 )
                 adjusted_count += 1
-                completed_responses.add(f"daily-adjusted-missing/{code}.csv")
-                if adjusted_count % 25 == 0 or adjusted_count == len(missing_adjusted_codes):
+                completed_responses.add(f"{adjusted_directory}/{code}.csv")
+                if adjusted_count % 25 == 0 or adjusted_count == len(adjusted_codes):
                     print(
                         "已缓存训练集未覆盖股票的后复权日线："
-                        f"{adjusted_count}/{len(missing_adjusted_codes)}。"
+                        f"{adjusted_count}/{len(adjusted_codes)}。"
                     )
 
-    index_relative_path = "index/sh.000300.csv"
-    index_path = run_dir / index_relative_path
     if index_relative_path not in completed_responses:
         if index_path.exists():
             raise FileExistsError(f"响应文件已存在但未写入清单：{index_path}")

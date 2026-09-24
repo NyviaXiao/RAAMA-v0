@@ -1,6 +1,6 @@
 # Risk-Aware Adaptive Multi-Agent Portfolio Decision System
 
-本仓库从零开始，不复用旧项目代码。当前包含 BaoStock 时点数据层、三个确定性量化专家、五日成熟结果驱动的基础可靠性门控，以及真实训练区间上的滚动诊断。完整交易执行、交易成本、风险优化、市场状态与文本 LLM Agent 仍属于后续阶段。系统决策链与模块责任见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段顺序与验收门槛见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
+本仓库从零开始，不复用旧项目代码。当前包含 BaoStock 时点数据层、三个确定性量化专家、五日成熟结果驱动的基础可靠性门控，以及开发区间和锁定时间外区间的滚动诊断。当前成本仅为声明假设的情景计算，完整订单执行、风险优化、市场状态与文本 LLM Agent 仍属于后续阶段。系统决策链与模块责任见 [ARCHITECTURE.md](ARCHITECTURE.md)，阶段顺序与验收门槛见 [EXECUTION_PLAN.md](EXECUTION_PLAN.md)。
 
 ## 数据入口
 
@@ -57,6 +57,15 @@ python scripts/run_agent_research.py --training-data-dir "C:\Users\xiao\Desktop\
 
 实现了 20 日趋势、5 日反转和成交额确认三个独立打分专家。融合以等权为基线；自适应门控仅使用此前已成熟窗口的 Rank IC，前 20 个窗口等权暖启动。真实数据指标、权重轨迹、配置哈希和限制见 [AGENT_RESEARCH.md](AGENT_RESEARCH.md) 与 [agent_research.json](experiments/agent_research.json)。这些 Top-Decile 数字是未扣成本的信号诊断，不表示已验证可交易策略。
 
+冻结后的时间外区间使用 BaoStock 2026-03-16 至 2026-09-23 数据，独立于本地未来评分文件；采集和运行方式如下：
+
+```text
+python scripts/acquire_phase2_market_data.py --oos-start-date 2026-03-16 --oos-end-date 2026-09-23 --resume-run-dir "data\raw\baostock\fetch-20260924T150656Z"
+python scripts/run_oos_agent_research.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z"
+```
+
+21 个非重叠窗口及成本假设下的净收益见 [OOS_RESEARCH.md](OOS_RESEARCH.md) 和 [oos_agent_research.json](experiments/oos_agent_research.json)。这仍是 Top-Decile 收益诊断，没有模拟真实成交、停牌延期退出或按账户规模收取的最低佣金。
+
 在本项目目录的 PowerShell 中执行（需要 Python 3.11 或更新版本）：
 
 ```text
@@ -64,4 +73,4 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-测试采用 pytest 作为统一入口；覆盖本地训练数据边界、BaoStock 响应错误和格式错误。真实 API 采集只在用户显式运行采集脚本或授权采集时执行。
+测试采用 pytest 作为统一入口；覆盖本地训练数据边界、BaoStock 响应错误和格式错误、样本外独立加载、门控成熟历史初始化与成本公式。当前 22 项测试通过。真实 API 采集只在用户显式运行采集脚本或授权采集时执行。

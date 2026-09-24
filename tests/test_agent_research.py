@@ -81,3 +81,35 @@ def test_agent_research_replays_matured_outcomes_before_changing_gate_weights():
         and record["evidence"]["end_date"] == record["decision_date"]
         for record in result["signal_records"]
     )
+
+    out_of_sample = run_agent_research(
+        research,
+        evaluation_step_sessions=5,
+        reliability_lookback_windows=2,
+        reliability_minimum_history_windows=2,
+        equal_weight_share=0.5,
+        top_decile_fraction=0.5,
+        trend_lookback_sessions=20,
+        reversal_lookback_sessions=5,
+        liquidity_return_lookback_sessions=5,
+        liquidity_recent_amount_sessions=5,
+        liquidity_reference_amount_sessions=20,
+        transaction_costs={
+            "commission_per_side": 3.0,
+            "transfer_fee_per_side": 0.1,
+            "stamp_duty_sell": 5.0,
+            "slippage_per_side": 5.0,
+        },
+        initial_matured_rank_ics=[
+            {"trend": 0.1, "reversal": 0.0, "liquidity_confirmation": 0.0},
+            {"trend": 0.1, "reversal": 0.0, "liquidity_confirmation": 0.0},
+        ],
+    )
+    assert [
+        row["reliability_history_windows"] for row in out_of_sample["observations"]
+    ] == [2, 3, 4, 5]
+    assert all(
+        row["methods"]["trend"]["top_decile_net_return"]
+        < row["methods"]["trend"]["top_decile_gross_return"]
+        for row in out_of_sample["observations"]
+    )

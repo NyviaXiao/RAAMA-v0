@@ -53,10 +53,31 @@ def percentile_scores(scores_by_symbol: dict[str, float]) -> dict[str, float]:
     }
 
 
+def net_return_after_costs(gross_return: float, costs_bps: dict[str, float]) -> float:
+    buy_slippage = costs_bps["slippage_per_side"] / 10_000
+    sell_slippage = buy_slippage
+    buy_fees = (
+        costs_bps["commission_per_side"] + costs_bps["transfer_fee_per_side"]
+    ) / 10_000
+    sell_fees = (
+        costs_bps["commission_per_side"]
+        + costs_bps["transfer_fee_per_side"]
+        + costs_bps["stamp_duty_sell"]
+    ) / 10_000
+    return (
+        (1 + gross_return)
+        * (1 - sell_slippage)
+        * (1 - sell_fees)
+        / ((1 + buy_slippage) * (1 + buy_fees))
+        - 1
+    )
+
+
 def _evaluate_pending(
     research: ResearchData,
     pending: dict[str, object],
     top_decile_fraction: float,
+    transaction_costs: dict[str, float] | None,
 ) -> dict[str, object]:
     decision_date = pending["decision_date"]
     labels = five_session_forward_returns(research, [decision_date])
@@ -91,12 +112,16 @@ def _evaluate_pending(
         ordered_scores = [score_by_symbol[symbol] for symbol in shared_symbols]
         ranked = sorted(shared_symbols, key=lambda symbol: (-score_by_symbol[symbol], symbol))
         holding_count = max(1, math.ceil(len(ranked) * top_decile_fraction))
+        selected_returns = [outcomes[symbol] for symbol in ranked[:holding_count]]
         per_method[method] = {
             "rank_ic": rank_ic(ordered_scores, ordered_outcomes),
-            "top_decile_gross_return": statistics.fmean(
-                outcomes[symbol] for symbol in ranked[:holding_count]
-            ),
+            "top_decile_gross_return": statistics.fmean(selected_returns),
         }
+        if transaction_costs is not None:
+            per_method[method]["top_decile_net_return"] = statistics.fmean(
+                net_return_after_costs(value, transaction_costs)
+                for value in selected_returns
+            )
 
     signal_correlations = {}
     for left_index, left_agent in enumerate(AGENT_IDS):
@@ -135,6 +160,8 @@ def run_agent_research(
     liquidity_return_lookback_sessions: int,
     liquidity_recent_amount_sessions: int,
     liquidity_reference_amount_sessions: int,
+    transaction_costs: dict[str, float] | None = None,
+    initial_matured_rank_ics: list[dict[str, float]] | None = None,
 ) -> dict[str, object]:
     first_decision_index = max(
         trend_lookback_sessions,
@@ -155,13 +182,15 @@ def run_agent_research(
     if len(decision_dates) <= reliability_minimum_history_windows:
         raise ValueError("成熟的五日评价窗口不足以同时完成门控暖启动和其后验收")
 
-    matured_rank_ics: list[dict[str, float]] = []
+    matured_rank_ics = list(initial_matured_rank_ics or [])
     observations = []
     signal_records = []
     pending = None
     for decision_date in decision_dates:
         if pending is not None:
-            observation = _evaluate_pending(research, pending, top_decile_fraction)
+            observation = _evaluate_pending(
+                research, pending, top_decile_fraction, transaction_costs
+            )
             matured_rank_ics.append(
                 {
                     agent_id: observation["methods"][agent_id]["rank_ic"]
@@ -216,11 +245,13 @@ def run_agent_research(
         }
 
     if pending is not None:
-        observations.append(_evaluate_pending(research, pending, top_decile_fraction))
+        observations.append(
+            _evaluate_pending(research, pending, top_decile_fraction, transaction_costs)
+        )
 
     def summarize_method(rows: list[dict[str, object]], method: str) -> dict[str, object]:
         method_rows = [row["methods"][method] for row in rows]
-        return {
+        summary = {
             "observations": len(method_rows),
             "mean_rank_ic": statistics.fmean(row["rank_ic"] for row in method_rows),
             "median_rank_ic": statistics.median(row["rank_ic"] for row in method_rows),
@@ -231,6 +262,11 @@ def run_agent_research(
                 row["top_decile_gross_return"] for row in method_rows
             ),
         }
+        if method_rows and "top_decile_net_return" in method_rows[0]:
+            summary["mean_top_decile_net_return"] = statistics.fmean(
+                row["top_decile_net_return"] for row in method_rows
+            )
+        return summary
 
     by_method = {
         method: summarize_method(observations, method) for method in METHODS
@@ -276,20 +312,20 @@ def run_agent_research(
             "decision": "after close; next-session open entry; fifth-session close exit",
             "evaluation_step_sessions": evaluation_step_sessions,
             "non_overlapping_targets": True,
-            "reliability_update": "previous matured per-window Rank IC only",
+            "reliability_update": "previous matured per-window Rank IC only; optional historical seed is cutoff-checked by the OOS runner",
+            "initial_matured_history_windows": len(initial_matured_rank_ics or []),
             "reliability_lookback_windows": reliability_lookback_windows,
             "reliability_minimum_history_windows": reliability_minimum_history_windows,
             "equal_weight_share": equal_weight_share,
             "top_decile_fraction": top_decile_fraction,
-            "transaction_costs_included": False,
+            "transaction_costs_included": transaction_costs is not None,
+            "transaction_cost_assumptions_bps": transaction_costs,
             "source_rows_used_for_agent_input": "adjusted_bars only",
         },
         "summary": {
             "decision_windows": len(decision_dates),
             "evaluated_windows": len(observations),
-            "adaptive_windows_after_warmup": max(
-                0, len(observations) - reliability_minimum_history_windows
-            ),
+            "adaptive_windows_after_warmup": len(post_warmup),
             "post_warmup_observations": len(post_warmup),
             "mean_common_cross_section": statistics.fmean(
                 row["cross_section"] for row in observations

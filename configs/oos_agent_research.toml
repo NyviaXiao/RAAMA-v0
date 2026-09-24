@@ -1,0 +1,17 @@
+evaluation_step_sessions = 5
+trend_lookback_sessions = 20
+reversal_lookback_sessions = 5
+liquidity_return_lookback_sessions = 5
+liquidity_recent_amount_sessions = 5
+liquidity_reference_amount_sessions = 20
+reliability_lookback_windows = 20
+reliability_minimum_history_windows = 20
+equal_weight_share = 0.5
+top_decile_fraction = 0.1
+
+# Illustrative execution-cost scenario; commission and slippage are assumptions.
+# Commission is treated as an all-in brokerage rate for exchange/regulatory fees.
+commission_per_side = 3.0
+transfer_fee_per_side = 0.1
+stamp_duty_sell = 5.0
+slippage_per_side = 5.0
