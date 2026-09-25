@@ -20,9 +20,19 @@ def main() -> None:
     parser.add_argument("--training-data-dir", type=Path, required=True)
     parser.add_argument("--baostock-run-dir", type=Path, required=True)
     parser.add_argument(
-        "--output", type=Path, default=project_dir / "experiments" / "mvp_portfolio_research.json"
+        "--execution-protocol",
+        choices=("continuous_v1", "fixed_horizon_v2"),
+        default="continuous_v1",
     )
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.output is None:
+        output_name = (
+            "mvp_portfolio_research.json"
+            if args.execution_protocol == "continuous_v1"
+            else "mvp_fixed_horizon_research.json"
+        )
+        args.output = project_dir / "experiments" / output_name
 
     config_path = project_dir / "configs" / "mvp_research.toml"
     config_bytes = config_path.read_bytes()
@@ -119,8 +129,13 @@ def main() -> None:
     research = load_research_data(args.training_data_dir, args.baostock_run_dir)
     diagnostic = run_mvp_research(research, config)
     training_seed = diagnostic.pop("training_seed")
-    portfolio = run_portfolio_comparisons(research, diagnostic, config)
-    processed_dir = project_dir / "data" / "processed" / "mvp"
+    portfolio = run_portfolio_comparisons(
+        research, diagnostic, config, args.execution_protocol
+    )
+    processed_name = (
+        "mvp" if args.execution_protocol == "continuous_v1" else "mvp_fixed_horizon"
+    )
+    processed_dir = project_dir / "data" / "processed" / processed_name
     processed_dir.mkdir(parents=True, exist_ok=True)
     training_seed_path = processed_dir / "training_seed.json.gz"
     with training_seed_path.open("wb") as raw_output:
@@ -149,6 +164,23 @@ def main() -> None:
                 for row in diagnostic["decision_log"]:
                     log.write(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
                     log.write("\n")
+
+    prediction_ledger_paths = {}
+    if args.execution_protocol == "fixed_horizon_v2":
+        for name, rows in (
+            ("prediction_decisions", diagnostic["prediction_decisions"]),
+            ("prediction_settlements", diagnostic["prediction_settlements"]),
+        ):
+            path = processed_dir / f"{name}.jsonl.gz"
+            with path.open("wb") as raw_output:
+                with gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed:
+                    with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as ledger:
+                        for row in rows:
+                            ledger.write(
+                                json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                            )
+                            ledger.write("\n")
+            prediction_ledger_paths[name] = path.relative_to(project_dir).as_posix()
 
     manifest_path = args.baostock_run_dir / "manifest.jsonl"
     output = {
@@ -180,6 +212,17 @@ def main() -> None:
             "training_seed": training_seed_path.relative_to(project_dir).as_posix(),
         },
     }
+    if args.execution_protocol == "fixed_horizon_v2":
+        output["execution_protocol"] = args.execution_protocol
+        output["prediction_ledger"] = {
+            "decision_records": len(diagnostic["prediction_decisions"]),
+            "settlement_records": len(diagnostic["prediction_settlements"]),
+            "settled_records": sum(
+                row["status"] == "settled"
+                for row in diagnostic["prediction_settlements"]
+            ),
+            "artifacts": prediction_ledger_paths,
+        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

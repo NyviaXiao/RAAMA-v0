@@ -6,7 +6,10 @@ from collections import defaultdict
 from datetime import date
 
 from adaptive_mas.agents.quantitative import AGENT_IDS, quantitative_agents
-from adaptive_mas.backtest.simulator import simulate_portfolio
+from adaptive_mas.backtest.simulator import (
+    simulate_fixed_horizon_portfolio,
+    simulate_portfolio,
+)
 from adaptive_mas.data.research import ResearchData
 from adaptive_mas.evaluation.agent_research import percentile_scores, rank_ic
 from adaptive_mas.evaluation.uncertainty import paired_block_bootstrap
@@ -26,12 +29,47 @@ def _evaluate_matured_window(
     pending: dict[str, object],
     top_fraction: float,
     available_by: date | None = None,
-) -> tuple[dict[str, float], dict[str, object], list[tuple[tuple[float, ...], float]]]:
+) -> tuple[
+    dict[str, float],
+    dict[str, object],
+    list[tuple[tuple[float, ...], float]],
+    list[dict[str, object]],
+]:
     labels = five_session_forward_returns(research, [pending["decision_date"]])
-    outcome_by_symbol = {
+    label_by_symbol = {
         str(row["symbol"]): float(row["forward_return_5s"])
         for row in labels
+    }
+    decision_index = research.trading_dates.index(pending["decision_date"])
+    entry_date = research.trading_dates[decision_index + 1]
+    exit_date = research.trading_dates[decision_index + 5]
+    settled_symbols = {
+        str(row["symbol"])
+        for row in labels
         if available_by is None or row["available_at"] <= available_by
+    }
+    settlements = [
+        {
+            "prediction_date": pending["decision_date"].isoformat(),
+            "symbol": symbol,
+            "entry_date": entry_date.isoformat(),
+            "planned_exit_date": exit_date.isoformat(),
+            "available_at": exit_date.isoformat(),
+            "status": (
+                "settled"
+                if symbol in settled_symbols
+                else "not_yet_available"
+                if symbol in label_by_symbol
+                else "missing_label_data"
+            ),
+            "forward_return_5s": label_by_symbol.get(symbol)
+            if symbol in settled_symbols
+            else None,
+        }
+        for symbol in sorted(pending["features_by_symbol"])
+    ]
+    outcome_by_symbol = {
+        symbol: label_by_symbol[symbol] for symbol in settled_symbols
     }
     shared_symbols = sorted(
         outcome_by_symbol.keys() & set(pending["features_by_symbol"])
@@ -55,7 +93,7 @@ def _evaluate_matured_window(
         if method in AGENT_IDS:
             matured_agents[method] = method_results[method]["rank_ic"]
     if len(matured_agents) != len(AGENT_IDS):
-        return {}, {}, []
+        return {}, {}, [], settlements
     training_rows = [
         (pending["features_by_symbol"][symbol], outcome_by_symbol[symbol])
         for symbol in shared_symbols
@@ -71,7 +109,7 @@ def _evaluate_matured_window(
         "regime_weight_source": pending["regime_weight_source"],
         "regime_matured_windows": pending["regime_matured_windows"],
     }
-    return matured_agents, observation, training_rows
+    return matured_agents, observation, training_rows, settlements
 
 
 def run_mvp_research(
@@ -124,6 +162,8 @@ def run_mvp_research(
     training_returns = [float(value) for value in initial_state.get("training_returns", [])]
     observations = []
     decision_log = []
+    prediction_decisions = []
+    prediction_settlements = []
     decisions_by_method: dict[str, list[dict[str, object]]] = defaultdict(list)
     previous_targets: dict[str, dict[str, float]] = defaultdict(dict)
     pending = None
@@ -135,9 +175,10 @@ def run_mvp_research(
 
         # Only labels whose exit close is visible by this after-close decision mature here.
         if pending is not None:
-            matured_row, observation, training_rows = _evaluate_matured_window(
+            matured_row, observation, training_rows, settlements = _evaluate_matured_window(
                 research, pending, top_fraction, decision_date
             )
+            prediction_settlements.extend(settlements)
             if matured_row:
                 matured_rank_ics.append(matured_row)
                 matured_by_state[pending["regime"]].append(matured_row)
@@ -334,6 +375,26 @@ def run_mvp_research(
                 },
             }
         )
+        decision_position = research.trading_dates.index(decision_date)
+        prediction_decisions.append(
+            {
+                "prediction_date": decision_date.isoformat(),
+                "input_cutoff": decision_date.isoformat(),
+                "entry_date": research.trading_dates[decision_position + 1].isoformat(),
+                "planned_exit_date": research.trading_dates[decision_position + 5].isoformat(),
+                "universe_size": len(snapshot.members),
+                "scored_symbols": sorted(feature_by_symbol),
+                "scores_by_method": {
+                    method: scores
+                    for method, scores in score_by_method.items()
+                },
+                "target_weights_by_method": {
+                    method: decisions[-1]["target_weights"]
+                    for method, decisions in decisions_by_method.items()
+                    if decisions and decisions[-1]["decision_date"] == decision_date
+                },
+            }
+        )
         pending = {
             "decision_date": decision_date,
             "features_by_symbol": feature_by_symbol,
@@ -346,9 +407,10 @@ def run_mvp_research(
         }
 
     if pending is not None:
-        matured_row, observation, training_rows = _evaluate_matured_window(
+        matured_row, observation, training_rows, settlements = _evaluate_matured_window(
             research, pending, top_fraction
         )
+        prediction_settlements.extend(settlements)
         if matured_row:
             matured_rank_ics.append(matured_row)
             matured_by_state[pending["regime"]].append(matured_row)
@@ -401,6 +463,8 @@ def run_mvp_research(
             len(rows) for rows in decisions_by_method.values()
         ),
         "observations": observations,
+        "prediction_decisions": prediction_decisions,
+        "prediction_settlements": prediction_settlements,
         "decisions_by_method": dict(decisions_by_method),
         "decision_log": decision_log,
         "training_rows_at_end": len(training_returns),
@@ -418,6 +482,7 @@ def run_portfolio_comparisons(
     research: ResearchData,
     result: dict[str, object],
     config: dict[str, float | int],
+    execution_protocol: str = "continuous_v1",
 ) -> dict[str, object]:
     costs = {
         key: float(config[key])
@@ -434,8 +499,14 @@ def run_portfolio_comparisons(
     comparisons = {}
     artifacts = {}
     sensitivity = {"0x": {}, "2x": {}}
+    if execution_protocol == "continuous_v1":
+        simulator = simulate_portfolio
+    elif execution_protocol == "fixed_horizon_v2":
+        simulator = simulate_fixed_horizon_portfolio
+    else:
+        raise ValueError(f"未知组合执行协议：{execution_protocol}")
     for method, decisions in result["decisions_by_method"].items():
-        simulated = simulate_portfolio(
+        simulation_arguments = (
             research,
             decisions,
             initial_capital,
@@ -443,6 +514,10 @@ def run_portfolio_comparisons(
             liquidity_lookback,
             maximum_participation,
         )
+        if execution_protocol == "fixed_horizon_v2":
+            simulated = simulator(*simulation_arguments, horizon_sessions=5)
+        else:
+            simulated = simulator(*simulation_arguments)
         comparisons[method] = simulated.pop("summary")
         comparisons[method]["paired_block_bootstrap_vs_benchmark"] = paired_block_bootstrap(
             [float(row["daily_return"]) for row in simulated["daily_nav"]],
@@ -453,12 +528,18 @@ def run_portfolio_comparisons(
             scenario_costs = {
                 name: value * multiplier for name, value in costs.items()
             }
-            sensitivity[scenario][method] = simulate_portfolio(
+            scenario_arguments = (
                 research,
                 decisions,
                 initial_capital,
                 scenario_costs,
                 liquidity_lookback,
                 maximum_participation,
-            )["summary"]
+            )
+            if execution_protocol == "fixed_horizon_v2":
+                sensitivity[scenario][method] = simulator(
+                    *scenario_arguments, horizon_sessions=5
+                )["summary"]
+            else:
+                sensitivity[scenario][method] = simulator(*scenario_arguments)["summary"]
     return {"summary": comparisons, "cost_sensitivity": sensitivity, "artifacts": artifacts}
