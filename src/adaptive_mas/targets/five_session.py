@@ -1,13 +1,15 @@
-"""Ex-post five-session return labels, kept outside feature construction."""
+"""Ex-post return labels, kept outside feature construction."""
 
 from datetime import date
 
 from adaptive_mas.data.research import ResearchData
 
 
-def five_session_forward_returns(
-    research: ResearchData, decision_dates: list[date]
+def forward_returns(
+    research: ResearchData, decision_dates: list[date], horizon_sessions: int
 ) -> list[dict[str, object]]:
+    if horizon_sessions < 1:
+        raise ValueError("预测期限必须至少为 1 个交易日")
     date_index = {day: index for index, day in enumerate(research.trading_dates)}
     bars = {
         (str(row["symbol"]), row["trade_date"]): row
@@ -20,7 +22,7 @@ def five_session_forward_returns(
             raise ValueError(f"目标决策日不在研究交易日历中：{decision_date}")
         index = date_index[decision_date]
         entry_index = index + 1
-        exit_index = index + 5
+        exit_index = index + horizon_sessions
         if exit_index >= len(research.trading_dates):
             continue
         entry_date = research.trading_dates[entry_index]
@@ -38,10 +40,27 @@ def five_session_forward_returns(
                 {
                     "symbol": symbol,
                     "decision_date": decision_date,
-                    "forward_return_5s": exit_close / entry_open - 1,
+                    "forward_return": exit_close / entry_open - 1,
                     "entry_date": entry_date,
                     "exit_date": exit_date,
                     "available_at": exit_date,
                 }
             )
     return labels
+
+
+def five_session_forward_returns(
+    research: ResearchData, decision_dates: list[date]
+) -> list[dict[str, object]]:
+    """Keep the frozen five-session diagnostic's original label schema."""
+    return [
+        {
+            "symbol": row["symbol"],
+            "decision_date": row["decision_date"],
+            "forward_return_5s": row["forward_return"],
+            "entry_date": row["entry_date"],
+            "exit_date": row["exit_date"],
+            "available_at": row["available_at"],
+        }
+        for row in forward_returns(research, decision_dates, 5)
+    ]

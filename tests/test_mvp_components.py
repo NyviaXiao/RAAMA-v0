@@ -1,8 +1,16 @@
 from datetime import date, timedelta
+import hashlib
+import json
 from pathlib import Path
 
 from adaptive_mas.agents.quantitative import AGENT_IDS
+from adaptive_mas.decision import (
+    PortfolioState,
+    create_daily_decision,
+    optimize_forecast_target,
+)
 from adaptive_mas.backtest.simulator import (
+    simulate_fixed_risk_market_exposure,
     simulate_fixed_horizon_portfolio,
     simulate_portfolio,
 )
@@ -14,8 +22,18 @@ from adaptive_mas.portfolio.allocation import (
 )
 from adaptive_mas.regime.market_state import conditional_weights, market_state
 from adaptive_mas.evaluation.uncertainty import paired_block_bootstrap
-from adaptive_mas.evaluation.mvp_research import _evaluate_matured_window
+from adaptive_mas.evaluation.mvp_research import (
+    _evaluate_matured_window,
+    _extend_calibration_moments,
+    _fit_return_calibrators,
+    _market_horizon_forecast,
+    _return_calibration_buckets,
+)
 from adaptive_mas.evaluation.mvp_research import run_mvp_research
+from adaptive_mas.evaluation.post_p8 import (
+    expert_prediction_diagnostics,
+    paired_block_mean_difference,
+)
 
 
 def _research(status_by_date=None, periods=5):
@@ -59,6 +77,7 @@ def _research(status_by_date=None, periods=5):
             "symbol": "sh.000300",
             "trade_date": day,
             "available_at": day,
+            "open": 999.0 + index,
             "close": 1000.0 + index,
         }
         for index, day in enumerate(dates)
@@ -123,6 +142,7 @@ def _walk_forward_research(reverse_future=False):
             "symbol": "sh.000300",
             "trade_date": trade_date,
             "available_at": trade_date,
+            "open": 1000.0 * (1 + index * 0.0005) / 1.001,
             "close": 1000.0 * (1 + index * 0.0005),
         }
         for index, trade_date in enumerate(dates)
@@ -189,6 +209,37 @@ def test_daily_backtest_uses_next_open_and_records_costs():
     assert result["orders"][0]["trade_date"] == dates[1].isoformat()
     assert result["orders"][0]["status"] == "filled"
     assert result["summary"]["final_nav_cny"] == 1_050_000.0
+    assert abs(result["daily_nav"][0]["benchmark_return"] - 0.001) < 1e-12
+    assert result["daily_nav"][0]["cash_cny"] + sum(
+        row["market_value_cny"]
+        for row in result["positions"]
+        if row["trade_date"] == dates[1].isoformat()
+    ) == result["daily_nav"][0]["nav_cny"]
+
+
+def test_matched_simulation_starts_from_cash_on_common_evaluation_date():
+    research, dates = _research(periods=7)
+    result = simulate_portfolio(
+        research,
+        [
+            {"decision_date": dates[0], "target_weights": {"000001": 0.5}},
+            {"decision_date": dates[3], "target_weights": {"000001": 0.5}},
+        ],
+        1_000_000.0,
+        {
+            "commission_per_side_bps": 0.0,
+            "transfer_fee_per_side_bps": 0.0,
+            "stamp_duty_sell_bps": 0.0,
+            "slippage_per_side_bps": 0.0,
+        },
+        liquidity_lookback_sessions=1,
+        maximum_daily_participation=1.0,
+        evaluation_start_date=dates[2],
+    )
+
+    assert result["daily_nav"][0]["trade_date"] == dates[3].isoformat()
+    assert result["daily_nav"][0]["cash_cny"] == 1_000_000.0
+    assert result["orders"][0]["trade_date"] == dates[4].isoformat()
 
 
 def test_suspended_entry_is_reported_as_unfilled():
@@ -259,6 +310,7 @@ def test_fixed_horizon_entry_and_predeclared_fifth_session_exit_reconcile_cash()
     assert result["orders"][1]["trade_date"] == dates[5].isoformat()
     assert result["orders"][1]["planned_exit_date"] == dates[5].isoformat()
     assert result["summary"]["final_nav_cny"] == 1_050_000.0
+    assert abs(result["daily_nav"][0]["benchmark_return"] - 0.001) < 1e-12
     assert result["summary"]["open_position_count"] == 0
     for day in result["daily_nav"]:
         market_value = sum(
@@ -342,6 +394,7 @@ def test_forecast_settlement_respects_point_in_time_availability():
     pending = {
         "decision_date": dates[0],
         "features_by_symbol": {"000001": (0.1, 0.2, 0.3), "000002": (0.3, 0.2, 0.1)},
+        "candidate_symbols_sha256": "41d617fd60314dea21d8a606cc8e67e29dfe223c055e3c976eccb5f060a6fde1",
         "scores_by_method": {
             agent_id: {"000001": 1.0, "000002": 0.5} for agent_id in AGENT_IDS
         },
@@ -361,8 +414,8 @@ def test_forecast_settlement_respects_point_in_time_availability():
     assert {row["status"] for row in mature[3]} == {"settled"}
 
 
-def test_future_outcomes_cannot_change_already_written_prediction_or_target():
-    config = {
+def _small_research_config():
+    return {
         "decision_step_sessions": 5,
         "feature_trend_sessions": 20,
         "feature_reversal_sessions": 5,
@@ -390,6 +443,10 @@ def test_future_outcomes_cannot_change_already_written_prediction_or_target():
         "slippage_per_side_bps": 0.0,
     }
 
+
+def test_future_outcomes_cannot_change_already_written_prediction_or_target():
+    config = _small_research_config()
+
     original = run_mvp_research(_walk_forward_research(), config)
     changed_future = run_mvp_research(
         _walk_forward_research(reverse_future=True), config
@@ -412,7 +469,378 @@ def test_future_outcomes_cannot_change_already_written_prediction_or_target():
     )
 
     assert original_decision == changed_decision
+    assert original_decision["candidate_symbols_sha256"] == changed_decision[
+        "candidate_symbols_sha256"
+    ]
     assert original_settlement["forward_return_5s"] != changed_settlement["forward_return_5s"]
+    assert original_settlement["candidate_symbols_sha256"] == original_decision[
+        "candidate_symbols_sha256"
+    ]
+
+
+def test_market_horizon_forecast_excludes_future_index_rows():
+    research = _walk_forward_research()
+    decision_index = 28
+    expected = _market_horizon_forecast(research, decision_index, 3, 6)
+    changed_future_index = [dict(row) for row in research.index_bars]
+    for row in changed_future_index:
+        if row["trade_date"] > research.trading_dates[decision_index]:
+            row["close"] = float(row["close"]) * 3
+    future_changed = ResearchData(
+        list(research.trading_dates),
+        list(research.adjusted_bars),
+        list(research.execution_bars),
+        changed_future_index,
+        list(research.membership_snapshots),
+    )
+
+    assert _market_horizon_forecast(future_changed, decision_index, 3, 6) == expected
+
+
+def test_common_comparison_start_resets_score_target_path():
+    research = _walk_forward_research()
+    dates = research.trading_dates
+    config = _small_research_config()
+    config["decision_step_sessions"] = 1
+    config["prediction_horizon_sessions"] = 3
+    common_start = dates[30]
+
+    result = run_mvp_research(
+        research,
+        config,
+        comparison_start_date=common_start,
+    )
+
+    assert result["protocol"]["comparison_start_date"] == common_start.isoformat()
+    assert all(
+        row["decision_date"] >= common_start
+        for row in result["decisions_by_method"]["trend"]
+    )
+
+
+def test_fixed_risk_market_exposure_uses_only_prestart_risk_and_charges_costs():
+    research, dates = _research(periods=7)
+    index_bars = [dict(row) for row in research.index_bars]
+    for row, return_value in zip(index_bars, (None, 1.0, -2.0, 2.0, -1.5, 3.0, -3.0), strict=True):
+        row["return_1d"] = return_value
+    research = ResearchData(
+        list(research.trading_dates),
+        list(research.adjusted_bars),
+        list(research.execution_bars),
+        index_bars,
+        list(research.membership_snapshots),
+    )
+    costs = {
+        "commission_per_side_bps": 3.0,
+        "transfer_fee_per_side_bps": 0.1,
+        "stamp_duty_sell_bps": 5.0,
+        "slippage_per_side_bps": 5.0,
+    }
+
+    result = simulate_fixed_risk_market_exposure(
+        research,
+        dates[4],
+        1_000_000.0,
+        0.10,
+        4,
+        costs,
+    )
+
+    assert 0 < result["summary"]["target_market_weight"] < 1
+    assert result["summary"]["total_cost_cny"] > 0
+    assert result["orders"][0]["side"] == "buy"
+    assert result["orders"][-1]["side"] == "sell"
+    assert result["daily_nav"][-1]["market_value_cny"] == 0.0
+
+
+def test_daily_decisions_with_three_session_labels_wait_for_maturity():
+    config = _small_research_config()
+    config["decision_step_sessions"] = 1
+    config["prediction_horizon_sessions"] = 3
+    result = run_mvp_research(_walk_forward_research(), config)
+
+    decisions = result["decision_log"]
+    assert result["protocol"]["prediction_horizon_sessions"] == 3
+    assert result["protocol"]["decision_step_sessions"] == 1
+    assert [row["matured_rank_ic_windows"] for row in decisions[:4]] == [0, 0, 0, 1]
+    assert result["prediction_decisions"][0]["planned_exit_date"] == decisions[3]["decision_date"]
+    assert {row["status"] for row in result["prediction_settlements"]} == {"pending", "settled"}
+    latest_decision = result["prediction_decisions"][-1]
+    assert latest_decision["prediction_date"] == "2024-02-06"
+    assert latest_decision["status"] == "pending"
+    assert latest_decision["planned_exit_date"] is None
+    assert all("forward_return_3s" in row for row in result["prediction_settlements"])
+    first_prediction = result["prediction_decisions"][0]
+    assert "market_only" in first_prediction["expected_returns_by_method"]
+    assert "market_plus_relative_fusion" in first_prediction["expected_returns_by_method"]
+    assert len(set(first_prediction["expected_returns_by_method"]["market_only"].values())) == 1
+    training_seed = result["training_seed"]
+    assert len(training_seed["relative_calibration_features"]) == len(
+        training_seed["relative_calibration_returns"]
+    )
+    assert len(training_seed["relative_calibration_sufficient_statistics"]) == len(AGENT_IDS)
+
+
+def test_daily_decision_api_returns_latest_pending_record():
+    research = _walk_forward_research()
+    config = _small_research_config()
+    config["decision_step_sessions"] = 1
+    config["prediction_horizon_sessions"] = 3
+    as_of = research.trading_dates[-1]
+
+    decision = create_daily_decision(
+        research,
+        config,
+        as_of,
+        PortfolioState(1_000_000.0, {}),
+    )
+    payload = decision.to_dict()
+
+    assert payload["schema_version"] == "adaptive-mas.decision.v1"
+    assert payload["as_of_date"] == as_of.isoformat()
+    assert payload["execution_date"] is None
+    assert payload["prediction_status"] == "pending"
+    assert payload["prediction_horizon_sessions"] == 3
+    assert payload["current_cash_cny"] == 1_000_000.0
+    assert payload["current_nav_cny"] == 1_000_000.0
+
+
+def test_daily_decision_sell_orders_include_capacity_and_execution_uncertainty():
+    research = _walk_forward_research()
+    config = _small_research_config()
+    config["decision_step_sessions"] = 1
+    config["prediction_horizon_sessions"] = 3
+    decision = create_daily_decision(
+        research,
+        config,
+        research.trading_dates[-1],
+        PortfolioState(950_000.0, {"000001": 50_000.0}),
+    )
+    payload = decision.to_dict()
+
+    assert payload["status"] == "pending_execution"
+    assert payload["sell_notional_cny"] > 0
+    assert payload["buy_notional_cny"] >= 0
+    assert payload["estimated_cash_after_costs_cny"] <= payload["target_cash_cny"]
+    assert payload["risk_adjusted_net_incremental_value_cny"] == (
+        payload["optimized_objective_value_cny"]
+        - payload["current_holding_objective_value_cny"]
+    )
+    assert set(payload["evidence"]["expert_matured_performance"]) == set(AGENT_IDS)
+    assert all(
+        order["status"] == "pending_next_session"
+        and order["next_session_execution_uncertain"]
+        and order["estimated_liquidity_capacity_cny"] > 0
+        and order["decision_date_tradestatus"] in {"0", "1", "unknown"}
+        for order in payload["orders"]
+    )
+
+
+def test_daily_decision_schema_lists_account_and_order_contracts():
+    schema_path = Path(__file__).parents[1] / "schemas" / "decision_api.v1.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    daily = schema["$defs"]["dailyDecision"]
+    order = schema["$defs"]["decisionOrder"]
+
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert "risk_adjusted_net_incremental_value_cny" in daily["required"]
+    assert "estimated_cash_after_costs_cny" in daily["required"]
+    assert "next_session_execution_uncertain" in order["required"]
+    assert "estimated_liquidity_capacity_cny" in order["required"]
+
+
+def test_matured_calibration_sufficient_statistics_match_batch_fit():
+    features = [
+        (0.1, 0.3, 0.7),
+        (0.2, 0.5, 0.4),
+        (0.5, 0.2, 0.1),
+        (0.8, 0.6, 0.9),
+    ]
+    returns = [0.01, -0.02, 0.03, 0.015]
+    moments = _extend_calibration_moments(
+        [[0.0] * 6 for _ in AGENT_IDS], features, returns
+    )
+
+    batch_fit = _fit_return_calibrators(features, returns)
+    cached_fit = _fit_return_calibrators(features, returns, moments)
+
+    assert batch_fit == cached_fit
+
+
+def test_return_calibration_buckets_are_equal_count_within_one_date():
+    symbols = [f"{index:06d}" for index in range(8)]
+    predictions = {symbol: float(index) for index, symbol in enumerate(symbols)}
+    outcomes = {symbol: float(7 - index) / 100 for index, symbol in enumerate(symbols)}
+
+    buckets = _return_calibration_buckets(symbols, predictions, outcomes, bucket_count=5)
+
+    assert [row["bucket"] for row in buckets] == [1, 2, 3, 4, 5]
+    assert [row["symbol_count"] for row in buckets] == [2, 2, 1, 2, 1]
+    assert [row["mean_predicted_return"] for row in buckets] == sorted(
+        row["mean_predicted_return"] for row in buckets
+    )
+
+
+def test_equal_fusion_minus_leave_one_out_interval_has_declared_sign():
+    day = "2026-01-05"
+    symbols = ["000001", "000002", "000003"]
+    candidate_hash = hashlib.sha256("\n".join(symbols).encode("ascii")).hexdigest()
+    agent_predictions = {
+        "trend": {"000001": 0.0, "000002": 0.15, "000003": -0.15},
+        "reversal": {"000001": 0.0, "000002": 0.0, "000003": 0.1},
+        "liquidity_confirmation": {"000001": 0.0, "000002": 0.0, "000003": 0.1},
+    }
+    equal = {
+        symbol: sum(agent_predictions[agent][symbol] for agent in AGENT_IDS) / 3
+        for symbol in symbols
+    }
+    result = {
+        "prediction_decisions": [
+            {
+                "prediction_date": day,
+                "input_cutoff": day,
+                "horizon_sessions": 3,
+                "scored_symbols": symbols,
+                "candidate_symbols_sha256": candidate_hash,
+                "scores_by_method": {
+                    agent: {symbol: float(index) for index, symbol in enumerate(symbols)}
+                    for agent in AGENT_IDS
+                },
+                "expected_returns_by_method": {
+                    **agent_predictions,
+                    "equal_fusion": equal,
+                },
+                "forecast_errors_by_method": {},
+                "target_weights_by_method": {},
+            }
+        ],
+        "prediction_settlements": [
+            {
+                "prediction_date": day,
+                "symbol": symbol,
+                "status": "settled",
+                "candidate_symbols_sha256": candidate_hash,
+                "forward_return_3s": realized,
+            }
+            for symbol, realized in zip(symbols, (0.01, 0.05, -0.02), strict=True)
+        ],
+    }
+
+    diagnostics = expert_prediction_diagnostics(result)
+    interval = diagnostics["leave_one_expert_out_ablation"][
+        "without_trend"
+    ]["equal_fusion_minus_ablation_top_decile_gross_return"]
+
+    assert interval["mean_difference"] > 0
+    assert interval["mean_difference_95pct_low"] > 0
+    assert paired_block_mean_difference([0.5], [0.2])["mean_difference"] > 0
+
+
+def test_optimizer_replay_continues_actual_holdings_after_blocked_sell():
+    base = _walk_forward_research()
+    dates = base.trading_dates
+    blocked_date = dates[26]
+    execution = [dict(row) for row in base.execution_bars]
+    for row in execution:
+        if row["symbol"] == "000001" and row["trade_date"] == blocked_date:
+            row["tradestatus"] = "0"
+    research = ResearchData(
+        list(base.trading_dates),
+        list(base.adjusted_bars),
+        execution,
+        list(base.index_bars),
+        list(base.membership_snapshots),
+    )
+    config = _small_research_config()
+    config["maximum_symbol_weight"] = 0.8
+    config["maximum_one_way_turnover"] = 0.5
+    no_costs = {
+        "commission_per_side_bps": 0.0,
+        "transfer_fee_per_side_bps": 0.0,
+        "stamp_duty_sell_bps": 0.0,
+        "slippage_per_side_bps": 0.0,
+    }
+
+    def forecast(day, expected_return):
+        return {
+            "prediction_date": day.isoformat(),
+            "horizon_sessions": 3,
+            "expected_returns_by_method": {
+                "loss_gated_fusion": {"000001": expected_return}
+            },
+            "forecast_errors_by_method": {"loss_gated_fusion": 0.0},
+        }
+
+    forecasts = [
+        forecast(dates[24], 0.2),
+        forecast(dates[25], -0.2),
+        forecast(dates[26], -0.2),
+    ]
+    initial_state = PortfolioState(1_000_000.0, {})
+    app_target, _ = optimize_forecast_target(
+        research, forecasts[0], initial_state, config
+    )
+    replay = simulate_portfolio(
+        research,
+        [],
+        1_000_000.0,
+        no_costs,
+        liquidity_lookback_sessions=5,
+        maximum_daily_participation=1.0,
+        maximum_one_way_turnover=0.5,
+        forecast_decisions=forecasts,
+        optimizer_config=config,
+    )
+
+    assert replay["decisions"][0]["target_weights"] == app_target.target_weights
+    blocked_sell = next(
+        row for row in replay["orders"]
+        if row["trade_date"] == blocked_date.isoformat() and row["side"] == "sell"
+    )
+    assert blocked_sell["status"] == "unfilled_suspended_or_missing"
+    decision_after_block = next(
+        row for row in replay["decisions"]
+        if row["decision_date"] == blocked_date.isoformat()
+    )
+    assert decision_after_block["current_holdings_cny"]["000001"] > 0
+    assert decision_after_block["current_cash_cny"] < decision_after_block["current_nav_cny"]
+    for day in replay["daily_nav"]:
+        market_value = sum(
+            row["market_value_cny"]
+            for row in replay["positions"]
+            if row["trade_date"] == day["trade_date"]
+        )
+        assert abs(day["cash_cny"] + market_value - day["nav_cny"]) < 1e-6
+
+
+def test_realized_turnover_cap_applies_to_filled_amounts():
+    research = _walk_forward_research()
+    dates = research.trading_dates
+    config = _small_research_config()
+    config["maximum_symbol_weight"] = 0.8
+    config["maximum_one_way_turnover"] = 0.1
+    no_costs = {
+        "commission_per_side_bps": 0.0,
+        "transfer_fee_per_side_bps": 0.0,
+        "stamp_duty_sell_bps": 0.0,
+        "slippage_per_side_bps": 0.0,
+    }
+
+    replay = simulate_portfolio(
+        research,
+        [{"decision_date": dates[24], "target_weights": {"000001": 0.8}}],
+        1_000_000.0,
+        no_costs,
+        liquidity_lookback_sessions=5,
+        maximum_daily_participation=1.0,
+        maximum_one_way_turnover=0.1,
+    )
+
+    first_day = replay["daily_nav"][0]
+    assert first_day["traded_notional_cny"] <= 200_000.0 + 1e-6
+    assert first_day["one_way_turnover"] <= 0.1 + 1e-9
+    assert replay["summary"]["turnover_limited_orders"] == 1
+    assert replay["orders"][0]["status"] == "partial_turnover_limited"
 
 
 def test_market_state_and_regime_gate_use_matured_state_records():

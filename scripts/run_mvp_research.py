@@ -19,22 +19,32 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--training-data-dir", type=Path, required=True)
     parser.add_argument("--baostock-run-dir", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=project_dir / "configs" / "mvp_research.toml")
     parser.add_argument(
         "--execution-protocol",
         choices=("continuous_v1", "fixed_horizon_v2"),
         default="continuous_v1",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--processed-name",
+        help="写入 data/processed 下的独立目录名，避免覆盖既有回放产物",
+    )
     args = parser.parse_args()
+    if args.processed_name and (
+        Path(args.processed_name).name != args.processed_name
+        or args.processed_name in {".", ".."}
+    ):
+        raise ValueError("processed-name 必须是 data/processed 下的单个目录名")
+    config_path = args.config
+    legacy_config = config_path.resolve() == (project_dir / "configs" / "mvp_research.toml").resolve()
     if args.output is None:
         output_name = (
-            "mvp_portfolio_research.json"
-            if args.execution_protocol == "continuous_v1"
-            else "mvp_fixed_horizon_research.json"
+            ("mvp_portfolio_research.json" if args.execution_protocol == "continuous_v1" else "mvp_fixed_horizon_research.json")
+            if legacy_config else f"{config_path.stem}_{args.execution_protocol}_research.json"
         )
         args.output = project_dir / "experiments" / output_name
 
-    config_path = project_dir / "configs" / "mvp_research.toml"
     config_bytes = config_path.read_bytes()
     config = tomllib.loads(config_bytes.decode("utf-8"))
     expected_numeric = {
@@ -66,15 +76,38 @@ def main() -> None:
         "stamp_duty_sell_bps",
         "slippage_per_side_bps",
     }
-    if set(config) != expected_numeric:
+    optional_numeric = {
+        "prediction_horizon_sessions",
+        "maximum_target_one_way_change",
+        "risk_budget_annualized",
+        "risk_aversion",
+        "forecast_error_multiplier",
+        "optimizer_iterations",
+        "market_return_lookback_windows",
+    }
+    if not expected_numeric <= set(config) or set(config) - expected_numeric - optional_numeric:
         raise ValueError(
             f"MVP 配置字段与运行协议不一致：缺少 {sorted(expected_numeric - set(config))}，"
-            f"多余 {sorted(set(config) - expected_numeric)}"
+            f"多余 {sorted(set(config) - expected_numeric - optional_numeric)}"
         )
     if any(not math.isfinite(float(value)) for value in config.values()):
         raise ValueError("MVP 配置必须全部为有限数值")
-    if config["decision_step_sessions"] != 5:
-        raise ValueError("五日目标要求 decision_step_sessions 为 5")
+    if any(
+        isinstance(config[name], bool) or not isinstance(config[name], int) or config[name] < 1
+        for name in (
+            "decision_step_sessions",
+            "prediction_horizon_sessions",
+            "market_return_lookback_windows",
+        )
+        if name in config
+    ):
+        raise ValueError("决策步长和预测期限必须是正整数交易日")
+    if "optimizer_iterations" in config and (
+        isinstance(config["optimizer_iterations"], bool)
+        or not isinstance(config["optimizer_iterations"], int)
+        or config["optimizer_iterations"] < 1
+    ):
+        raise ValueError("优化迭代次数必须为正整数")
     if not 0 < config["evaluation_top_fraction"] <= 1:
         raise ValueError("evaluation_top_fraction 必须处于 (0, 1]")
     if not 0 < config["portfolio_top_fraction"] <= 1:
@@ -89,6 +122,8 @@ def main() -> None:
         raise ValueError("候选股票数量与单股上限无法满足目标投资比例")
     if not 0 <= config["maximum_one_way_turnover"] <= 1:
         raise ValueError("maximum_one_way_turnover 必须处于 [0, 1]")
+    if not 0 <= config.get("maximum_target_one_way_change", config["maximum_one_way_turnover"]) <= 1:
+        raise ValueError("maximum_target_one_way_change 必须处于 [0, 1]")
     if config["liquidity_lookback_sessions"] < 1 or not 0 < config["maximum_daily_participation"] <= 1:
         raise ValueError("流动性窗口必须为正，最大成交参与率必须处于 (0, 1]")
     if not 0 <= config["reliability_equal_weight_share"] <= 1:
@@ -115,6 +150,13 @@ def main() -> None:
         raise ValueError("可靠性最小成熟窗口数不能超过回看窗口")
     if config["initial_capital_cny"] <= 0 or config["ridge_alpha"] < 0:
         raise ValueError("初始资金必须为正，Ridge alpha 不能为负")
+    if (
+        config.get("risk_budget_annualized", 0.20) <= 0
+        or config.get("risk_budget_annualized", 0.20) > 1
+        or config.get("risk_aversion", 8.0) < 0
+        or config.get("forecast_error_multiplier", 0.5) < 0
+    ):
+        raise ValueError("风险预算须处于 (0, 1]，风险与误差惩罚不能为负")
     if any(
         config[name] < 0
         for name in (
@@ -126,14 +168,24 @@ def main() -> None:
     ):
         raise ValueError("费用和滑点假设不能为负")
 
+    progress = lambda message: print(f"[P8 progress] {message}", flush=True)
+    progress(f"loading train.csv plus BaoStock cache {args.baostock_run_dir}")
     research = load_research_data(args.training_data_dir, args.baostock_run_dir)
-    diagnostic = run_mvp_research(research, config)
+    progress(
+        f"loaded {len(research.trading_dates)} sessions from {research.trading_dates[0]} to {research.trading_dates[-1]}"
+    )
+    diagnostic = run_mvp_research(research, config, progress_callback=progress)
     training_seed = diagnostic.pop("training_seed")
     portfolio = run_portfolio_comparisons(
-        research, diagnostic, config, args.execution_protocol
+        research, diagnostic, config, args.execution_protocol, progress_callback=progress
     )
     processed_name = (
-        "mvp" if args.execution_protocol == "continuous_v1" else "mvp_fixed_horizon"
+        args.processed_name
+        if args.processed_name
+        else (
+            ("mvp" if args.execution_protocol == "continuous_v1" else "mvp_fixed_horizon")
+            if legacy_config else f"{config_path.stem}_{args.execution_protocol}"
+        )
     )
     processed_dir = project_dir / "data" / "processed" / processed_name
     processed_dir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +208,15 @@ def main() -> None:
                 writer.writeheader()
                 writer.writerows(rows)
             artifact_paths[f"{method}_{kind}"] = path.relative_to(project_dir).as_posix()
+        if records.get("decisions"):
+            path = processed_dir / f"{method}_decisions.jsonl.gz"
+            with path.open("wb") as raw_output:
+                with gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed:
+                    with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as ledger:
+                        for row in records["decisions"]:
+                            ledger.write(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                            ledger.write("\n")
+            artifact_paths[f"{method}_decisions"] = path.relative_to(project_dir).as_posix()
 
     decision_log_path = processed_dir / "decision_log.jsonl.gz"
     with decision_log_path.open("wb") as raw_output:
@@ -166,21 +227,20 @@ def main() -> None:
                     log.write("\n")
 
     prediction_ledger_paths = {}
-    if args.execution_protocol == "fixed_horizon_v2":
-        for name, rows in (
-            ("prediction_decisions", diagnostic["prediction_decisions"]),
-            ("prediction_settlements", diagnostic["prediction_settlements"]),
-        ):
-            path = processed_dir / f"{name}.jsonl.gz"
-            with path.open("wb") as raw_output:
-                with gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed:
-                    with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as ledger:
-                        for row in rows:
-                            ledger.write(
-                                json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                            )
-                            ledger.write("\n")
-            prediction_ledger_paths[name] = path.relative_to(project_dir).as_posix()
+    for name, rows in (
+        ("prediction_decisions", diagnostic["prediction_decisions"]),
+        ("prediction_settlements", diagnostic["prediction_settlements"]),
+    ):
+        path = processed_dir / f"{name}.jsonl.gz"
+        with path.open("wb") as raw_output:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed:
+                with io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as ledger:
+                    for row in rows:
+                        ledger.write(
+                            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                        )
+                        ledger.write("\n")
+        prediction_ledger_paths[name] = path.relative_to(project_dir).as_posix()
 
     manifest_path = args.baostock_run_dir / "manifest.jsonl"
     output = {
@@ -204,6 +264,8 @@ def main() -> None:
         "training_rows_at_end": diagnostic["training_rows_at_end"],
         "matured_rank_ic_windows_at_end": diagnostic["matured_rank_ic_windows_at_end"],
         "observations": diagnostic["observations"],
+        "prediction_quality": diagnostic["prediction_quality"],
+        "decision_value_quality": diagnostic.get("decision_value_quality"),
         "portfolio_results": portfolio["summary"],
         "cost_sensitivity": portfolio["cost_sensitivity"],
         "processed_artifacts": {
@@ -214,15 +276,13 @@ def main() -> None:
     }
     if args.execution_protocol == "fixed_horizon_v2":
         output["execution_protocol"] = args.execution_protocol
-        output["prediction_ledger"] = {
-            "decision_records": len(diagnostic["prediction_decisions"]),
-            "settlement_records": len(diagnostic["prediction_settlements"]),
-            "settled_records": sum(
-                row["status"] == "settled"
-                for row in diagnostic["prediction_settlements"]
-            ),
-            "artifacts": prediction_ledger_paths,
-        }
+    output["prediction_ledger"] = {
+        "decision_records": len(diagnostic["prediction_decisions"]),
+        "settlement_records": len(diagnostic["prediction_settlements"]),
+        "pending_records": sum(row["status"] == "pending" for row in diagnostic["prediction_settlements"]),
+        "settled_records": sum(row["status"] == "settled" for row in diagnostic["prediction_settlements"]),
+        "artifacts": prediction_ledger_paths,
+    }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

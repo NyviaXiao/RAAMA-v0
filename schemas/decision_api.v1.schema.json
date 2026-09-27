@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://adaptive-mas.local/schemas/decision_api.v1.schema.json",
+  "title": "Adaptive MAS daily decision API v1",
+  "$defs": {
+    "symbolValues": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[0-9]{6}$" },
+      "additionalProperties": { "type": "number", "minimum": 0 }
+    },
+    "portfolioState": {
+      "type": "object",
+      "required": ["cash_cny", "holdings_cny"],
+      "additionalProperties": false,
+      "properties": {
+        "cash_cny": { "type": "number", "minimum": 0 },
+        "holdings_cny": { "$ref": "#/$defs/symbolValues" }
+      }
+    },
+    "decisionOrder": {
+      "type": "object",
+      "required": [
+        "symbol", "side", "notional_cny", "current_value_cny",
+        "target_value_cny", "expected_return", "forecast_error",
+        "expected_incremental_value_cny", "estimated_cost_cny",
+        "estimated_liquidity_capacity_cny", "decision_date_tradestatus",
+        "next_session_execution_uncertain", "execution_note", "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": { "type": "string", "pattern": "^[0-9]{6}$" },
+        "side": { "enum": ["buy", "sell"] },
+        "notional_cny": { "type": "number", "minimum": 0 },
+        "current_value_cny": { "type": "number", "minimum": 0 },
+        "target_value_cny": { "type": "number", "minimum": 0 },
+        "expected_return": { "type": "number" },
+        "forecast_error": { "type": "number", "minimum": 0 },
+        "expected_incremental_value_cny": { "type": "number" },
+        "estimated_cost_cny": { "type": "number", "minimum": 0 },
+        "estimated_liquidity_capacity_cny": { "type": "number", "minimum": 0 },
+        "decision_date_tradestatus": { "enum": ["0", "1", "unknown"] },
+        "next_session_execution_uncertain": { "type": "boolean" },
+        "execution_note": { "type": "string" },
+        "status": { "const": "pending_next_session" }
+      }
+    },
+    "dailyDecision": {
+      "type": "object",
+      "required": [
+        "schema_version", "as_of_date", "execution_date", "status",
+        "prediction_status", "prediction_horizon_sessions", "predictions_by_symbol",
+        "current_nav_cny", "current_cash_cny", "current_holdings_cny",
+        "target_cash_cny", "target_holdings_cny", "target_weights",
+        "estimated_cash_after_costs_cny", "buy_notional_cny", "sell_notional_cny",
+        "orders", "expected_gross_return", "forecast_error_allowance",
+        "expected_transaction_cost_cny", "current_holding_objective_value_cny",
+        "optimized_objective_value_cny", "risk_adjusted_net_incremental_value_cny",
+        "risk_penalty_cny", "annualized_risk", "annualized_risk_budget",
+        "one_way_turnover", "evidence", "versions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "adaptive-mas.decision.v1" },
+        "as_of_date": { "type": "string", "format": "date" },
+        "execution_date": { "type": ["string", "null"], "format": "date" },
+        "status": { "enum": ["pending_execution", "hold", "warmup_no_action"] },
+        "prediction_status": { "const": "pending" },
+        "prediction_horizon_sessions": { "type": "integer", "minimum": 1 },
+        "predictions_by_symbol": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[0-9]{6}$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["expected_return", "forecast_error", "expert_expected_returns", "loss_gate_weights", "status"],
+            "properties": {
+              "expected_return": { "type": "number" },
+              "forecast_error": { "type": ["number", "null"], "minimum": 0 },
+              "expert_expected_returns": { "type": "object", "additionalProperties": { "type": "number" } },
+              "loss_gate_weights": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0 } },
+              "status": { "type": "string" }
+            }
+          }
+        },
+        "current_nav_cny": { "type": "number", "exclusiveMinimum": 0 },
+        "current_cash_cny": { "type": "number", "minimum": 0 },
+        "current_holdings_cny": { "$ref": "#/$defs/symbolValues" },
+        "target_cash_cny": { "type": "number", "minimum": 0 },
+        "target_holdings_cny": { "$ref": "#/$defs/symbolValues" },
+        "target_weights": { "$ref": "#/$defs/symbolValues" },
+        "estimated_cash_after_costs_cny": { "type": "number", "minimum": 0 },
+        "buy_notional_cny": { "type": "number", "minimum": 0 },
+        "sell_notional_cny": { "type": "number", "minimum": 0 },
+        "orders": { "type": "array", "items": { "$ref": "#/$defs/decisionOrder" } },
+        "expected_gross_return": { "type": ["number", "null"] },
+        "forecast_error_allowance": { "type": ["number", "null"], "minimum": 0 },
+        "expected_transaction_cost_cny": { "type": "number", "minimum": 0 },
+        "current_holding_objective_value_cny": { "type": ["number", "null"] },
+        "optimized_objective_value_cny": { "type": ["number", "null"] },
+        "risk_adjusted_net_incremental_value_cny": { "type": "number" },
+        "risk_penalty_cny": { "type": ["number", "null"], "minimum": 0 },
+        "annualized_risk": { "type": ["number", "null"], "minimum": 0 },
+        "annualized_risk_budget": { "type": "number", "exclusiveMinimum": 0 },
+        "one_way_turnover": { "type": "number", "minimum": 0, "maximum": 1 },
+        "evidence": { "type": "object" },
+        "versions": {
+          "type": "object",
+          "properties": {
+            "config_sha256": { "type": ["string", "null"] },
+            "baostock_manifest_sha256": { "type": ["string", "null"] },
+            "training_seed_sha256": { "type": ["string", "null"] }
+          },
+          "additionalProperties": { "type": ["string", "null"] }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/portfolioState" },
+    { "$ref": "#/$defs/dailyDecision" }
+  ]
+}

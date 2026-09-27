@@ -18,6 +18,7 @@ def quantitative_agents(
     liquidity_return_sessions: int = 5,
     liquidity_recent_amount_sessions: int = 5,
     liquidity_reference_amount_sessions: int = 20,
+    horizon_sessions: int = 5,
 ) -> dict[str, list[AgentSignal]]:
     """Return independent scores; no agent receives another agent's output."""
     decision_index = snapshot.trading_dates.index(snapshot.decision_date)
@@ -60,7 +61,7 @@ def quantitative_agents(
                     version="1",
                     symbol=symbol,
                     decision_date=snapshot.decision_date,
-                    horizon_sessions=5,
+                    horizon_sessions=horizon_sessions,
                     score=score,
                     input_cutoff=snapshot.decision_date,
                     evidence=EvidenceRef(
@@ -114,7 +115,7 @@ def quantitative_agents(
                 version="1",
                 symbol=symbol,
                 decision_date=snapshot.decision_date,
-                horizon_sessions=5,
+                horizon_sessions=horizon_sessions,
                 score=score,
                 input_cutoff=snapshot.decision_date,
                 evidence=EvidenceRef(

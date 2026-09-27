@@ -1,7 +1,23 @@
-# Project rules
+# 行为规则
 
-- Phase 1 is closed. Phase 2 data work is authorized; use BaoStock as the single selected source.
-- Do not copy or reuse source code, models, features, or architecture from another project. The supplied CSV files may be read but must not be modified or copied into this repository.
-- Local-file research inputs may read only `train.csv`; never load or expose `test.csv` to research code. BaoStock records may enter only through the explicit source boundary and P2 acquisition path.
-- Preserve security codes as six-character strings and enforce point-in-time availability. Use the selected source and user-provided provenance without repeated multi-provider or full-file reliability audits.
-- Keep errors visible. Validate external files at the boundary and avoid speculative modules or APIs.
+1. 不要假设。不要隐藏困惑。主动暴露权衡取舍。
+2. 只写解决当前问题的最小代码，不做任何推测性功能。
+3. 只修改必须改的地方，只清理自己产生的问题。
+4. 明确定义成功标准，验证通过前持续迭代。
+
+## 反过度工程 / 反防御性编程
+
+- 信任内部代码和框架保证。
+- 只在系统边界（用户输入、外部 API、网络）做校验。
+- 禁止为「不可能发生」的场景添加错误处理、回退、空值检查或验证。
+- 绝不吞掉错误（禁止 rescue nil / 宽泛 catch / 静默默认值）。
+- 禁止为一次性操作创建辅助函数、工具类或抽象。
+- 优先快速失败，而不是掩盖问题。
+
+## 当前项目数据边界
+
+- P2 行情与历史成分采用 BaoStock；后续阶段如需其他资料，应明确来源及当时可见时间，不把 P2 的来源选择当作永久单源限制。
+- 提供的 CSV 可读取，但不得修改。
+- 本地文件研究输入只读取 `train.csv`；`test.csv` 不进入研究代码，只能由最终隔离评分环节读取。
+- 证券代码保留六位字符串，并执行时间点可见性约束。
+- 每次完成一版都上传一次github备份
