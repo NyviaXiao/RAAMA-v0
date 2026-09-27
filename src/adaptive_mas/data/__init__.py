@@ -2,6 +2,7 @@
 
 from adaptive_mas.data.baostock_source import BaoStockSource
 from adaptive_mas.data.market_data import load_training_bars, normalize_stock_code
+from adaptive_mas.data.public_data import load_public_records
 from adaptive_mas.data.research import (
     MarketSnapshot,
     ResearchData,
@@ -16,6 +17,7 @@ __all__ = [
     "ResearchData",
     "hs300_members_at",
     "load_oos_research_data",
+    "load_public_records",
     "load_research_data",
     "load_training_bars",
     "normalize_stock_code",

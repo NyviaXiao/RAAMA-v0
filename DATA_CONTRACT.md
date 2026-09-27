@@ -41,7 +41,7 @@
 
 本地 `train.csv` 的一个重叠样本与 BaoStock `adjustflag=1` 的 OHLC、成交量、成交额、换手率和涨跌幅一致；项目据此结合用户提供的来源说明使用 BaoStock 后复权口径。BaoStock 的 `adjustflag=1` 为后复权、`adjustflag=3` 为不复权；原始复权因子没有纳入本轮必要数据。价格和成交量单位仍沿用源数值，不做额外缩放。五交易日目标、交易成本和具体成交规则留在后续研究协议中确定。
 
-## 后续数据类型提案：只定义字段，不实现
+## 后续数据类型与 AKShare 入口
 
 所有未来记录保留 `source`、`source_record_id`、`fetched_at`、`raw_response_ref`、`available_at`；时间戳应带时区，并按来源文档分别保存事件、公布、生效和修订时间。
 
@@ -52,4 +52,4 @@
 | `MacroRecord` | `series_id, observation_period, value, unit, released_at, revision_id` | 观察期不等于公布日；保留初值与修订值 |
 | `IndexMembershipRecord` | `index_id, symbol, effective_from, effective_to, announced_at` | 调整公告日和成分生效日分别保存 |
 
-这些是未来来源接入的最小语义提案，不表示本地数据已含这些字段，也不构成 Phase 1 的实现 API。
+目前已实现 AKShare 的原始响应缓存与最小可见性读取，范围和限制见 [PUBLIC_DATA.md](PUBLIC_DATA.md)。这里的字段表仍是 P9 基本面、新闻分析等后续消费者的语义约定；它不表示这些模型已经实现，也不表示当前缓存已经覆盖表中全部字段。
