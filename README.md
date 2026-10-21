@@ -73,3 +73,7 @@ BaoStock 是唯一外部市场数据源。研究期本地行情仅读 `train.csv
 ## 研究边界
 
 模拟使用名义金额账本，不表示真实股数、券商订单确认或逐笔成交；未模拟涨跌停排队与完整公司行动现金流。风险估计采用历史个股波动与单一市场因子，不使用完整协方差或 CVaR。研究收益不构成实盘验证。若预测误差超过估计收益，维持现金可能是当前约束下的正确输出；这说明系统不认可这些交易的净增益，不代表策略取得收益。
+
+## Historical Agentic RL delivery (2026-10-22)
+
+Two-stage Expected SARSA learns query and fusion decisions, with fundamental/text residual calibration and once-debited research costs. See [delivery results and boundaries](AGENTIC_RL_HISTORICAL_ACCEPTANCE.md) and [offline prompt/context v3](docs/AGENTIC_RL_PROMPT_CONTEXT_V3.md). The frozen historical experiment did not demonstrate a return improvement; the new artifact is not wired into the legacy daily entry point. Existing local data and cached responses are required for replay and are not included in this source backup.
