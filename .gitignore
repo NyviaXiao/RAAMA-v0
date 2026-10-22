@@ -4,3 +4,6 @@
 __pycache__/
 .pytest_cache/
 /src/*.egg-info/
+
+/.tmp/
+/experiments/agentic_rl_historical_20261021/

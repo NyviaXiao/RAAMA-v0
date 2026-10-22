@@ -30,6 +30,44 @@ from run_p9_joint_economics import (
 
 
 VIEWED_THROUGH = date(2026, 9, 23)
+PREFREEZE_DIAGNOSTIC_THROUGH = date(2026, 9, 24)
+FIRST_POST_FREEZE_DATE = date(2026, 9, 28)
+FIRST_POST_FREEZE_EXECUTION_DATE = date(2026, 9, 29)
+
+
+def _partition_forward_dates(trading_dates: list[date] | tuple[date, ...]) -> tuple[list[date], list[date]]:
+    """Keep the 9/24 observation diagnostic; score only decisions after the 9/27 freeze."""
+    prefreeze = [
+        day for day in trading_dates
+        if VIEWED_THROUGH < day <= PREFREEZE_DIAGNOSTIC_THROUGH
+    ]
+    postfreeze = [day for day in trading_dates if day >= FIRST_POST_FREEZE_DATE]
+    unclassified = [
+        day for day in trading_dates
+        if PREFREEZE_DIAGNOSTIC_THROUGH < day < FIRST_POST_FREEZE_DATE
+    ]
+    if unclassified:
+        raise ValueError(f"冻结前出现未分类的交易日：{unclassified}")
+    return prefreeze, postfreeze
+
+
+def _post_freeze_account_decisions(
+    forecasts: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep the 9/23 warm-start history and post-freeze decisions, excluding 9/24 actions."""
+    def decision_date(row: dict[str, object]) -> date:
+        value = row.get("prediction_date", row.get("decision_date"))
+        if value is None:
+            raise ValueError("账户决策缺少 prediction_date/decision_date")
+        return value if isinstance(value, date) else date.fromisoformat(str(value))
+
+    return [
+        row for row in forecasts
+        if (
+            decision_date(row) <= VIEWED_THROUGH
+            or decision_date(row) >= FIRST_POST_FREEZE_DATE
+        )
+    ]
 
 
 def _sha256(path: Path) -> str:
@@ -64,6 +102,16 @@ def _slice_research(research, end: date):
     )
 
 
+def _research_for_as_of(research, as_of_date: date):
+    """Slice a verified cache to the requested point-in-time decision boundary."""
+    cached_dates = list(research.trading_dates)
+    if as_of_date not in cached_dates:
+        raise ValueError(f"指定 as-of 日期不在 BaoStock 缓存交易日中：{as_of_date}")
+    cache_through = cached_dates[-1]
+    excluded_cache_dates = [day for day in cached_dates if day > as_of_date]
+    return _slice_research(research, as_of_date), cache_through, excluded_cache_dates
+
+
 def _paired(left, right, seed: int):
     return paired_block_bootstrap(
         [float(row["daily_return"]) for row in left],
@@ -76,6 +124,12 @@ def _paired(left, right, seed: int):
 
 def _verify_frozen_manifest(path: Path, project: Path, training_csv: Path) -> dict[str, object]:
     frozen = json.loads(path.read_text(encoding="utf-8"))
+    if frozen.get("account_warm_start_as_of") != VIEWED_THROUGH.isoformat():
+        raise ValueError("P9 冻结清单账户暖启动日期不符")
+    if frozen.get("pre_freeze_diagnostic_through") != PREFREEZE_DIAGNOSTIC_THROUGH.isoformat():
+        raise ValueError("P9 冻结清单冻结前诊断边界不符")
+    if frozen.get("first_post_freeze_decision_date") != FIRST_POST_FREEZE_DATE.isoformat():
+        raise ValueError("P9 冻结清单首个冻结后决策日不符")
     for relative, expected in frozen["workspace_files_sha256"].items():
         actual = _sha256(project / relative)
         if actual != expected:
@@ -133,6 +187,7 @@ def _new_decision_label_coverage(
     forecasts: list[dict[str, object]],
     settlements: list[dict[str, object]],
     viewed_through: date,
+    first_genuinely_new_date: date,
     as_of_date: date,
 ) -> tuple[list[dict[str, object]], set[str]]:
     settlements_by_date = {}
@@ -142,7 +197,8 @@ def _new_decision_label_coverage(
     matured_dates = set()
     for forecast in forecasts:
         day = str(forecast["prediction_date"])
-        if date.fromisoformat(day) <= viewed_through:
+        forecast_date = date.fromisoformat(day)
+        if forecast_date <= viewed_through or forecast_date < first_genuinely_new_date:
             continue
         needed = {
             symbol
@@ -187,7 +243,7 @@ def main() -> None:
     parser.add_argument("--development-baostock-dir", type=Path, default=project / "data" / "raw" / "baostock" / "fetch-20260924T115050Z")
     parser.add_argument("--training-data-dir", type=Path, default=Path(r"C:\Users\xiao\Desktop\THU-BDC2026\data"))
     parser.add_argument("--cutover-baostock-dir", type=Path, default=project / "data" / "raw" / "baostock" / "fetch-20260924T150656Z")
-    parser.add_argument("--frozen-manifest", type=Path, default=project / "P9_P12_FROZEN_MANIFEST_20260927.json")
+    parser.add_argument("--frozen-manifest", type=Path, default=project / "P9_P12_FROZEN_MANIFEST_20260928.json")
     parser.add_argument("--expert-snapshot-root", type=Path, default=project / "experiments" / "p9_p12_forward" / "snapshots")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -230,9 +286,9 @@ def main() -> None:
         progress("verifying BaoStock response hashes and loading viewed cutover")
         verified_forward_responses = _verify_baostock_responses(args.baostock_run_dir)
         verified_cutover_responses = _verify_baostock_responses(args.cutover_baostock_dir)
-        research = load_oos_research_data(args.baostock_run_dir.resolve())
-        if research.trading_dates[-1] != args.as_of_date:
-            raise ValueError("BaoStock 缓存末日必须等于指定 as-of 日期")
+        research, source_cache_through, excluded_cache_dates = _research_for_as_of(
+            load_oos_research_data(args.baostock_run_dir.resolve()), args.as_of_date
+        )
         if VIEWED_THROUGH not in research.trading_dates:
             raise ValueError("BaoStock 缓存缺少已查看切换日 2026-09-23")
         viewed_research = _slice_research(research, VIEWED_THROUGH)
@@ -283,10 +339,14 @@ def main() -> None:
             raise ValueError("已查看截止日的模型训练状态与 P9 冻结清单不一致")
         (output / "model_cutover_seed_asof_2026-09-23.json.gz").write_bytes(cutover_seed_bytes)
 
-        fresh_dates = [day for day in research.trading_dates if day > VIEWED_THROUGH]
+        prefreeze_diagnostic_dates, fresh_dates = _partition_forward_dates(research.trading_dates)
+        post_cutover_dates = prefreeze_diagnostic_dates + fresh_dates
         full = viewed
-        if fresh_dates:
-            progress(f"replaying through {len(fresh_dates)} genuinely new BaoStock dates from the frozen development seed")
+        if post_cutover_dates:
+            progress(
+                f"replaying {len(post_cutover_dates)} post-cutover dates, of which "
+                f"{len(prefreeze_diagnostic_dates)} precede the 2026-09-27 freeze"
+            )
             full = run_mvp_research(
                 research, config, initial_state=development_seed,
                 as_of_date=args.as_of_date, ensure_as_of_decision=True,
@@ -311,19 +371,23 @@ def main() -> None:
         all_oos_forecasts = full["prediction_decisions"]
         all_oos_settlements = full["prediction_settlements"]
         expert_snapshots, expert_snapshot_hashes = _load_expert_snapshots(args.expert_snapshot_root)
+        post_freeze_expert_snapshots = {
+            day: snapshot for day, snapshot in expert_snapshots.items()
+            if date.fromisoformat(day) >= FIRST_POST_FREEZE_DATE
+        }
         extracted_documents = [
             document
-            for snapshot in expert_snapshots.values()
+            for snapshot in post_freeze_expert_snapshots.values()
             for document in snapshot.get("announcement_full_text", {}).get("documents", [])
         ]
         full_text_attempts = [
             attempt
-            for snapshot in expert_snapshots.values()
+            for snapshot in post_freeze_expert_snapshots.values()
             for attempt in snapshot.get("announcement_full_text", {}).get("attempts", [])
         ]
         full_text_llm_outputs = [
             row
-            for snapshot in expert_snapshots.values()
+            for snapshot in post_freeze_expert_snapshots.values()
             for row in snapshot.get("llm_outputs", {}).get("outputs", [])
             if any(evidence.get("dataset") == "announcement_full_text_pdf" for evidence in row.get("evidence", []))
         ]
@@ -381,7 +445,9 @@ def main() -> None:
         first_decision = date.fromisoformat(
             all_oos_forecasts[first_tradeable_index]["prediction_date"]
         )
-        account_forecasts = calibrated_forecasts[first_tradeable_index:]
+        account_forecasts = _post_freeze_account_decisions(
+            calibrated_forecasts[first_tradeable_index:]
+        )
         overlay_forecasts = []
         overlay_audit = []
         for forecast in account_forecasts:
@@ -394,6 +460,11 @@ def main() -> None:
                     **audit,
                     "expert_snapshot_sha256": expert_snapshot_hashes.get(decision_date),
                 })
+        if any(
+            date.fromisoformat(str(row["decision_date"])) < FIRST_POST_FREEZE_DATE
+            for row in overlay_audit
+        ):
+            raise ValueError("public_expert_overlay audit 包含冻结前决策日")
         with (output / "expert_overlay_decisions.jsonl").open("w", encoding="utf-8", newline="\n") as stream:
             for row in overlay_audit:
                 stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str, allow_nan=False) + "\n")
@@ -428,7 +499,7 @@ def main() -> None:
             )
             accounts[name] = account
 
-        trend_decisions = full["decisions_by_method"]["trend"]
+        trend_decisions = _post_freeze_account_decisions(full["decisions_by_method"]["trend"])
         progress("replaying the frozen P8 simple-trend comparator")
         accounts["p8_simple_trend"] = simulate_portfolio(
             research, trend_decisions, float(config["initial_capital_cny"]), costs,
@@ -465,9 +536,36 @@ def main() -> None:
                     stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str, allow_nan=False) + "\n")
 
         new_nav = {
-            name: [row for row in account["daily_nav"] if row["trade_date"] > VIEWED_THROUGH.isoformat()]
+            name: [row for row in account["daily_nav"] if row["trade_date"] >= FIRST_POST_FREEZE_DATE.isoformat()]
             for name, account in accounts.items()
         }
+        account_action_names = (
+            "p9_daily_selector", "p9_fixed_market_relative",
+            "p9_public_expert_overlay", "p8_simple_trend",
+        )
+        prefreeze_warmup_execution_orders = {}
+        for name in account_action_names:
+            orders = accounts[name]["orders"]
+            leaked_diagnostic_orders = [
+                row for row in orders
+                if row.get("decision_date") == PREFREEZE_DIAGNOSTIC_THROUGH.isoformat()
+            ]
+            if leaked_diagnostic_orders:
+                raise ValueError(f"{name} 将 2026-09-24 冻结前决策带入账户委托")
+            warmup_orders = [
+                row for row in orders
+                if row.get("decision_date") == VIEWED_THROUGH.isoformat()
+                and row.get("trade_date") == PREFREEZE_DIAGNOSTIC_THROUGH.isoformat()
+            ]
+            prefreeze_warmup_execution_orders[name] = {
+                "originating_decision_date": VIEWED_THROUGH.isoformat(),
+                "execution_date": PREFREEZE_DIAGNOSTIC_THROUGH.isoformat(),
+                "order_count": len(warmup_orders),
+                "filled_order_count": sum(float(row.get("filled_notional_cny", 0.0)) > 0 for row in warmup_orders),
+                "filled_notional_cny": sum(float(row.get("filled_notional_cny", 0.0)) for row in warmup_orders),
+                "transaction_cost_cny": sum(float(row.get("cost_cny", 0.0)) for row in warmup_orders),
+                "classification": "pre_freeze_warmup_execution_not_a_new_trade_date",
+            }
         new_account_results = {}
         for name, account in accounts.items():
             if not new_nav[name]:
@@ -477,41 +575,95 @@ def main() -> None:
                 row for row in account["daily_nav"]
                 if row["trade_date"] == VIEWED_THROUGH.isoformat()
             )
+            anchors = [
+                row for row in account["daily_nav"]
+                if VIEWED_THROUGH.isoformat() <= row["trade_date"] < FIRST_POST_FREEZE_DATE.isoformat()
+            ]
+            anchor_row = anchors[-1] if anchors else cutover_row
             new_orders = [
                 row for row in account["orders"]
-                if row["trade_date"] > VIEWED_THROUGH.isoformat()
+                if row["trade_date"] >= FIRST_POST_FREEZE_EXECUTION_DATE.isoformat()
             ]
             new_account_results[name] = {
                 "first_date": new_nav[name][0]["trade_date"],
                 "last_date": new_nav[name][-1]["trade_date"],
                 "trading_days": len(new_nav[name]),
                 "cutover_nav_cny": float(cutover_row["nav_cny"]),
+                "post_freeze_anchor_date": anchor_row["trade_date"],
+                "post_freeze_anchor_nav_cny": float(anchor_row["nav_cny"]),
                 "end_nav_cny": float(new_nav[name][-1]["nav_cny"]),
-                "net_return_since_cutover": (
-                    float(new_nav[name][-1]["nav_cny"]) / float(cutover_row["nav_cny"]) - 1
+                "net_return_from_prefreeze_anchor_including_first_carry_day": (
+                    float(new_nav[name][-1]["nav_cny"]) / float(anchor_row["nav_cny"]) - 1
+                ),
+                "first_post_freeze_nav_daily_return": float(new_nav[name][0]["daily_return"]),
+                "first_post_freeze_nav_return_attribution": (
+                    "frozen_pre_freeze_positions_and_any_2026-09-23_warmup_order_filled_on_2026-09-24; "
+                    "not caused by the 2026-09-28 close decision, whose earliest execution is 2026-09-29"
+                ),
+                "net_return_after_first_post_freeze_close": (
+                    float(new_nav[name][-1]["nav_cny"]) / float(new_nav[name][0]["nav_cny"]) - 1
                 ),
                 "new_date_transaction_cost_cny": sum(float(row["cost_cny"]) for row in new_orders),
             }
         new_label_coverage, matured_new_dates = _new_decision_label_coverage(
-            all_oos_forecasts, all_oos_settlements, VIEWED_THROUGH, args.as_of_date
+            all_oos_forecasts, all_oos_settlements, VIEWED_THROUGH,
+            FIRST_POST_FREEZE_DATE, args.as_of_date
         )
         paired = {}
         if fresh_dates:
-            selector = new_nav["p9_daily_selector"]
-            for offset, other in enumerate(("p9_fixed_market_relative", "p9_public_expert_overlay", "p8_simple_trend", "csi300_price_proxy"), start=1):
-                if [row["trade_date"] for row in selector] != [row["trade_date"] for row in new_nav[other]]:
-                    raise ValueError("P9 前向账户与基线的交易日期不一致")
-                paired[other] = _paired(selector, new_nav[other], 20260927 + offset)
-            paired["cash"] = paired_block_bootstrap(
-                [float(row["daily_return"]) for row in selector],
-                [0.0] * len(selector), block_sessions=20, repetitions=2000, seed=20260931,
-            )
+            paired_nav = {
+                name: [
+                    row for row in nav
+                    if row["trade_date"] >= FIRST_POST_FREEZE_EXECUTION_DATE.isoformat()
+                ]
+                for name, nav in new_nav.items()
+            }
+            selector = paired_nav["p9_daily_selector"]
+            if len(selector) < 20:
+                paired = {
+                    name: {
+                        "status": "not_computed_insufficient_post_freeze_dates",
+                        "common_date_count": len(selector),
+                        "required_common_dates": 20,
+                    }
+                    for name in (
+                        "p9_fixed_market_relative", "p9_public_expert_overlay",
+                        "p8_simple_trend", "csi300_price_proxy", "cash",
+                    )
+                }
+            else:
+                for offset, other in enumerate(("p9_fixed_market_relative", "p9_public_expert_overlay", "p8_simple_trend", "csi300_price_proxy"), start=1):
+                    if [row["trade_date"] for row in selector] != [row["trade_date"] for row in paired_nav[other]]:
+                        raise ValueError("P9 前向账户与基线的交易日期不一致")
+                    paired[other] = _paired(selector, paired_nav[other], 20260927 + offset)
+                paired["cash"] = paired_block_bootstrap(
+                    [float(row["daily_return"]) for row in selector],
+                    [0.0] * len(selector), block_sessions=20, repetitions=2000, seed=20260931,
+                )
         report = {
             "schema_version": "adaptive-mas.p9-forward.v1",
             "as_of_date": args.as_of_date.isoformat(),
+            "source_cache_through": source_cache_through.isoformat(),
+            "source_cache_dates_after_as_of_excluded": [day.isoformat() for day in excluded_cache_dates],
             "viewed_through": VIEWED_THROUGH.isoformat(),
+            "account_warm_start_as_of": VIEWED_THROUGH.isoformat(),
+            "pre_freeze_diagnostic_through": PREFREEZE_DIAGNOSTIC_THROUGH.isoformat(),
+            "pre_freeze_diagnostic_dates": [day.isoformat() for day in prefreeze_diagnostic_dates],
+            "first_post_freeze_decision_date": FIRST_POST_FREEZE_DATE.isoformat(),
+            "first_post_freeze_execution_date": FIRST_POST_FREEZE_EXECUTION_DATE.isoformat(),
+            "decision_execution_policy": {
+                "decision_formed_after_market_close": True,
+                "earliest_execution": "next_trading_session_open",
+                "first_post_freeze_decision_date": FIRST_POST_FREEZE_DATE.isoformat(),
+                "first_post_freeze_execution_date": FIRST_POST_FREEZE_EXECUTION_DATE.isoformat(),
+            },
             "first_shadow_account_decision": first_decision.isoformat(),
             "viewed_warmup_decisions_not_scored": len(viewed_forecasts),
+            "pre_freeze_diagnostic_decisions_not_scored": sum(
+                date.fromisoformat(str(row["prediction_date"])) in prefreeze_diagnostic_dates
+                for row in all_oos_forecasts
+            ),
+            "pre_freeze_warmup_execution_orders": prefreeze_warmup_execution_orders,
             "new_trading_dates": len(fresh_dates),
             "new_matured_decision_dates": len(matured_new_dates),
             "new_decision_label_coverage": new_label_coverage,
@@ -521,7 +673,7 @@ def main() -> None:
                 "awaiting_120_new_matured_decision_dates" if len(matured_new_dates) < 120 else
                 "ready_for_predeclared_comparison"
             ),
-            "claim": "Development and already-viewed dates are warm-up only; no new-date return is claimed before genuine fresh BaoStock dates mature.",
+            "claim": "The 2026-09-23 account remains the cutover warm start. The 2026-09-24 market observation is pre-freeze diagnostic: its bars may inform features for the 2026-09-28 close decision, but its forecast is removed from account actions and overlay audit because its next-session order would otherwise execute on 2026-09-28. Any 2026-09-23 warm-up order filled on 2026-09-24 remains warm-up activity. The 2026-09-28 first NAV return is separately attributed to frozen pre-freeze holdings; the 2026-09-28 close signal first executes on 2026-09-29. Maturity counts start with 2026-09-28 decisions, while paired strategy-return comparisons start with 2026-09-29 execution dates.",
             "p9_rule": "rolling mature non-overlapping three-session top-fraction portfolio residual mean; select higher feasible trend/market-relative net objective on actual account state",
             "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
             "development_training_seed_sha256": _sha256(seed_path),
@@ -541,8 +693,14 @@ def main() -> None:
             "public_expert_overlay": {
                 "account": "p9_public_expert_overlay",
                 "same_simulator_and_starting_cutover_state_as_fixed_p9": True,
-                "snapshot_count": len(expert_snapshots),
-                "snapshot_sha256_by_decision_date": expert_snapshot_hashes,
+                "snapshot_count": len(post_freeze_expert_snapshots),
+                "prefreeze_diagnostic_snapshot_dates_excluded": sorted(
+                    day for day in expert_snapshots
+                    if VIEWED_THROUGH < date.fromisoformat(day) < FIRST_POST_FREEZE_DATE
+                ),
+                "snapshot_sha256_by_decision_date": {
+                    day: expert_snapshot_hashes[day] for day in post_freeze_expert_snapshots
+                },
                 "decision_adjustments": overlay_audit,
                 "current_status": (
                     "no_eligible_matured_expert_effects"
@@ -569,6 +727,8 @@ def main() -> None:
             "status": "complete", "finished_at_utc": datetime.now(timezone.utc).isoformat(),
             "new_trading_dates": len(fresh_dates),
             "new_matured_decision_dates": len(matured_new_dates),
+            "pre_freeze_diagnostic_dates": [day.isoformat() for day in prefreeze_diagnostic_dates],
+            "first_post_freeze_decision_date": FIRST_POST_FREEZE_DATE.isoformat(),
             "report": str(output / "forward_validation_report.json"),
         })
         progress(f"complete: new trading dates={len(fresh_dates)}, mature decisions={len(matured_new_dates)}")

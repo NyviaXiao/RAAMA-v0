@@ -86,6 +86,10 @@ class AkShareSource:
         frame["链接范围"] = "栏目页"
         return frame
 
+    def user_focus_index(self, code: str) -> pd.DataFrame:
+        symbol, _, _ = _vendor_code(code)
+        return ak.stock_comment_detail_scrd_focus_em(symbol=symbol)
+
     def macro_cpi(self) -> pd.DataFrame:
         return ak.macro_china_cpi()
 

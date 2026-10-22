@@ -300,6 +300,17 @@ def _capture_symbol(
     )
     _capture(
         cache_dir,
+        "attention_index",
+        "AKShare/Eastmoney",
+        "stock_comment_detail_scrd_focus_em",
+        {"symbol": symbol},
+        lambda: source.user_focus_index(code),
+        {"交易日", "用户关注指数"},
+        code,
+        collection_date,
+    )
+    _capture(
+        cache_dir,
         "announcement",
         "AKShare/CNInfo",
         "stock_zh_a_disclosure_report_cninfo",

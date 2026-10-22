@@ -312,6 +312,8 @@ def main() -> None:
         if args.decision_time.tzinfo is None or args.decision_time.utcoffset() is None:
             raise ValueError("decision-time 必须带时区")
         decision_time = args.decision_time.astimezone(SHANGHAI)
+        if decision_time.timetz().replace(tzinfo=None) < time(15, 0):
+            raise ValueError("专家快照必须在当日收盘后形成；请使用行情与公共资料采集完成后的北京时间")
         progress("loading the as-of research universe and existing account positions")
         research = load_oos_research_data(args.baostock_run_dir)
         available_market_dates = [day for day in research.trading_dates if day <= decision_time.date()]
@@ -350,6 +352,13 @@ def main() -> None:
             announcement_ids=set(args.announcement_id) if args.announcement_id else None,
             previously_observed_record_ids=previously_observed_record_ids,
         )
+        snapshot["decision_timing"] = {
+            "market_observation_date": market_date.isoformat(),
+            "formation_policy": "after_market_close_after_required_public_data_refresh",
+            "requested_decision_time": decision_time.isoformat(),
+            "final_snapshot_available_at": snapshot["decision_time"],
+            "earliest_execution_policy": "next_trading_session_open",
+        }
         snapshot["carry_forward_expert_signals"] = _carry_forward_llm_signals(
             previous_candidates, allowed_symbols, event_start, decision_time
         )
@@ -401,7 +410,8 @@ def main() -> None:
             "\n".join([
                 "# P9–P12 新增专家与控制器运行记录",
                 "",
-                f"决策时点：{decision_time.isoformat()}。评价期限：{args.horizon_sessions} 个交易日。",
+                f"收盘后决策时点：{snapshot['decision_time']}；公共资料刷新须早于请求截点 {decision_time.isoformat()}。"
+                f"本快照最早于下一交易日开盘执行。评价期限：{args.horizon_sessions} 个交易日。",
                 "",
                 f"P9 结构化基本面状态 {sum(row['expert'] == 'fundamental_rule_v1' for row in snapshot['p9_outputs'])} 条；"
                 f"新增公告标题事件 {snapshot['source_coverage']['new_announcements']} 条；"
@@ -415,7 +425,7 @@ def main() -> None:
                 f"P11 有证据的未解决分歧 {len(challenges)} 条；本次可用成熟绩效记忆 {len(performance)} 条。",
                 f"全历史已保存专家预测 {len(forecast_history)} 条，已成熟结果 {len(outcomes)} 条，待成熟/不匹配行情记录 {len(pending)} 条。",
                 "",
-                "当前财务和公告响应于 2026-09-27 回填。读取严格要求本地抓取不晚于决策时点；因此它们不能提供 2026-09-27 之前的历史点时预测。财务修订版本仍未验证。规则输出只基于标题；本次限定数量的公告 PDF 全文只有在巨潮链接可达且文本提取成功时才交给 LLM，并附 PDF 与文本哈希。新闻仅为 CLS 最近 20 条并要求抓取已发生；宏观只接收有 NBS 正式 PubDate 且完成抓取的值。",
+                "财务、公告、新闻和宏观记录只纳入本地抓取时间不晚于请求截点的版本；日更公司资料仅刷新传入的持仓与候选股票，宏观及 CLS 快讯按采集日各归档一次。历史回填没有历史采集快照，不能提供早于首次抓取时点的历史点时预测；财务修订版本仍未验证。规则输出只基于标题；本次限定数量的公告 PDF 全文只有在巨潮链接可达且文本提取成功时才交给 LLM，并附 PDF 与文本哈希。新闻仅为 CLS 最近 20 条并要求抓取已发生；宏观只接收有 NBS 正式 PubDate 且完成抓取的值。",
                 "",
                 "历史 P8/P9 同账户净增量当前不可估：财务/公告回填无历史采集快照，CLS 与宏观也无历史前向 vintage。当前脚本会自动扫描保存的逐日专家快照，用 BaoStock 开盘进场、指定评价期限后的收盘价结算，记录股票相对 CSI 300 的方向性结果，并只把截止当前决策日之前已成熟结果写入 memory。候选调整需至少 20 个不重叠成熟决策日且其 95% 正态下界大于零；当前快照只准备估计，不改动资金决策。run_p9_forward_validation.py 已加入固定 P9 与公共专家 overlay 的同账户重放入口；P12 同账户 RL 与同约束动作基线由 run_p12_rl_control.py 执行。",
                 "",

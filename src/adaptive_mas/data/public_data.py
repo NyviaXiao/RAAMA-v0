@@ -18,6 +18,7 @@ PUBLIC_DATASETS = {
     "financial_statement_income_statement",
     "financial_statement_cash_flow_statement",
     "financial_indicator",
+    "attention_index",
     "announcement",
     "news",
     "macro_cpi",
@@ -299,6 +300,11 @@ def load_public_records(
                     }
                 ).encode("utf-8")
             ).hexdigest()
+        elif dataset == "attention_index":
+            observation_date = raw["交易日"]
+            published_at = _as_local_datetime(observation_date, date_only_next_day=True)
+            available_at = max(published_at, _manifest_fetched_at(entry))
+            source_record_id = f"{symbol}:attention:{observation_date}"
         elif dataset in {"macro_cpi", "macro_pmi"}:
             series_id = dataset.removeprefix("macro_")
             observation_month = raw["月份"]
@@ -363,6 +369,11 @@ def load_public_records(
         if dataset == "news":
             # Repeated CLS windows keep the first capture at which the event was visible.
             replace_existing = fetched_at < existing_fetched_at
+        elif dataset == "attention_index":
+            observation_date = raw["交易日"]
+            published_at = _as_local_datetime(observation_date, date_only_next_day=True)
+            available_at = max(published_at, _manifest_fetched_at(entry))
+            source_record_id = f"{symbol}:attention:{observation_date}"
         elif dataset in {"macro_cpi", "macro_pmi"}:
             # Macro snapshots must already be captured by decision_time; prefer newest.
             replace_existing = fetched_at > existing_fetched_at

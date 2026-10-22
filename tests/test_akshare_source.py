@@ -145,3 +145,18 @@ def test_nbs_history_stops_at_explicit_start_month(monkeypatch):
     listing_by_period = dict(zip(frame["observation_month"], frame["listing_page"]))
     assert listing_by_period["2025-12"] == akshare_source.NBS_RELEASE_INDEX
     assert listing_by_period["2024-01"] == index_one
+
+def test_user_focus_index_uses_exchange_free_code(monkeypatch):
+    requested = {}
+    monkeypatch.setattr(
+        akshare_source.ak,
+        "stock_comment_detail_scrd_focus_em",
+        lambda **kwargs: requested.update(kwargs) or pd.DataFrame(
+            [{"交易日": "2026-09-27", "用户关注指数": 12.5}]
+        ),
+    )
+
+    result = AkShareSource().user_focus_index("sh.600000")
+
+    assert requested == {"symbol": "600000"}
+    assert result.iloc[0]["用户关注指数"] == 12.5

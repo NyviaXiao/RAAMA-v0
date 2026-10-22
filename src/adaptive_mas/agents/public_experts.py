@@ -66,6 +66,7 @@ def build_public_expert_snapshot(
     announcement_document_dir: str | Path | None = None,
     announcement_ids: set[str] | None = None,
     previously_observed_record_ids: set[str] | None = None,
+    include_qwen: bool = True,
 ) -> dict[str, object]:
     """Produce latest financial state plus only newly published/captured events."""
     if decision_time.tzinfo is None or decision_time.utcoffset() is None:
@@ -94,6 +95,7 @@ def build_public_expert_snapshot(
     started = time.perf_counter_ns()
     datasets = (
         "financial_indicator",
+        "attention_index",
         "financial_statement_balance_sheet",
         "financial_statement_income_statement",
         "financial_statement_cash_flow_statement",
@@ -478,6 +480,51 @@ def build_public_expert_snapshot(
                 }],
             })
 
+    attention_by_symbol: dict[str, list[dict[str, object]]] = {}
+    for row in captured["attention_index"]:
+        code = str(row["symbol"]).rsplit(".", 1)[-1]
+        attention_by_symbol.setdefault(code, []).append(row)
+    attention_outputs = []
+    for symbol, rows in sorted(attention_by_symbol.items()):
+        rows.sort(key=lambda row: (str(row["published_at"]), str(row["source_record_id"])))
+        latest = rows[-1]
+        previous = rows[-2] if len(rows) > 1 else None
+        attention_outputs.append({
+            "record_id": hashlib.sha256(
+                f"attention-index-v1:{latest['source_record_id']}:{latest['content_sha256']}".encode("utf-8")
+            ).hexdigest(),
+            "record_kind": "state",
+            "expert": "market_attention_index_v1",
+            "symbol": symbol,
+            "event_type": "market_attention_index",
+            "prediction_date": decision_time.date().isoformat(),
+            "event_time": latest["published_at"],
+            "available_at": _effective_available_at(latest),
+            "horizon_sessions": evaluation_horizon_sessions,
+            "direction_score": 0,
+            "attention_index": _number(latest.get("用户关注指数")),
+            "previous_attention_index": (
+                _number(previous.get("用户关注指数")) if previous else None
+            ),
+            "attention_index_change": (
+                _number(latest.get("用户关注指数")) - _number(previous.get("用户关注指数"))
+                if previous and _number(latest.get("用户关注指数")) is not None
+                and _number(previous.get("用户关注指数")) is not None else None
+            ),
+            "interpretation_scope": "source_reported_market_attention_only_not_discussion_text_sentiment",
+            "evidence": [{
+                "source_record_id": latest["source_record_id"],
+                "dataset": "attention_index",
+                "trade_date": latest["交易日"],
+                "attention_index": _number(latest.get("用户关注指数")),
+                "published_at": latest["published_at"],
+                "available_at": _effective_available_at(latest),
+                "fetched_at": latest["fetched_at"],
+                "raw_response_ref": latest["raw_response_ref"],
+                "content_sha256": latest["content_sha256"],
+            }],
+        })
+
     rule_finished = time.perf_counter_ns()
     fresh_for_llm = [
         row for row in p9_outputs
@@ -489,9 +536,20 @@ def build_public_expert_snapshot(
     )
     if final_decision_time.date() != decision_time.date():
         raise ValueError("巨潮全文抓取完成时间跨越决策日期")
-    llm_result = call_qwen_expert(
-        fresh_for_llm, final_decision_time, evaluation_horizon_sessions,
-        max_records=llm_max_records,
+    llm_result = (
+        call_qwen_expert(
+            fresh_for_llm, final_decision_time, evaluation_horizon_sessions,
+            max_records=llm_max_records,
+        )
+        if include_qwen
+        else {
+            "status": "disabled_for_role_isolated_review",
+            "outputs": [],
+            "usage": None,
+            "estimated_token_cost_cny": 0.0,
+            "elapsed_ms": 0.0,
+            "completed_at": None,
+        }
     )
     if llm_result.get("completed_at"):
         final_decision_time = max(
@@ -516,6 +574,7 @@ def build_public_expert_snapshot(
         "p9_outputs": p9_outputs,
         "p10_outputs": p10_outputs,
         "macro_outputs": macro_outputs,
+        "attention_outputs": attention_outputs,
         "llm_outputs": llm_result,
         "announcement_full_text": {
             "status": (
@@ -544,6 +603,7 @@ def build_public_expert_snapshot(
             "matched_cls_observations": len(p10_outputs),
             "captured_cpi_values": len(captured["macro_cpi"]),
             "captured_pmi_values": len(captured["macro_pmi"]),
+            "captured_attention_records": len(captured["attention_index"]),
         },
             "limitations": [
             "Financial facts and vendor metrics are current at capture time but historical revisions are unverified.",
@@ -551,6 +611,7 @@ def build_public_expert_snapshot(
             "CNINFO evidence is headline-only; no announcement body is claimed or fetched.",
             "CLS is a captured latest-20 feed and is forward-only; its stored link is a section page.",
             "NBS CPI/PMI rows require formal PubDate and a completed local capture; vintage revisions remain unverified.",
+            "Market attention is the AKShare user-focus index only; this snapshot has no discussion-post text and makes no text-sentiment claim.",
             "Rule and LLM outputs are directional research signals, not expected-return forecasts or live trading inputs.",
         ],
     }

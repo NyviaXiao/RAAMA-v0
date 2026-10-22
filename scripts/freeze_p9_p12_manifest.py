@@ -86,8 +86,11 @@ def freeze(
     manifest = {
         "schema_version": "adaptive-mas.p9-p12-final-freeze.v1",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "last_already_viewed_date": "2026-09-23",
-        "first_genuinely_new_date_must_be_after": "2026-09-23",
+        "strategy_parameters_frozen_at": "2026-09-27T22:57:55+08:00",
+        "freeze_boundary_revision": "2026-09-28 before the first post-freeze close decision; strategy parameters unchanged",
+        "account_warm_start_as_of": "2026-09-23",
+        "pre_freeze_diagnostic_through": "2026-09-24",
+        "first_post_freeze_decision_date": "2026-09-28",
         "p9_baseline_manifest_sha256": _sha256(base_path),
         "workspace_files_sha256": {
             relative: _sha256(project / relative) for relative in relative_files
@@ -111,7 +114,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--training-data-dir", type=Path, default=Path(r"C:\Users\xiao\Desktop\THU-BDC2026\data"))
-    parser.add_argument("--output", type=Path, default=project / "P9_P12_FROZEN_MANIFEST_20260927.json")
+    parser.add_argument("--output", type=Path, default=project / "P9_P12_FROZEN_MANIFEST_20260928.json")
     args = parser.parse_args()
     print(freeze(project, args.training_data_dir, args.output))
 

@@ -6,12 +6,27 @@ import hashlib
 import json
 import math
 import statistics
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Mapping
 
+from adaptive_mas.agents.collaborative import (
+    build_agent_reports,
+    fixed_p9_comparison,
+    investment_manager_explanation,
+    one_round_challenge,
+    research_manager,
+    risk_role_reviews,
+    run_supplementary_challenge,
+)
 from adaptive_mas.data.research import ResearchData
+from adaptive_mas.evaluation.public_expert_overlay import add_public_expert_overlay
+from adaptive_mas.evaluation.contextual_rl import (
+    apply_action,
+    choose_action,
+    contextual_state,
+)
 from adaptive_mas.evaluation.mvp_research import _risk_estimates, run_mvp_research
 from adaptive_mas.portfolio.optimizer import OptimizationResult, optimize_portfolio
 
@@ -273,6 +288,7 @@ def create_daily_decision(
     portfolio: PortfolioState,
     training_state: dict[str, object] | None = None,
     versions: Mapping[str, str | None] | None = None,
+    collaboration_context: Mapping[str, object] | None = None,
 ) -> DailyDecision:
     """Create a pending, point-in-time decision from market data and account state."""
     portfolio.validate()
@@ -300,7 +316,104 @@ def create_daily_decision(
     }
     if versions:
         version_info.update(versions)
-    if forecast["forecast_errors_by_method"].get("loss_gated_fusion") is None:
+    selected_method = "loss_gated_fusion"
+    optimization_config = config
+    collaboration_trace = None
+    p9_optimization = None
+    collaboration_warmup_reason = None
+    if (
+        collaboration_context is not None
+        and forecast["forecast_errors_by_method"].get("market_plus_relative_fusion") is None
+    ):
+        selected_method = "market_plus_relative_fusion"
+        collaboration_warmup_reason = (
+            "固定 P9 预测误差尚未成熟，RL 专家权重暂无校准依据，暂不可决策"
+        )
+        collaboration_context = None
+    if collaboration_context is not None:
+        public_snapshot = collaboration_context.get("public_snapshot")
+        reports = build_agent_reports(
+            research,
+            as_of_date,
+            forecast,
+            public_snapshot,
+            config=config,
+            enable_qwen=bool(collaboration_context.get("enable_qwen", False)),
+        )
+        fixed_p9_forecast = forecast
+        forecast, overlay_trace = add_public_expert_overlay(forecast, public_snapshot)
+        debate = one_round_challenge(reports)
+        state = contextual_state(
+            forecast,
+            portfolio,
+            float(config.get("risk_budget_annualized", 0.20)),
+            research,
+            as_of_date,
+            int(config["risk_lookback_sessions"]),
+            int(config["risk_minimum_observations"]),
+        )
+        query_available = (
+            bool(collaboration_context.get("query_available", False))
+            and bool(debate["conflicts"])
+        )
+        controller = choose_action(
+            state["state"],
+            dict(collaboration_context.get("q_values", {})),
+            dict(collaboration_context.get("action_counts", {})),
+            query_available=query_available,
+            available_methods={
+                name for name, error in forecast["forecast_errors_by_method"].items()
+                if error is not None and name in forecast["expected_returns_by_method"]
+            },
+            minimum_samples=int(collaboration_context.get("minimum_action_samples", 20)),
+            exploration_rate=float(collaboration_context.get("exploration_rate", 0.0)),
+            seed=int(collaboration_context.get("seed", 0)),
+        )
+        if controller["supplementary_query"]:
+            debate = run_supplementary_challenge(
+                debate,
+                reports,
+                as_of_date,
+                int(forecast["horizon_sessions"]),
+            )
+        forecast = apply_action(forecast, controller["weights"])
+        selected_method = "rl_controlled_fusion"
+        optimization_config = {
+            **config,
+            "optimizer_return_method": selected_method,
+        }
+        if forecast["forecast_errors_by_method"].get("market_plus_relative_fusion") is not None:
+            p9_optimization, _ = optimize_forecast_target(
+                research,
+                fixed_p9_forecast,
+                portfolio,
+                {**config, "optimizer_return_method": "market_plus_relative_fusion"},
+            )
+        collaboration_trace = {
+            "schema_version": "raama-collaboration.v1",
+            "agent_reports": reports,
+            "effective_decision_time": reports["research_inputs"]["effective_decision_time"],
+            "one_round_bull_bear_challenge": debate,
+            "public_expert_overlay": overlay_trace,
+            "p11_memory_summary": (public_snapshot or {}).get("p11_memory_summary"),
+            "rl_controller": {
+                **controller,
+                "context": state,
+                "data_split": str(collaboration_context.get("data_split", "training")),
+                "exploration_rate": float(collaboration_context.get("exploration_rate", 0.0)),
+                "training_data_source": "mature feedback rows emitted by scripts/replay_contextual_rl_feedback.py from executed decision rows and account NAV replay",
+                "feedback_used_this_decision": int(collaboration_context.get("matured_feedback_used", 0)),
+                "training_evaluation_separation": "evaluation feedback is excluded from policy updates",
+                "supplementary_query_policy": (
+                    "disabled until cited challenge evidence has a predeclared calibrated numeric effect on candidates or weights"
+                ),
+            },
+            "numeric_signal_source": "mature calibrated returns only",
+            "optimizer_return_method": selected_method,
+            "forecast_error_allowance_rule": "maximum matured component forecast error in selected calibrated blend",
+        }
+
+    if forecast["forecast_errors_by_method"].get(selected_method) is None:
         execution_index = research.trading_dates.index(as_of_date) + 1
         execution_date = (
             research.trading_dates[execution_index].isoformat()
@@ -313,7 +426,7 @@ def create_daily_decision(
             status="warmup_no_action",
             prediction_status="pending",
             prediction_horizon_sessions=int(forecast["horizon_sessions"]),
-            predictions_by_symbol=_predictions_by_symbol(forecast),
+            predictions_by_symbol=_predictions_by_symbol(forecast, selected_method),
             current_nav_cny=portfolio.nav_cny,
             current_cash_cny=portfolio.cash_cny,
             current_holdings_cny=dict(sorted(portfolio.holdings_cny.items())),
@@ -340,7 +453,11 @@ def create_daily_decision(
             evidence={
                 "input_cutoff": as_of_date.isoformat(),
                 "forecast_error_status": forecast["forecast_error_status"],
-                "reason": "等待成熟预测误差后才允许优化并生成订单",
+                "reason": collaboration_warmup_reason or "等待成熟预测误差后才允许优化并生成订单",
+                "collaboration_status": (
+                    "warmup_unavailable_fixed_p9_calibration"
+                    if collaboration_warmup_reason else None
+                ),
                 "matured_rank_ic_windows": diagnostic["matured_rank_ic_windows_at_end"],
                 "ridge_training_rows": diagnostic["training_rows_at_end"],
                 "expert_matured_performance": _expert_matured_performance(
@@ -353,7 +470,7 @@ def create_daily_decision(
             versions=version_info,
         )
     optimization, _ = optimize_forecast_target(
-        research, forecast, portfolio, config
+        research, forecast, portfolio, optimization_config
     )
     target_values = {
         symbol: weight * portfolio.nav_cny
@@ -366,8 +483,8 @@ def create_daily_decision(
     }
     buy_notional = math.fsum(max(change, 0.0) for change in target_changes.values())
     sell_notional = math.fsum(max(-change, 0.0) for change in target_changes.values())
-    expected_returns = forecast["expected_returns_by_method"]["loss_gated_fusion"]
-    error = float(forecast["forecast_errors_by_method"]["loss_gated_fusion"])
+    expected_returns = forecast["expected_returns_by_method"][selected_method]
+    error = float(forecast["forecast_errors_by_method"][selected_method])
     error_allowance_per_name = (
         float(config.get("forecast_error_multiplier", 0.5)) * error
     )
@@ -427,14 +544,14 @@ def create_daily_decision(
         research.trading_dates[execution_index].isoformat()
         if execution_index < len(research.trading_dates) else None
     )
-    return DailyDecision(
+    decision = DailyDecision(
         schema_version="adaptive-mas.decision.v1",
         as_of_date=as_of_date.isoformat(),
         execution_date=execution_date,
         status="pending_execution" if proposed_orders else "hold",
         prediction_status="pending",
         prediction_horizon_sessions=int(forecast["horizon_sessions"]),
-        predictions_by_symbol=_predictions_by_symbol(forecast),
+        predictions_by_symbol=_predictions_by_symbol(forecast, selected_method),
         current_nav_cny=portfolio.nav_cny,
         current_cash_cny=portfolio.cash_cny,
         current_holdings_cny=dict(sorted(portfolio.holdings_cny.items())),
@@ -492,6 +609,53 @@ def create_daily_decision(
         },
         versions=version_info,
     )
+    if collaboration_trace is not None:
+        decision_payload = decision.to_dict()
+        collaboration_trace["fixed_p9_comparison"] = fixed_p9_comparison(
+            decision, p9_optimization
+        )
+        collaboration_trace["research_manager"] = research_manager(
+            forecast,
+            selected_method,
+            collaboration_trace["agent_reports"],
+            float(config.get("forecast_error_multiplier", 0.5)),
+        )
+        collaboration_trace["risk_role_reviews"] = risk_role_reviews(
+            decision_payload,
+            optimization_config,
+        )
+        collaboration_trace["investment_manager"] = investment_manager_explanation(
+            decision_payload,
+            collaboration_trace["research_manager"],
+        )
+        query_cost = float(
+            collaboration_trace["one_round_bull_bear_challenge"].get(
+                "supplementary_query_cost_cny", 0.0
+            )
+        )
+        role_qwen_cost = math.fsum(
+            float(collaboration_trace["agent_reports"][role].get("estimated_token_cost_cny") or 0.0)
+            for role in ("market", "fundamental", "news", "market_attention")
+        )
+        analysis_cost = role_qwen_cost + query_cost
+        collaboration_trace["decision_cost_accounting"] = {
+            "estimated_transaction_cost_cny": decision.expected_transaction_cost_cny,
+            "role_qwen_cost_cny": role_qwen_cost,
+            "supplementary_query_cost_cny": query_cost,
+            "analysis_cost_cny": analysis_cost,
+            "estimated_total_decision_cost_cny": decision.expected_transaction_cost_cny + analysis_cost,
+            "execution_cost_source": "optimizer estimate; realized fills and fees enter account NAV feedback",
+            "analysis_cost_source": "sum of role Qwen token estimates and cited-challenge estimate; deducted once from feedback reward",
+        }
+        decision = replace(
+            decision,
+            evidence={
+                **decision.evidence,
+                "selected_optimizer_return_method": selected_method,
+                "collaborative_architecture": collaboration_trace,
+            },
+        )
+    return decision
 
 
 def _expert_matured_performance(
@@ -518,14 +682,14 @@ def _expert_matured_performance(
     }
 
 
-def _predictions_by_symbol(forecast: dict[str, object]) -> dict[str, dict[str, object]]:
+def _predictions_by_symbol(forecast: dict[str, object], method: str = "loss_gated_fusion") -> dict[str, dict[str, object]]:
     methods = forecast["expected_returns_by_method"]
     errors = forecast["forecast_errors_by_method"]
-    symbols = sorted(methods["loss_gated_fusion"])
+    symbols = sorted(methods[method])
     return {
         symbol: {
-            "expected_return": float(methods["loss_gated_fusion"][symbol]),
-            "forecast_error": errors.get("loss_gated_fusion"),
+            "expected_return": float(methods[method][symbol]),
+            "forecast_error": errors.get(method),
             "expert_expected_returns": {
                 agent_id: float(methods[agent_id][symbol])
                 for agent_id in ("trend", "reversal", "liquidity_confirmation")

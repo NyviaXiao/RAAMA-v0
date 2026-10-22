@@ -199,13 +199,25 @@ def simulate_portfolio(
     optimizer_config: dict[str, float | int] | None = None,
     progress_callback: Callable[[str], None] | None = None,
     evaluation_start_date: date | None = None,
+    forecast_controller: Callable[..., tuple[dict[str, object], dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     from adaptive_mas.decision import PortfolioState, optimize_forecast_target
     from adaptive_mas.portfolio.optimizer import PortfolioInfeasibleError
+    from adaptive_mas.evaluation.mvp_research import _risk_estimates
 
     def choose_optimization(forecast, account):
         selection = optimizer_config.get("optimizer_return_method")
         controller_action = forecast.get("controller_action")
+        controller_return_method = forecast.get("controller_return_method")
+        if controller_return_method is not None:
+            action_config = {
+                **optimizer_config,
+                "optimizer_return_method": str(controller_return_method),
+            }
+            optimization, _ = optimize_forecast_target(
+                research, forecast, account, action_config
+            )
+            return optimization, {"selected_return_method": str(controller_return_method)}
         if controller_action is not None:
             if controller_action not in {"trend", "market_plus_relative_fusion"}:
                 raise ValueError(f"不支持的控制器动作：{controller_action}")
@@ -270,6 +282,7 @@ def simulate_portfolio(
     targets_by_date: dict[date, dict[str, object]] = {}
     forecasts_by_date = {}
     decision_rows = []
+    daily_rows = []
     dynamic = forecast_decisions is not None
     if dynamic:
         if decisions or optimizer_config is None:
@@ -281,6 +294,8 @@ def simulate_portfolio(
         if not forecasts_by_date:
             raise ValueError("逐日优化模拟没有可执行预测记录")
     else:
+        if forecast_controller is not None:
+            raise ValueError("逐日控制器只能用于预测记录驱动的动态模拟")
         for decision in decisions:
             decision_date = decision["decision_date"]
             decision_index = research.trading_dates.index(decision_date)
@@ -326,14 +341,72 @@ def simulate_portfolio(
             ),
         }
 
+    def prepare_forecast(forecast, account, decision_date, decision_pause=None):
+        if forecast_controller is None:
+            return forecast, {}
+        controlled, selection = forecast_controller(
+            forecast=forecast,
+            account=account,
+            decision_date=decision_date,
+            daily_nav=tuple(daily_rows),
+            decisions=tuple(decision_rows),
+            decision_pause=decision_pause,
+        )
+        return controlled, selection
+
+    def untradeable_risk_pause(account, decision_date):
+        held_symbols = set(account.holdings_cny)
+        if not held_symbols:
+            return None
+        decision_index = research.trading_dates.index(decision_date)
+        lookback = int(optimizer_config["risk_lookback_sessions"])
+        minimum = int(optimizer_config["risk_minimum_observations"])
+        volatility, _, _ = _risk_estimates(
+            research, decision_index, held_symbols, lookback, minimum
+        )
+        missing_risk = sorted(held_symbols - set(volatility))
+        if not missing_risk:
+            return None
+        history_dates = research.trading_dates[
+            max(0, decision_index - lookback + 1):decision_index + 1
+        ]
+        paused_symbols = []
+        for symbol in missing_risk:
+            observations = sum(
+                (bar := adjusted.get((symbol, day))) is not None
+                and bar["return_1d"] is not None
+                for day in history_dates
+            )
+            bar = execution.get((symbol, decision_date))
+            execution_status = None if bar is None else str(bar["tradestatus"])
+            untradeable = (
+                bar is None
+                or execution_status != "1"
+                or bar["open"] is None
+            )
+            if observations >= minimum or not untradeable:
+                return None
+            paused_symbols.append({
+                "symbol": symbol,
+                "valid_return_observations": observations,
+                "minimum_required_observations": minimum,
+                "execution_status": execution_status,
+            })
+        return {
+            "reason": "held_symbol_risk_below_minimum_and_untradeable",
+            "symbols": paused_symbols,
+        }
+
     if dynamic:
         first_decision_date = min(forecasts_by_date)
         first_decision_index = research.trading_dates.index(first_decision_date)
         if first_decision_index + 1 >= len(research.trading_dates):
             raise ValueError("逐日优化模拟没有可执行的下一交易日")
         first_execution_date = research.trading_dates[first_decision_index + 1]
-        first_forecast = forecasts_by_date[first_decision_date]
         initial_state = PortfolioState(initial_capital_cny, {})
+        first_forecast, first_controller_selection = prepare_forecast(
+            forecasts_by_date[first_decision_date], initial_state, first_decision_date
+        )
         initial_optimization, initial_selection = choose_optimization(
             first_forecast, initial_state
         )
@@ -351,7 +424,10 @@ def simulate_portfolio(
             "one_way_turnover": initial_optimization.maximum_one_way_turnover,
             "objective_value": initial_optimization.objective_value,
             "controller_action": first_forecast.get("controller_action"),
+            "decision_status": "selected",
+            "action_applied": first_controller_selection.get("action_applied", True),
             **(initial_selection or {}),
+            **first_controller_selection,
             **decision_value_fields(
                 initial_optimization,
                 initial_state,
@@ -362,6 +438,7 @@ def simulate_portfolio(
         targets_by_date[first_execution_date] = {
             "decision_date": first_decision_date,
             "target_weights": initial_optimization.target_weights,
+            "research_cost_cny": float(first_controller_selection.get("research_cost_cny", 0.0)),
         }
 
     if not targets_by_date:
@@ -377,7 +454,6 @@ def simulate_portfolio(
     cash = initial_capital_cny
     positions: dict[str, float] = {}
     previous_nav = initial_capital_cny
-    daily_rows = []
     order_rows = []
     position_rows = []
     blocked_orders = 0
@@ -388,6 +464,7 @@ def simulate_portfolio(
     maximum_cash_roundoff_clamp_cny = 0.0
     turnover_notional = 0.0
     total_cost = 0.0
+    total_research_cost = 0.0
     if evaluation_start_date is None:
         first_index = research.trading_dates.index(min(targets_by_date))
     else:
@@ -406,6 +483,8 @@ def simulate_portfolio(
             )
         previous_date = research.trading_dates[day_index - 1] if day_index else None
         day_traded_notional = 0.0
+        day_research_cost = 0.0
+        daily_liquidity_used = defaultdict(float)
 
         # Mark existing positions from the previous close to today's open.
         if previous_date is not None:
@@ -425,12 +504,15 @@ def simulate_portfolio(
 
         if trade_date in targets_by_date:
             decision = targets_by_date[trade_date]
-            open_nav = cash + math.fsum(positions.values())
-            desired = {
-                symbol: float(weight) * open_nav
-                for symbol, weight in decision["target_weights"].items()
-            }
-            symbols = sorted(positions.keys() | desired.keys())
+            day_research_cost = float(decision.get("research_cost_cny", 0.0))
+            if not math.isfinite(day_research_cost) or day_research_cost < 0:
+                raise ValueError(
+                    f"Research fee must be finite and nonnegative on {trade_date}: "
+                    f"fee={day_research_cost!r}"
+                )
+            cash -= day_research_cost
+            total_research_cost += day_research_cost
+            symbols = sorted(positions.keys() | set(decision["target_weights"]))
             decision_index = research.trading_dates.index(decision["decision_date"])
             liquidity_dates = research.trading_dates[
                 max(0, decision_index - liquidity_lookback_sessions + 1) : decision_index + 1
@@ -449,9 +531,112 @@ def simulate_portfolio(
                     if amounts
                     else 0.0
                 )
+            pre_funding_nav = cash + math.fsum(positions.values())
+            if not math.isfinite(pre_funding_nav) or pre_funding_nav <= 0:
+                raise ValueError(
+                    f"Research fee leaves no positive account NAV on {trade_date}: "
+                    f"fee={day_research_cost:.6f}, cash={cash:.6f}"
+                )
             remaining_turnover_notional = max(
-                2 * maximum_one_way_turnover * open_nav, 0.0
+                2 * maximum_one_way_turnover * pre_funding_nav, 0.0
             )
+
+            # Fees are cash expenses. If the account is fully invested, sell
+            # enough of the existing liquid holdings to fund the fee before
+            # sizing the target rebalance. These sales use the same execution,
+            # liquidity, turnover, and transaction-cost rules as other orders.
+            if cash < 0:
+                for symbol in symbols:
+                    if cash >= -1e-8:
+                        break
+                    current_value = positions.get(symbol, 0.0)
+                    if current_value <= 0:
+                        continue
+                    bar = execution.get((symbol, trade_date))
+                    status = None if bar is None else str(bar["tradestatus"])
+                    requested = min(
+                        current_value,
+                        -cash / (1 - sell_cost_rate),
+                    )
+                    if status != "1" or bar["open"] is None:
+                        blocked_orders += 1
+                        order_rows.append({
+                            "trade_date": trade_date.isoformat(),
+                            "decision_date": decision["decision_date"].isoformat(),
+                            "symbol": symbol,
+                            "side": "sell",
+                            "requested_notional_cny": requested,
+                            "filled_notional_cny": 0.0,
+                            "reference_price": None if bar is None else bar["open"],
+                            "liquidity_limit_cny": liquidity_limits[symbol],
+                            "status": "unfilled_suspended_or_missing_research_fee_funding",
+                            "cost_cny": 0.0,
+                        })
+                        continue
+                    capacity = max(
+                        liquidity_limits[symbol] - daily_liquidity_used[symbol],
+                        0.0,
+                    )
+                    filled = min(
+                        requested,
+                        capacity,
+                        remaining_turnover_notional,
+                    )
+                    cost = filled * sell_cost_rate
+                    positions[symbol] = current_value - filled
+                    if positions[symbol] <= 1e-10:
+                        positions.pop(symbol, None)
+                    cash += filled - cost
+                    turnover_notional += filled
+                    day_traded_notional += filled
+                    daily_liquidity_used[symbol] += filled
+                    remaining_turnover_notional -= filled
+                    total_cost += cost
+                    if filled < requested:
+                        partial_orders += 1
+                        if remaining_turnover_notional <= capacity:
+                            turnover_limited_orders += 1
+                        else:
+                            liquidity_limited_orders += 1
+                    order_rows.append({
+                        "trade_date": trade_date.isoformat(),
+                        "decision_date": decision["decision_date"].isoformat(),
+                        "symbol": symbol,
+                        "side": "sell",
+                        "requested_notional_cny": requested,
+                        "filled_notional_cny": filled,
+                        "reference_price": bar["open"],
+                        "liquidity_limit_cny": capacity,
+                        "status": (
+                            "filled_for_research_fee"
+                            if filled == requested
+                            else "partial_turnover_limited_for_research_fee"
+                            if remaining_turnover_notional <= capacity
+                            else "partial_liquidity_limited_for_research_fee"
+                        ),
+                        "cost_cny": cost,
+                    })
+                if cash < -1e-8:
+                    raise ValueError(
+                        f"Research fee cannot be funded from liquid holdings on {trade_date}: "
+                        f"fee={day_research_cost:.6f}, remaining_cash={cash:.6f}"
+                    )
+                cash, cash_roundoff_cny = _cash_after_fill(
+                    cash, trade_date=trade_date, symbol="research_fee_funding"
+                )
+                if cash_roundoff_cny > 0:
+                    cash_roundoff_clamp_count += 1
+                    maximum_cash_roundoff_clamp_cny = max(
+                        maximum_cash_roundoff_clamp_cny,
+                        cash_roundoff_cny,
+                    )
+
+            open_nav = cash + math.fsum(positions.values())
+            desired = {
+                symbol: float(weight) * open_nav
+                for symbol, weight in decision["target_weights"].items()
+            }
+            symbols = sorted(positions.keys() | desired.keys())
 
             # Sell first so proceeds can fund buys on the same rebalance.
             for symbol in symbols:
@@ -479,7 +664,10 @@ def simulate_portfolio(
                         }
                     )
                     continue
-                capacity = liquidity_limits[symbol]
+                capacity = max(
+                    liquidity_limits[symbol] - daily_liquidity_used[symbol],
+                    0.0,
+                )
                 fill_limit = min(capacity, remaining_turnover_notional)
                 filled = min(requested, capacity, remaining_turnover_notional)
                 cost = filled * sell_cost_rate
@@ -489,6 +677,7 @@ def simulate_portfolio(
                 cash += filled - cost
                 turnover_notional += filled
                 day_traded_notional += filled
+                daily_liquidity_used[symbol] += filled
                 remaining_turnover_notional -= filled
                 total_cost += cost
                 if filled < requested:
@@ -543,7 +732,10 @@ def simulate_portfolio(
                         }
                     )
                     continue
-                capacity = liquidity_limits[symbol]
+                capacity = max(
+                    liquidity_limits[symbol] - daily_liquidity_used[symbol],
+                    0.0,
+                )
                 affordable = max(cash, 0.0) / (1 + buy_cost_rate)
                 fill_limit = min(affordable, capacity, remaining_turnover_notional)
                 filled = min(requested, affordable, capacity, remaining_turnover_notional)
@@ -568,6 +760,7 @@ def simulate_portfolio(
                         )
                     turnover_notional += filled
                     day_traded_notional += filled
+                    daily_liquidity_used[symbol] += filled
                     remaining_turnover_notional -= filled
                     total_cost += cost
                 order_rows.append(
@@ -635,6 +828,7 @@ def simulate_portfolio(
                 "nav_cny": nav,
                 "cash_cny": cash,
                 "daily_return": daily_return,
+                "research_cost_cny": day_research_cost,
                 "traded_notional_cny": day_traded_notional,
                 "one_way_turnover": day_traded_notional / (2 * open_nav)
                 if trade_date in targets_by_date and open_nav > 0 else 0.0,
@@ -655,8 +849,31 @@ def simulate_portfolio(
         previous_nav = nav
 
         if dynamic and trade_date in forecasts_by_date:
-            forecast = forecasts_by_date[trade_date]
             account = PortfolioState(cash, dict(positions))
+            decision_pause = untradeable_risk_pause(account, trade_date)
+            forecast, controller_selection = prepare_forecast(
+                forecasts_by_date[trade_date], account, trade_date, decision_pause
+            )
+            if decision_pause is not None:
+                next_index = day_index + 1
+                next_date = research.trading_dates[next_index] if next_index < len(research.trading_dates) else None
+                decision_rows.append({
+                    "decision_date": trade_date.isoformat(),
+                    "execution_date": None,
+                    "skipped_next_execution_date": next_date.isoformat() if next_date else None,
+                    "decision_status": "paused",
+                    "pause_reason": decision_pause["reason"],
+                    "paused_symbols": decision_pause["symbols"],
+                    "risk_constraint_status": "unverifiable_for_untradeable_existing_holding",
+                    "position_mark_policy": "retain_last_observed_adjusted_value_when_current_mark_is_missing; do_not_impute_return",
+                    "current_cash_cny": cash,
+                    "current_holdings_cny": dict(sorted(positions.items())),
+                    "current_nav_cny": account.nav_cny,
+                    "target_weights": None,
+                    "controller_action": None,
+                    **controller_selection,
+                })
+                continue
             optimization, selection = choose_optimization(forecast, account)
             next_index = day_index + 1
             next_date = research.trading_dates[next_index] if next_index < len(research.trading_dates) else None
@@ -674,7 +891,10 @@ def simulate_portfolio(
                 "one_way_turnover": optimization.maximum_one_way_turnover,
                 "objective_value": optimization.objective_value,
                 "controller_action": forecast.get("controller_action"),
+                "decision_status": "selected",
+                "action_applied": controller_selection.get("action_applied", True),
                 **(selection or {}),
+                **controller_selection,
                 **decision_value_fields(
                     optimization,
                     account,
@@ -686,6 +906,7 @@ def simulate_portfolio(
                 targets_by_date[next_date] = {
                     "decision_date": trade_date,
                     "target_weights": optimization.target_weights,
+                    "research_cost_cny": float(controller_selection.get("research_cost_cny", 0.0)),
                 }
 
     navs = [float(row["nav_cny"]) for row in daily_rows]
@@ -716,6 +937,8 @@ def simulate_portfolio(
     )
     annualization = 250 / len(daily_rows)
     final_nav = navs[-1]
+    optimized_decisions = [row for row in decision_rows if "buy_notional_cny" in row]
+    paused_decisions = [row for row in decision_rows if row.get("decision_status") == "paused"]
     return {
         "summary": {
             "start_date": daily_rows[0]["trade_date"],
@@ -764,24 +987,27 @@ def simulate_portfolio(
                 for row in order_rows if row["side"] == "sell"
             ),
             "total_transaction_cost_cny": total_cost,
-            "optimizer_decision_count": len(decision_rows),
+            "research_cost_cny": total_research_cost,
+            "total_cost_including_research_cny": total_cost + total_research_cost,
+            "optimizer_decision_count": len(optimized_decisions),
+            "paused_decision_count": len(paused_decisions),
             "mean_optimizer_buy_notional_cny": (
-                statistics.fmean(float(row["buy_notional_cny"]) for row in decision_rows)
-                if decision_rows else 0.0
+                statistics.fmean(float(row["buy_notional_cny"]) for row in optimized_decisions)
+                if optimized_decisions else 0.0
             ),
             "mean_optimizer_sell_notional_cny": (
-                statistics.fmean(float(row["sell_notional_cny"]) for row in decision_rows)
-                if decision_rows else 0.0
+                statistics.fmean(float(row["sell_notional_cny"]) for row in optimized_decisions)
+                if optimized_decisions else 0.0
             ),
             "mean_risk_adjusted_net_incremental_value_cny": (
                 statistics.fmean(
                     float(row["risk_adjusted_net_incremental_value_cny"])
-                    for row in decision_rows
-                ) if decision_rows else 0.0
+                    for row in optimized_decisions
+                ) if optimized_decisions else 0.0
             ),
             "positive_risk_adjusted_net_incremental_value_decisions": sum(
                 float(row["risk_adjusted_net_incremental_value_cny"]) > 1e-8
-                for row in decision_rows
+                for row in optimized_decisions
             ),
             "mean_cash_weight": statistics.fmean(float(row["cash_weight"]) for row in daily_rows),
             "minimum_cash_weight": min(float(row["cash_weight"]) for row in daily_rows),

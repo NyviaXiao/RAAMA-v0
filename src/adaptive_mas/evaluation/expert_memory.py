@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 
@@ -157,3 +157,45 @@ def update_matured_performance_memory(
             "outcome_ref": outcome["outcome_ref"],
         })
     return memory
+
+def candidate_performance_effects(
+    memory: list[dict[str, object]],
+    trading_dates: tuple[date, ...],
+) -> dict[str, dict[str, object]]:
+    """Reuse P11's 20-date nonoverlap and positive 95% lower-bound gate."""
+    import statistics
+
+    index_by_date = {day.isoformat(): index for index, day in enumerate(trading_dates)}
+    by_expert: dict[tuple[str, int], dict[str, list[float]]] = {}
+    for row in memory:
+        if float(row["directional_return"]) == 0:
+            continue
+        key = (str(row["expert"]), int(row["horizon_sessions"]))
+        by_expert.setdefault(key, {}).setdefault(
+            str(row["prediction_date"]), []
+        ).append(float(row["directional_return"]))
+    effects = {}
+    for (expert, horizon), values_by_date in sorted(by_expert.items()):
+        observations = []
+        previous_index = None
+        for day in sorted(values_by_date):
+            current_index = index_by_date[day]
+            if previous_index is None or current_index - previous_index >= horizon:
+                observations.append(statistics.fmean(values_by_date[day]))
+                previous_index = current_index
+        count = len(observations)
+        mean = statistics.fmean(observations) if observations else 0.0
+        standard_error = (
+            statistics.stdev(observations) / count**0.5 if count > 1 else None
+        )
+        lower = mean - 1.96 * standard_error if standard_error is not None else None
+        eligible = count >= 20 and lower is not None and lower > 0
+        effects[f"{expert}:{horizon}s"] = {
+            "matured_nonoverlapping_decision_dates": count,
+            "mean_directional_active_return": mean if count else None,
+            "normal_95pct_lower_bound": lower,
+            "minimum_nonoverlapping_decision_dates": 20,
+            "candidate_return_adjustment": lower if eligible else 0.0,
+            "status": "candidate_effect_eligible" if eligible else "pending_or_no_positive_lower_bound",
+        }
+    return effects

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -8,6 +8,7 @@ from adaptive_mas.agents import qwen_expert
 from adaptive_mas.agents import public_experts
 from adaptive_mas.evaluation.expert_memory import (
     build_evidence_challenges,
+    candidate_performance_effects,
     update_matured_performance_memory,
 )
 
@@ -318,3 +319,24 @@ class _Response:
 
     def read(self):
         return json.dumps(self.body).encode("utf-8")
+
+def test_candidate_performance_effects_reuses_twenty_nonoverlapping_date_gate():
+    trading_dates = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(60))
+    memory = [
+        {
+            "expert": "fundamental_rule_v1",
+            "horizon_sessions": 3,
+            "prediction_date": day.isoformat(),
+            "directional_return": 0.01,
+        }
+        for day in trading_dates
+    ]
+
+    eligible = candidate_performance_effects(memory, trading_dates)["fundamental_rule_v1:3s"]
+    pending = candidate_performance_effects(memory[:57], trading_dates)["fundamental_rule_v1:3s"]
+
+    assert eligible["matured_nonoverlapping_decision_dates"] == 20
+    assert eligible["status"] == "candidate_effect_eligible"
+    assert eligible["normal_95pct_lower_bound"] == pytest.approx(0.01)
+    assert pending["matured_nonoverlapping_decision_dates"] == 19
+    assert pending["candidate_return_adjustment"] == 0.0

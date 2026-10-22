@@ -220,3 +220,147 @@ def call_qwen_expert(
         "elapsed_ms": elapsed_ms,
         "completed_at": completed_at,
     }
+
+def call_qwen_research_role(
+    role_id: str,
+    task: str,
+    evidence_records: list[dict[str, object]],
+    decision_time: datetime,
+    evaluation_horizon_sessions: int,
+    api_key: str | None = None,
+) -> dict[str, object]:
+    """Run one role-specific evidence review through the existing compatible API."""
+    if decision_time.tzinfo is None or decision_time.utcoffset() is None:
+        raise ValueError("decision_time must include a timezone")
+    if evaluation_horizon_sessions < 1:
+        raise ValueError("evaluation_horizon_sessions must be positive")
+    if not evidence_records:
+        return {
+            "status": "not_run_no_evidence",
+            "role_id": role_id,
+            "outputs": [],
+            "usage": None,
+            "estimated_token_cost_cny": 0.0,
+            "elapsed_ms": 0.0,
+            "completed_at": None,
+        }
+    credential = api_key if api_key is not None else os.environ.get("POPAGENT_LLM_KEY")
+    endpoint = os.environ.get("POPAGENT_LLM_URL")
+    model = os.environ.get("POPAGENT_LLM_MODEL", QWEN_MODEL)
+    if not credential:
+        return {
+            "status": "not_run_missing_POPAGENT_LLM_KEY",
+            "role_id": role_id,
+            "model": model,
+            "endpoint": endpoint,
+            "outputs": [],
+            "usage": None,
+            "estimated_token_cost_cny": None,
+            "elapsed_ms": 0.0,
+            "completed_at": None,
+        }
+    if not endpoint:
+        raise ValueError("A configured POPAGENT_LLM_URL is required when an API key is available")
+
+    allowed_sources = {
+        str(record["source_record_id"])
+        for row in evidence_records
+        for record in row["evidence"]
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an independent, auditable research role. Use only the "
+                    "provided records; do not invent facts or forecasts. A direction "
+                    "score is research evidence, not a calibrated return. Distinguish "
+                    "publication time, local availability and the comparison label "
+                    "horizon. Return only JSON matching the requested schema."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "role_id": role_id,
+                        "task": task,
+                        "decision_time": decision_time.astimezone(SHANGHAI).isoformat(),
+                        "evaluation_horizon_sessions": evaluation_horizon_sessions,
+                        "records": evidence_records,
+                        "schema": {
+                            "conclusion": "brief evidence-based statement",
+                            "direction_score": -1,
+                            "supports": [
+                                {"source_record_id": "provided id", "reason": "evidence"}
+                            ],
+                            "opposes": [
+                                {"source_record_id": "provided id", "reason": "evidence"}
+                            ],
+                            "uncertainties": ["specific limitation"],
+                        },
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ],
+        "temperature": 0,
+        "max_tokens": 2500,
+        "response_format": {"type": "json_object"},
+    }
+    request = Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {credential}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    started = time.perf_counter_ns()
+    with urlopen(request, timeout=60) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+    parsed = json.loads(body["choices"][0]["message"]["content"])
+    direction = int(parsed["direction_score"])
+    if direction not in {-1, 0, 1}:
+        raise ValueError("Qwen role direction_score must be -1, 0 or 1")
+    for side in ("supports", "opposes"):
+        for citation in parsed[side]:
+            if str(citation["source_record_id"]) not in allowed_sources:
+                raise ValueError("Qwen role cited a source absent from its input")
+    usage = body["usage"]
+    prompt_tokens = int(usage["prompt_tokens"])
+    completion_tokens = int(usage["completion_tokens"])
+    completed_at = datetime.now(SHANGHAI).isoformat()
+    return {
+        "status": "completed",
+        "role_id": role_id,
+        "model": model,
+        "endpoint": endpoint,
+        "conclusion": str(parsed["conclusion"]),
+        "direction_score": direction,
+        "supports": parsed["supports"],
+        "opposes": parsed["opposes"],
+        "uncertainties": parsed["uncertainties"],
+        "cited_source_record_ids": sorted({
+            str(citation["source_record_id"])
+            for side in ("supports", "opposes")
+            for citation in parsed[side]
+        }),
+        "evaluation_horizon_sessions": evaluation_horizon_sessions,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": int(usage["total_tokens"]),
+        },
+        "price_basis": "Aliyun Beijing published Qwen3.7-plus standard-mode promotional rate; provider bill not reconciled",
+        "estimated_token_cost_cny": (
+            prompt_tokens * 1.6 / 1_000_000
+            + completion_tokens * 6.4 / 1_000_000
+        ),
+        "elapsed_ms": elapsed_ms,
+        "completed_at": completed_at,
+    }
