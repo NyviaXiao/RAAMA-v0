@@ -511,7 +511,17 @@ def _structured_context_records(value: object) -> list[dict[str, object]]:
             is_source_fact = isinstance(item.get("facts"), dict)
             is_observation = "evidence_id" in item and "field" in item and "value" in item
             if is_source_fact or is_observation:
-                records.append({key: child for key, child in item.items() if key in metadata_keys})
+                reopen_ref = item.get("reopen_ref")
+                reopen_arguments = reopen_ref.get("arguments") if isinstance(reopen_ref, dict) else None
+                has_reopen_identity = (
+                    isinstance(item.get("evidence_id"), str)
+                    and isinstance(reopen_arguments, dict)
+                    and reopen_arguments.get("evidence_id") == item.get("evidence_id")
+                )
+                # Context cards are intentionally smaller than the source reference map.
+                # Keep a fact only when it remains uniquely identifiable and reopenable.
+                if is_observation or (is_source_fact and has_reopen_identity):
+                    records.append({key: child for key, child in item.items() if key in metadata_keys})
             for child in item.values():
                 visit(child)
 

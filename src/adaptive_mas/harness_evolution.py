@@ -49,7 +49,7 @@ PUBLIC_FACT_FIELDS = (
     "income_statement_revenue_yoy_pct",
     "income_statement_parent_profit_yoy_pct",
 )
-EVALUATOR_VERSION = "adaptive-mas.harness-evaluator.v2"
+EVALUATOR_VERSION = "adaptive-mas.harness-evaluator.v3"
 SCORE_WEIGHTS = {
     "fact_accuracy": 0.20,
     "required_fact_coverage": 0.12,
@@ -546,6 +546,8 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
     time_checks = []
     capture_time_checks = []
     capture_lag_source_ids: set[str] = set()
+    capture_time_unknown_source_ids: set[str] = set()
+    capture_time_invalid_source_ids: set[str] = set()
     tool_calls = []
     useful_calls = []
     for role, agent in result["agents"].items():
@@ -563,10 +565,18 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
                         and _timestamp(source["available_at"]) <= decision_time
                     )
                 time_checks.append(time_valid)
-                if source is not None and source.get("fetched_at"):
-                    fetched_before_decision = _timestamp(source["fetched_at"]) <= decision_time
+                fetched_at = source.get("fetched_at") if source is not None else None
+                if not fetched_at:
+                    capture_time_checks.append(False)
+                    capture_time_unknown_source_ids.add(evidence_id)
+                else:
+                    try:
+                        fetched_before_decision = _timestamp(fetched_at) <= decision_time
+                    except (TypeError, ValueError):
+                        fetched_before_decision = False
+                        capture_time_invalid_source_ids.add(evidence_id)
                     capture_time_checks.append(fetched_before_decision)
-                    if not fetched_before_decision:
+                    if not fetched_before_decision and evidence_id not in capture_time_invalid_source_ids:
                         capture_lag_source_ids.add(evidence_id)
                 citation_valid = (
                     source is not None
@@ -651,6 +661,23 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
     strict_capture_time_accuracy = (
         sum(capture_time_checks) / len(capture_time_checks) if capture_time_checks else 0.0
     )
+    public_evidence_mode = str(result.get("public_evidence_mode", "unknown"))
+    strict_pit_reasons = []
+    if public_evidence_mode != "captured_public_cache_cutoff":
+        strict_pit_reasons.append(
+            "public_evidence_mode_unknown"
+            if public_evidence_mode == "unknown"
+            else "public_evidence_mode_not_strict_capture"
+        )
+    if not cited_ids:
+        strict_pit_reasons.append("no_citations_to_verify")
+    if capture_time_unknown_source_ids:
+        strict_pit_reasons.append("missing_fetched_at")
+    if capture_time_invalid_source_ids:
+        strict_pit_reasons.append("invalid_fetched_at")
+    if capture_lag_source_ids:
+        strict_pit_reasons.append("capture_after_decision_time")
+    strict_historical_pit_verified = not strict_pit_reasons
     tool_efficiency = sum(useful_calls) / len(useful_calls) if useful_calls else 0.0
     case_usage = result["task_usage"]
     maximum_cost = MAX_RESEARCH_CALLS_PER_CASE * (
@@ -738,12 +765,14 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
         "point_in_time_accuracy": point_in_time_accuracy,
         "point_in_time_metric_scope": "source publication and reported availability cutoffs; fetch-time integrity is reported separately",
         "strict_capture_time_accuracy": strict_capture_time_accuracy,
-        "strict_historical_pit_verified": (
-            result.get("public_evidence_mode") != "retrospective_source_publication_proxy"
-            and not capture_lag_source_ids
-        ),
+        "strict_capture_time_check_count": len(capture_time_checks),
+        "capture_time_unknown_source_count": len(capture_time_unknown_source_ids),
+        "capture_time_invalid_source_count": len(capture_time_invalid_source_ids),
+        "strict_historical_pit_verified": strict_historical_pit_verified,
+        "strict_historical_pit_status": "verified" if strict_historical_pit_verified else "unverified",
+        "strict_historical_pit_reasons": strict_pit_reasons,
         "retrospective_capture_lag_source_count": len(capture_lag_source_ids),
-        "public_evidence_mode": str(result.get("public_evidence_mode", "unknown")),
+        "public_evidence_mode": public_evidence_mode,
         "required_fact_coverage": required_fact_coverage,
         "required_fact_coverage_status": "not_applicable" if required_fact_coverage is None else "scored",
         "required_fact_count": len(required_satisfied),
@@ -1029,7 +1058,10 @@ def _reflection_safe_info(result: dict[str, object], metrics: dict[str, object])
         "report_period_accuracy", "point_in_time_accuracy", "tool_efficiency",
         "concision_score", "completion_score", "completion_status",
         "point_in_time_metric_scope", "strict_capture_time_accuracy",
-        "strict_historical_pit_verified", "retrospective_capture_lag_source_count",
+        "strict_capture_time_check_count", "capture_time_unknown_source_count",
+        "capture_time_invalid_source_count", "strict_historical_pit_verified",
+        "strict_historical_pit_status", "strict_historical_pit_reasons",
+        "retrospective_capture_lag_source_count",
         "public_evidence_mode",
         "cost_efficiency", "verified_observation_count", "observation_count",
         "unique_citation_count", "duplicate_citation_count", "valid_citation_count",
@@ -1166,7 +1198,12 @@ def evaluate_candidate(
             "completion_status": "partial",
             "point_in_time_metric_scope": "report rejected by fixed output validation; no observations scored",
             "strict_capture_time_accuracy": 0.0,
+            "strict_capture_time_check_count": 0,
+            "capture_time_unknown_source_count": 0,
+            "capture_time_invalid_source_count": 0,
             "strict_historical_pit_verified": False,
+            "strict_historical_pit_status": "unverified",
+            "strict_historical_pit_reasons": ["report_rejected_before_citation_scoring"],
             "retrospective_capture_lag_source_count": 0,
             "public_evidence_mode": str(case.public_snapshot.get("data_mode", "unknown")),
             "cost_efficiency": max(0.0, 1 - task_cost / maximum_cost) if maximum_cost else 0.0,

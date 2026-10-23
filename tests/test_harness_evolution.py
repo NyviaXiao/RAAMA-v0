@@ -325,6 +325,50 @@ def test_scorer_does_not_reward_duplicate_citations_or_repeated_evidence_reads()
     assert metrics["required_fact_coverage"] == 1.0
 
 
+def test_scorer_keeps_missing_capture_time_unknown_in_strict_pit_status() -> None:
+    result = _synthetic_result()
+    result["public_evidence_mode"] = "captured_public_cache_cutoff"
+    result["evidence_catalog"]["public-evidence-1"].pop("fetched_at")
+
+    metrics = score_research_result(result)
+    report = _reflection_safe_info(result, metrics)
+
+    assert metrics["strict_capture_time_accuracy"] == 0.0
+    assert metrics["strict_capture_time_check_count"] == 2
+    assert metrics["capture_time_unknown_source_count"] == 1
+    assert metrics["strict_historical_pit_verified"] is False
+    assert metrics["strict_historical_pit_status"] == "unverified"
+    assert "missing_fetched_at" in metrics["strict_historical_pit_reasons"]
+    assert report["quality_metrics"]["strict_historical_pit_verified"] is False
+    assert report["quality_metrics"]["strict_historical_pit_status"] == "unverified"
+
+
+def test_scorer_does_not_verify_strict_pit_without_citations() -> None:
+    result = _synthetic_result()
+    result["public_evidence_mode"] = "captured_public_cache_cutoff"
+    finding = result["agents"]["market"]["report"]["findings"][0]
+    finding["evidence_ids"] = []
+    finding["observations"] = []
+
+    metrics = score_research_result(result)
+
+    assert metrics["strict_capture_time_accuracy"] == 0.0
+    assert metrics["strict_capture_time_check_count"] == 0
+    assert metrics["strict_historical_pit_verified"] is False
+    assert "no_citations_to_verify" in metrics["strict_historical_pit_reasons"]
+
+
+def test_scorer_does_not_infer_strict_pit_from_an_unknown_evidence_mode() -> None:
+    result = _synthetic_result()
+    result["public_evidence_mode"] = "unknown"
+
+    metrics = score_research_result(result)
+
+    assert metrics["strict_capture_time_accuracy"] == 1.0
+    assert metrics["strict_historical_pit_verified"] is False
+    assert "public_evidence_mode_unknown" in metrics["strict_historical_pit_reasons"]
+
+
 def test_scorer_maps_exact_market_metric_and_uses_the_actual_required_fact_count() -> None:
     result = _synthetic_result()
     source = result["evidence_catalog"]["public-evidence-1"]
@@ -344,7 +388,7 @@ def test_scorer_maps_exact_market_metric_and_uses_the_actual_required_fact_count
     assert metrics["fact_accuracy"] == 1.0
     assert metrics["required_fact_count"] == 1
     assert metrics["required_fact_coverage"] == 1.0
-    assert metrics["evaluator_version"] == "adaptive-mas.harness-evaluator.v2"
+    assert metrics["evaluator_version"] == "adaptive-mas.harness-evaluator.v3"
 
     finding["observations"][0]["field"] = "near_match_alias"
     metrics = score_research_result(result)
@@ -824,7 +868,7 @@ def test_compaction_fallback_keeps_multi_symbol_source_identity_and_reopens_each
         {"role": "system", "content": "system"},
         {"role": "user", "content": "fixture task"},
     ]
-    for index in range(2):
+    for index in range(1):
         messages.extend([
             {"role": "assistant", "tool_calls": [{"id": f"search-{index}", "type": "function"}]},
             {
@@ -844,7 +888,7 @@ def test_compaction_fallback_keeps_multi_symbol_source_identity_and_reopens_each
         record
         for step in summary["steps"]
         for record in step["result"].get("structured_facts", [])
-        if record.get("evidence_id") and record.get("facts")
+        if record.get("facts")
     ]
     by_source = {record["evidence_id"]: record for record in records}
     expected = {
@@ -854,8 +898,9 @@ def test_compaction_fallback_keeps_multi_symbol_source_identity_and_reopens_each
         ("600001", "2026Q2"): 2.5,
     }
 
-    assert len(by_source) == 4
+    assert len(records) == len(by_source) == 4
     for record in by_source.values():
+        assert record["reopen_ref"]["arguments"]["evidence_id"] == record["evidence_id"]
         identity = (record["symbol"], record["report_period"])
         assert record["facts"]["revenue_yoy_pct"] == expected[identity]
         reopened = handlers["read_cached_source"](record["reopen_ref"]["arguments"])
