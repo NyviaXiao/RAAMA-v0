@@ -4,7 +4,7 @@ import math
 import statistics
 from collections import defaultdict
 from datetime import date
-from typing import Callable
+from typing import Callable, Mapping
 
 from adaptive_mas.data.research import ResearchData
 
@@ -200,10 +200,28 @@ def simulate_portfolio(
     progress_callback: Callable[[str], None] | None = None,
     evaluation_start_date: date | None = None,
     forecast_controller: Callable[..., tuple[dict[str, object], dict[str, object]]] | None = None,
+    initial_account: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     from adaptive_mas.decision import PortfolioState, optimize_forecast_target
     from adaptive_mas.portfolio.optimizer import PortfolioInfeasibleError
     from adaptive_mas.evaluation.mvp_research import _risk_estimates
+
+    initial_state = PortfolioState(initial_capital_cny, {})
+    if initial_account is not None:
+        if set(initial_account) != {"cash_cny", "holdings_cny"}:
+            raise ValueError("initial_account must contain only cash_cny and holdings_cny")
+        holdings = initial_account["holdings_cny"]
+        if not isinstance(holdings, Mapping):
+            raise ValueError("initial_account holdings_cny must be a mapping")
+        initial_state = PortfolioState(
+            cash_cny=float(initial_account["cash_cny"]),
+            holdings_cny={str(symbol): float(value) for symbol, value in holdings.items()},
+        )
+        initial_state.validate()
+        if not math.isclose(
+            initial_state.nav_cny, initial_capital_cny, rel_tol=1e-9, abs_tol=0.01
+        ):
+            raise ValueError("initial_capital_cny must equal the initial_account NAV")
 
     def choose_optimization(forecast, account):
         selection = optimizer_config.get("optimizer_return_method")
@@ -403,7 +421,6 @@ def simulate_portfolio(
         if first_decision_index + 1 >= len(research.trading_dates):
             raise ValueError("逐日优化模拟没有可执行的下一交易日")
         first_execution_date = research.trading_dates[first_decision_index + 1]
-        initial_state = PortfolioState(initial_capital_cny, {})
         first_forecast, first_controller_selection = prepare_forecast(
             forecasts_by_date[first_decision_date], initial_state, first_decision_date
         )
@@ -414,7 +431,7 @@ def simulate_portfolio(
             "decision_date": first_decision_date.isoformat(),
             "execution_date": first_execution_date.isoformat(),
             "current_cash_cny": initial_state.cash_cny,
-            "current_holdings_cny": {},
+            "current_holdings_cny": dict(initial_state.holdings_cny),
             "current_nav_cny": initial_state.nav_cny,
             "target_weights": initial_optimization.target_weights,
             "gross_expected_return": initial_optimization.gross_expected_return,
@@ -451,8 +468,8 @@ def simulate_portfolio(
     buy_cost_rate = commission + transfer + slippage
     sell_cost_rate = commission + transfer + slippage + stamp
 
-    cash = initial_capital_cny
-    positions: dict[str, float] = {}
+    cash = initial_state.cash_cny
+    positions: dict[str, float] = dict(initial_state.holdings_cny)
     previous_nav = initial_capital_cny
     order_rows = []
     position_rows = []

@@ -292,6 +292,9 @@ def _source_card(source: dict[str, object], question_terms: set[str]) -> dict[st
         "exact_title": str(title) if title is not None else None,
         "published_at": str(source["published_at"]) if source.get("published_at") is not None else None,
         "available_at": str(source["available_at"]),
+        "fetched_at": str(source["fetched_at"]) if source.get("fetched_at") is not None else None,
+        "vintage_status": source.get("vintage_status"),
+        "retrospective_backfill_proxy": bool(source.get("retrospective_backfill_proxy", False)),
         "vintage_verified": bool(source.get("vintage_verified", False)),
     }
     if facts and not body_present:

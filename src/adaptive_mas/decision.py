@@ -123,6 +123,19 @@ def _optimizer_expected_returns(
     scope = config.get("optimizer_candidate_scope")
     if scope is None:
         return {str(symbol): float(value) for symbol, value in method_returns.items()}
+    if scope == "harness_priority":
+        priorities = [str(symbol) for symbol in config["optimizer_priority_symbols"]]
+        eligible = set(priorities)
+        method_returns_by_symbol = {
+            str(symbol): float(value) for symbol, value in method_returns.items()
+        }
+        if not eligible:
+            eligible = set(method_returns_by_symbol)
+        eligible_with_existing = eligible | (current_symbols or set())
+        return {
+            symbol: method_returns_by_symbol.get(symbol, 0.0)
+            for symbol in sorted(eligible_with_existing)
+        }
     if scope != "frozen_method_target":
         raise ValueError(f"不支持的联合优化候选范围：{scope}")
     targets_by_method = forecast.get("target_weights_by_method")
@@ -159,6 +172,13 @@ def _optimizer_candidate_symbols(
     scope = config.get("optimizer_candidate_scope")
     if scope is None:
         return None
+    if scope == "harness_priority":
+        method_returns = forecast["expected_returns_by_method"][return_method]
+        return {
+            str(symbol)
+            for symbol in config["optimizer_priority_symbols"]
+            if str(symbol) in method_returns
+        }
     if scope != "frozen_method_target":
         raise ValueError(f"不支持的联合优化候选范围：{scope}")
     targets_by_method = forecast.get("target_weights_by_method")
@@ -222,10 +242,16 @@ def optimize_forecast_target(
     factor_betas = {symbol: factor_betas[symbol] for symbol in risk_symbols}
     maximum_target_weights = None
     if candidate_symbols is not None:
-        maximum_target_weights = {
-            symbol: float(config["maximum_symbol_weight"])
-            for symbol in candidate_symbols
-        }
+        if config.get("optimizer_candidate_scope") == "harness_priority" and not candidate_symbols:
+            maximum_target_weights = {
+                str(symbol): 0.0
+                for symbol in forecast["expected_returns_by_method"][return_method]
+            }
+        else:
+            maximum_target_weights = {
+                symbol: float(config["maximum_symbol_weight"])
+                for symbol in candidate_symbols
+            }
         maximum_target_weights.update({
             symbol: current_weights[symbol]
             for symbol in current_symbols - candidate_symbols
@@ -289,15 +315,23 @@ def create_daily_decision(
     training_state: dict[str, object] | None = None,
     versions: Mapping[str, str | None] | None = None,
     collaboration_context: Mapping[str, object] | None = None,
+    harness_context: Mapping[str, object] | None = None,
+    research_diagnostic: Mapping[str, object] | None = None,
 ) -> DailyDecision:
     """Create a pending, point-in-time decision from market data and account state."""
+    if harness_context is not None and collaboration_context is not None:
+        raise ValueError("the calibrated GEPA harness and historical contextual-RL controller are separate decision paths")
     portfolio.validate()
-    diagnostic = run_mvp_research(
-        research,
-        config,
-        initial_state=training_state,
-        as_of_date=as_of_date,
-        ensure_as_of_decision=True,
+    diagnostic = (
+        dict(research_diagnostic)
+        if research_diagnostic is not None
+        else run_mvp_research(
+            research,
+            config,
+            initial_state=training_state,
+            as_of_date=as_of_date,
+            ensure_as_of_decision=True,
+        )
     )
     forecast = diagnostic["prediction_decisions"][-1]
     if forecast["prediction_date"] != as_of_date.isoformat():
@@ -319,6 +353,7 @@ def create_daily_decision(
     selected_method = "loss_gated_fusion"
     optimization_config = config
     collaboration_trace = None
+    harness_trace = None
     p9_optimization = None
     collaboration_warmup_reason = None
     if (
@@ -413,12 +448,53 @@ def create_daily_decision(
             "forecast_error_allowance_rule": "maximum matured component forecast error in selected calibrated blend",
         }
 
+    if harness_context is not None:
+        harness_trace = dict(harness_context)
+        harness_research = harness_context["research"]
+        if harness_research["status"] == "completed":
+            task_usage = harness_research["task_usage"]
+            task_cost_source = harness_context["research_cost"]
+            harness_trace["research_cost_accounting"] = {
+                "logical_research_cost_cny": float(task_usage["logical_estimated_cost_cny"]),
+                "actual_incremental_api_cost_cny": float(task_usage["api_incremental_cost_cny"]),
+                "source_task_api_cost_cny": float(task_usage.get("source_task_api_incremental_cost_cny", task_usage["api_incremental_cost_cny"])),
+                "cost_source": str(task_cost_source["cost_source"]),
+                "research_result_reused": bool(task_usage.get("research_result_reused_from_artifact", False)),
+                "logical_cost_counted_once": True,
+                "logical_cost_basis": "task token usage at planning rates; exact-response cache reuse leaves comparison cost unchanged",
+                "api_cost_basis": "new provider requests in this task only; cache reuse costs zero incremental API spend",
+            }
+            manager_priorities = harness_research["agents"]["research_manager"]["report"]["priority_symbols"]
+            calibrated_universe = forecast["expected_returns_by_method"][selected_method]
+            priority_symbols = list(dict.fromkeys(
+                str(row["symbol"])
+                for row in manager_priorities
+                if str(row["symbol"]) in calibrated_universe
+            ))
+            optimization_config = {
+                **config,
+                "optimizer_candidate_scope": "harness_priority",
+                "optimizer_priority_symbols": priority_symbols,
+            }
+            harness_trace["candidate_filter"] = {
+                "method": "manager-ranked sourced symbols intersected with calibrated forecast universe",
+                "priority_symbols": priority_symbols,
+                "empty_candidate_set_allows_cash": True,
+                "expected_returns_source": "unchanged loss_gated_fusion calibrated forecast",
+            }
+
     if forecast["forecast_errors_by_method"].get(selected_method) is None:
         execution_index = research.trading_dates.index(as_of_date) + 1
         execution_date = (
             research.trading_dates[execution_index].isoformat()
             if execution_index < len(research.trading_dates) else None
         )
+        if harness_trace is not None and "research_cost_accounting" in harness_trace:
+            harness_trace["decision_cost_accounting"] = {
+                **harness_trace["research_cost_accounting"],
+                "estimated_transaction_cost_cny": 0.0,
+                "estimated_total_decision_cost_cny": harness_trace["research_cost_accounting"]["logical_research_cost_cny"],
+            }
         return DailyDecision(
             schema_version="adaptive-mas.decision.v1",
             as_of_date=as_of_date.isoformat(),
@@ -466,6 +542,7 @@ def create_daily_decision(
                     forecast["loss_gate_weights"],
                     int(config["reliability_lookback_windows"]),
                 ),
+                "harness": harness_trace,
             },
             versions=version_info,
         )
@@ -606,6 +683,7 @@ def create_daily_decision(
                 "factor_beta_by_symbol": forecast["factor_beta_by_symbol"],
             },
             "prediction_record_status": forecast["status"],
+            "harness": harness_trace,
         },
         versions=version_info,
     )
@@ -654,6 +732,20 @@ def create_daily_decision(
                 "selected_optimizer_return_method": selected_method,
                 "collaborative_architecture": collaboration_trace,
             },
+        )
+    if harness_trace is not None and "research_cost_accounting" in harness_trace:
+        harness_trace["decision_cost_accounting"] = {
+            **harness_trace["research_cost_accounting"],
+            "estimated_transaction_cost_cny": decision.expected_transaction_cost_cny,
+            "estimated_total_decision_cost_cny": (
+                decision.expected_transaction_cost_cny
+                + harness_trace["research_cost_accounting"]["logical_research_cost_cny"]
+            ),
+            "nav_accounting": "deduct this task's logical research cost once when updating realized account NAV",
+        }
+        decision = replace(
+            decision,
+            evidence={**decision.evidence, "harness": harness_trace},
         )
     return decision
 

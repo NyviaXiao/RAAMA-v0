@@ -32,7 +32,17 @@ def _captured_records(records: list[dict[str, object]], decision_time: datetime)
 
 
 def _effective_available_at(record: dict[str, object]) -> str:
+    if record.get("retrospective_backfill_proxy") is True:
+        return str(record["available_at"])
     return max(_dt(record["available_at"]), _dt(record["fetched_at"])).isoformat()
+
+
+def _backfill_audit_fields(record: dict[str, object]) -> dict[str, object]:
+    return {
+        "fetched_at": record.get("fetched_at"),
+        "vintage_status": record.get("vintage_status"),
+        "retrospective_backfill_proxy": bool(record.get("retrospective_backfill_proxy", False)),
+    }
 
 
 def _headline_direction(title: str) -> tuple[int, str]:
@@ -67,6 +77,7 @@ def build_public_expert_snapshot(
     announcement_ids: set[str] | None = None,
     previously_observed_record_ids: set[str] | None = None,
     include_qwen: bool = True,
+    retrospective_backfill_proxy: bool = False,
 ) -> dict[str, object]:
     """Produce latest financial state plus only newly published/captured events."""
     if decision_time.tzinfo is None or decision_time.utcoffset() is None:
@@ -77,6 +88,10 @@ def build_public_expert_snapshot(
         raise ValueError("llm_max_records 必须为正数")
     if announcement_text_limit < 0:
         raise ValueError("announcement_text_limit 不能为负数")
+    if retrospective_backfill_proxy and announcement_text_limit:
+        raise ValueError(
+            "retrospective source-date mode permits cached disclosure titles only; body capture time is not proven"
+        )
     if allowed_symbols is not None and any(
         not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isascii() or not symbol.isdigit()
         for symbol in allowed_symbols
@@ -122,10 +137,35 @@ def build_public_expert_snapshot(
         )
         for dataset in datasets
     }
-    captured = {
-        dataset: _captured_records(rows, decision_time)
-        for dataset, rows in loaded.items()
+    historical_backfill_datasets = {
+        "financial_indicator",
+        "financial_statement_balance_sheet",
+        "financial_statement_income_statement",
+        "financial_statement_cash_flow_statement",
+        "announcement",
     }
+    captured = {}
+    for dataset, rows in loaded.items():
+        if not retrospective_backfill_proxy or dataset not in historical_backfill_datasets:
+            captured[dataset] = _captured_records(rows, decision_time)
+            continue
+        retrospective_rows = []
+        for row in rows:
+            # load_public_records has already enforced source publication/availability cutoffs.
+            # Its historical financial/announcement backfill path retains the real fetched_at
+            # and marks versions fetched after the cutoff as unverified.
+            fetched_after_decision = _dt(row["fetched_at"]) > decision_time
+            retrospective_rows.append({
+                **row,
+                "retrospective_backfill_proxy": fetched_after_decision,
+                "vintage_verified": False if fetched_after_decision else bool(row.get("vintage_verified", False)),
+            })
+        captured[dataset] = retrospective_rows
+    retrospective_capture_lag_count = sum(
+        bool(row.get("retrospective_backfill_proxy"))
+        for dataset in historical_backfill_datasets
+        for row in captured[dataset]
+    )
     new_announcements = [
         row for row in captured["announcement"]
         if _dt(row["published_at"]) > event_start_time
@@ -143,7 +183,11 @@ def build_public_expert_snapshot(
 
     statements_by_period: dict[tuple[str, str], list[tuple[str, dict[str, object]]]] = {}
     income_by_period: dict[tuple[str, str], dict[str, object]] = {}
-    for dataset in datasets[1:4]:
+    for dataset in (
+        "financial_statement_balance_sheet",
+        "financial_statement_income_statement",
+        "financial_statement_cash_flow_statement",
+    ):
         for row in captured[dataset]:
             period = str(row["报告日"]).replace("-", "")[:8]
             statements_by_period.setdefault((str(row["symbol"]), period), []).append((dataset, row))
@@ -208,7 +252,7 @@ def build_public_expert_snapshot(
             "content_sha256": latest["content_sha256"],
             "published_at": latest["published_at"],
             "available_at": _effective_available_at(latest),
-            "fetched_at": latest["fetched_at"],
+            **_backfill_audit_fields(latest),
             "vintage_verified": latest["vintage_verified"],
             "report_period": period,
             "revenue_yoy_pct": revenue_indicator_yoy,
@@ -229,7 +273,7 @@ def build_public_expert_snapshot(
                 "content_sha256": statement["content_sha256"],
                 "published_at": statement["published_at"],
                 "available_at": _effective_available_at(statement),
-                "fetched_at": statement["fetched_at"],
+                **_backfill_audit_fields(statement),
                 "vintage_verified": statement["vintage_verified"],
                 "report_period": statement_period,
                 "revenue_cny": _number(statement.get("营业收入")),
@@ -246,7 +290,7 @@ def build_public_expert_snapshot(
                 "content_sha256": statement["content_sha256"],
                 "published_at": statement["published_at"],
                 "available_at": _effective_available_at(statement),
-                "fetched_at": statement["fetched_at"],
+                **_backfill_audit_fields(statement),
                 "vintage_verified": statement["vintage_verified"],
                 "report_period": str(statement["报告日"]),
             })
@@ -298,7 +342,7 @@ def build_public_expert_snapshot(
                 "content_sha256": row["content_sha256"],
                 "published_at": row["published_at"],
                 "available_at": _effective_available_at(row),
-                "fetched_at": row["fetched_at"],
+                **_backfill_audit_fields(row),
             }],
             "vendor_vintage_verified": bool(row["vintage_verified"]),
         })
@@ -443,7 +487,7 @@ def build_public_expert_snapshot(
                     "content_sha256": row["content_sha256"],
                     "published_at": row["published_at"],
                     "available_at": _effective_available_at(row),
-                    "fetched_at": row["fetched_at"],
+                    **_backfill_audit_fields(row),
                 }],
             })
 
@@ -476,7 +520,7 @@ def build_public_expert_snapshot(
                     "content_sha256": row["content_sha256"],
                     "published_at": row["published_at"],
                     "available_at": _effective_available_at(row),
-                    "fetched_at": row["fetched_at"],
+                    **_backfill_audit_fields(row),
                 }],
             })
 
@@ -519,7 +563,7 @@ def build_public_expert_snapshot(
                 "attention_index": _number(latest.get("用户关注指数")),
                 "published_at": latest["published_at"],
                 "available_at": _effective_available_at(latest),
-                "fetched_at": latest["fetched_at"],
+                **_backfill_audit_fields(latest),
                 "raw_response_ref": latest["raw_response_ref"],
                 "content_sha256": latest["content_sha256"],
             }],
@@ -561,6 +605,17 @@ def build_public_expert_snapshot(
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
     return {
         "schema_version": "public-expert-snapshot.v1",
+        "data_mode": (
+            "retrospective_source_publication_proxy"
+            if retrospective_backfill_proxy else "captured_public_cache_cutoff"
+        ),
+        "strict_historical_pit_verified": False,
+        "retrospective_capture_lag_record_count": retrospective_capture_lag_count,
+        "availability_policy": (
+            "source publication and date-only next-day availability; later fetched_at is retained and marks vintage unverified"
+            if retrospective_backfill_proxy else
+            "source availability and fetched_at must both be no later than decision_time"
+        ),
         "requested_decision_time": decision_time.isoformat(),
         "decision_time": final_decision_time.isoformat(),
         "evaluation_horizon_sessions": evaluation_horizon_sessions,

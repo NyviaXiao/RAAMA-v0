@@ -226,6 +226,84 @@ def test_public_snapshot_filters_every_equity_dataset_to_allowed_symbols(monkeyp
     assert snapshot["source_coverage"]["captured_records"]["financial_indicator"] == 0
 
 
+def test_public_snapshot_does_not_treat_attention_rows_as_financial_statements(monkeypatch, tmp_path):
+    attention_row = {
+        "source_record_id": "attention:600000:20260925",
+        "symbol": "sh.600000",
+        "content_sha256": "a" * 64,
+        "raw_response_ref": "cache/attention.json",
+        "published_at": "2026-09-25T18:00:00+08:00",
+        "available_at": "2026-09-25T18:00:00+08:00",
+        "fetched_at": "2026-09-25T18:01:00+08:00",
+        "vintage_verified": True,
+        "vintage_status": "captured",
+        "交易日": "2026-09-25",
+        "用户关注指数": 12.5,
+    }
+
+    def read_records(_cache_dir, dataset, _decision_time, symbols=None, company_names=None):
+        return [attention_row] if dataset == "attention_index" else []
+
+    monkeypatch.setattr(public_experts, "load_public_records", read_records)
+    monkeypatch.delenv("POPAGENT_LLM_KEY", raising=False)
+
+    snapshot = public_experts.build_public_expert_snapshot(
+        tmp_path,
+        _at("2026-09-27T22:00:00"),
+        3,
+        announcement_text_limit=0,
+        include_qwen=False,
+    )
+
+    assert len(snapshot["attention_outputs"]) == 1
+    assert snapshot["attention_outputs"][0]["symbol"] == "600000"
+    assert snapshot["attention_outputs"][0]["attention_index"] == 12.5
+
+
+def test_retrospective_proxy_retains_late_capture_audit_and_strict_mode_excludes(monkeypatch, tmp_path):
+    historical_indicator = {
+        "source_record_id": "indicator:600000:2024-12-31",
+        "symbol": "sh.600000",
+        "content_sha256": "b" * 64,
+        "raw_response_ref": "cache/financial_indicator.json",
+        "published_at": "2025-03-31T16:00:00+08:00",
+        "available_at": "2025-03-31T16:00:00+08:00",
+        "fetched_at": "2026-09-27T09:10:00+08:00",
+        "vintage_verified": True,
+        "vintage_status": "historical_backfill",
+        "REPORT_DATE": "2024-12-31",
+        "TOTALOPERATEREVETZ": 4.2,
+        "PARENTNETPROFITTZ": 5.3,
+        "ROEJQ": 11.1,
+        "SECURITY_NAME_ABBR": "示例公司",
+    }
+
+    def read_records(_cache_dir, dataset, _decision_time, symbols=None, company_names=None):
+        return [historical_indicator] if dataset == "financial_indicator" else []
+
+    monkeypatch.setattr(public_experts, "load_public_records", read_records)
+    monkeypatch.delenv("POPAGENT_LLM_KEY", raising=False)
+    decision_time = _at("2026-04-20T16:00:00")
+
+    strict_snapshot = public_experts.build_public_expert_snapshot(
+        tmp_path, decision_time, 3, announcement_text_limit=0, include_qwen=False,
+    )
+    proxy_snapshot = public_experts.build_public_expert_snapshot(
+        tmp_path, decision_time, 3, announcement_text_limit=0, include_qwen=False,
+        retrospective_backfill_proxy=True,
+    )
+
+    assert strict_snapshot["p9_outputs"] == []
+    proxy_source = proxy_snapshot["p9_outputs"][0]["evidence"][0]
+    assert proxy_snapshot["data_mode"] == "retrospective_source_publication_proxy"
+    assert proxy_snapshot["strict_historical_pit_verified"] is False
+    assert proxy_source["published_at"] == historical_indicator["published_at"]
+    assert proxy_source["available_at"] == historical_indicator["available_at"]
+    assert proxy_source["fetched_at"] == historical_indicator["fetched_at"]
+    assert proxy_source["retrospective_backfill_proxy"] is True
+    assert proxy_source["vintage_verified"] is False
+
+
 def test_nontrading_observation_does_not_advance_event_consumption_watermark():
     from datetime import date
     from pathlib import Path

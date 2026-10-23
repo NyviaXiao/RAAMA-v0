@@ -1,0 +1,53 @@
+{
+  "schema_version": "adaptive-mas.harness-safe-candidate-audit.v1",
+  "run_id": "20261023104652",
+  "active_seed_sha256": "9f10a5130223d3f456f7afce8043a108b9a33bb9ed592e9e706f0a8c3bbb7c24",
+  "candidate_pool": {
+    "count": 1,
+    "contents": [
+      "seed"
+    ]
+  },
+  "proposal": {
+    "unique_count": 1,
+    "identical_logged_emissions_deduplicated": 2,
+    "rejected_count": 1,
+    "accepted_count": 0,
+    "candidate_sha256": "02ade42b001fe888b2a5ea9eb2d50e2f0c1d78cec322799f928e058ebc63f24b",
+    "changed_components": [
+      "market_prompt",
+      "fundamental_prompt",
+      "manager_prompt",
+      "context_policy",
+      "handoff_schema",
+      "procedural_experience"
+    ],
+    "component_sha256": {
+      "market_prompt": "52fa136b907a77ad5412fa269ee5c76ef09033748c82aea0a8a107d4dab7a4bf",
+      "fundamental_prompt": "dbd53514230dac7fbffa0682556523ed7167aa1444aac762b4b5072de6b9a765",
+      "manager_prompt": "83fac8c33abe90b77d25e78132333eab67189413717e4d25cfbaa44043f1f37f",
+      "context_policy": "e6e5a0d7529ef5186d9c118726ad0a5460cee6f07ef26b00accd42cb7d7b311d",
+      "handoff_schema": "755892a213ab85cc9578960759a5a4109cb9f7e73a405c5c1cbab5cd694c4f56",
+      "procedural_experience": "87ab340bb6f6df9409c3eb3abbf82c543f50ca19cf3d45329cc4f7e7896ed87f"
+    },
+    "status": "rejected_before_candidate_pool_admission",
+    "reason": "The proposed research output exceeded the fixed 120-character conclusion limit; the invalid output scored 0.0.",
+    "seed_exploration_mean_score": 0.7947487922705315
+  },
+  "diff": {
+    "file": "rejected-proposal.diff",
+    "sha256": "e872be91dc8f171bd1052192f1b390a11a9b01c45e74357a51812d2ea1e071ed",
+    "copied_from_authentic_persisted_gepa_proposal": true,
+    "verified_against_all_six_exact_reflection_responses": true,
+    "local_source_diff_sha256": "fb3622b1ef713452fb20a47ba69fe784b0e8a4cb689828f6e2c957cfea6bb4fc",
+    "line_ending_normalized_only": true,
+    "component_text_changed": false
+  },
+  "local_only_trace_provenance": [
+    "data/processed/harness_versions/runs/20261023104652/run_log.txt",
+    "data/processed/harness_versions/runs/20261023104652/reflection_payload_review.json",
+    "experiments/gepa_harness/response_cache/<request_sha256>.json",
+    "experiments/gepa_harness/calls.jsonl"
+  ],
+  "raw_requests_responses_or_call_rows_copied": false
+}

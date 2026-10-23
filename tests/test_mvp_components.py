@@ -242,6 +242,29 @@ def test_matched_simulation_starts_from_cash_on_common_evaluation_date():
     assert result["orders"][0]["trade_date"] == dates[4].isoformat()
 
 
+def test_short_simulation_preserves_same_initial_account_cash_and_holdings():
+    research, dates = _research(periods=5)
+    result = simulate_portfolio(
+        research,
+        [{"decision_date": dates[0], "target_weights": {"000001": 0.5}}],
+        1_000_000.0,
+        {
+            "commission_per_side_bps": 0.0,
+            "transfer_fee_per_side_bps": 0.0,
+            "stamp_duty_sell_bps": 0.0,
+            "slippage_per_side_bps": 0.0,
+        },
+        liquidity_lookback_sessions=1,
+        maximum_daily_participation=1.0,
+        evaluation_start_date=dates[0],
+        initial_account={"cash_cny": 500_000.0, "holdings_cny": {"000001": 500_000.0}},
+    )
+
+    assert result["daily_nav"][0]["cash_cny"] == 500_000.0
+    assert result["daily_nav"][0]["nav_cny"] == 1_050_000.0
+    assert result["summary"]["initial_capital_cny"] == 1_000_000.0
+
+
 def test_suspended_entry_is_reported_as_unfilled():
     _, dates = _research()
     research, _ = _research({("000001", dates[1]): "0"})

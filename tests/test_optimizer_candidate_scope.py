@@ -1,6 +1,6 @@
 import pytest
 
-from adaptive_mas.decision import _optimizer_expected_returns
+from adaptive_mas.decision import _optimizer_candidate_symbols, _optimizer_expected_returns
 from adaptive_mas.portfolio.optimizer import optimize_portfolio
 
 
@@ -49,6 +49,42 @@ def test_held_stock_leaving_forecast_universe_has_zero_alpha_until_sold() -> Non
         {"600000"},
     )
     assert actual == {"000001": 0.01, "600000": 0.0}
+
+
+def test_harness_priority_filters_optimizer_candidates_but_keeps_calibrated_returns() -> None:
+    actual = _optimizer_expected_returns(
+        _forecast(),
+        "loss_gated_fusion",
+        {
+            "optimizer_candidate_scope": "harness_priority",
+            "optimizer_priority_symbols": ["000003"],
+        },
+        {"000002"},
+    )
+
+    assert actual == {"000002": 0.05, "000003": 0.06}
+    assert _optimizer_candidate_symbols(
+        _forecast(),
+        "loss_gated_fusion",
+        {
+            "optimizer_candidate_scope": "harness_priority",
+            "optimizer_priority_symbols": ["000003"],
+        },
+    ) == {"000003"}
+
+
+def test_empty_harness_priority_set_allows_cash_without_inventing_returns() -> None:
+    config = {
+        "optimizer_candidate_scope": "harness_priority",
+        "optimizer_priority_symbols": [],
+    }
+
+    assert _optimizer_expected_returns(_forecast(), "loss_gated_fusion", config) == {
+        "000001": 0.04,
+        "000002": 0.05,
+        "000003": 0.06,
+    }
+    assert _optimizer_candidate_symbols(_forecast(), "loss_gated_fusion", config) == set()
 
 
 def test_frozen_method_scope_rejects_missing_candidate_returns_or_targets() -> None:

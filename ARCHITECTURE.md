@@ -1,6 +1,6 @@
 # 系统架构边界与实施顺序
 
-这是项目的**设计契约**，并标明当前实现边界。P8 已贯通点时市场数据、三个量价专家、Ridge 基线、融合方法、收益校准、预测结算、实际账户现金/持仓续接和成本—风险联合优化。预测期限与复审间隔分开配置；连续持仓 v1 为主线，固定期限 v2 留作对照。应用侧使用 `adaptive_mas.decision.create_daily_decision` 与 `schemas/decision_api.v1.schema.json`，没有新建交互页面或网络服务。账本按 CNY 名义金额估值，不是逐股股数或券商成交回放；风险估计采用个股历史波动与单一市场因子，不是完整协方差或 CVaR 优化。P9 以后的文本 LLM、基本面/新闻专家、辩论、记忆和强化学习没有实现。代码、配置、验收结果和限制见 [P8 最终报告](P8_FINAL_REPORT_20260926.md)。未实现模块只保留设计，不创建空 API，也不沿用旧选股项目代码。
+这是项目的**设计契约**，并标明当前实现边界。P8 已贯通点时市场数据、三个量价专家、Ridge 基线、融合方法、收益校准、预测结算、实际账户现金/持仓续接和成本—风险联合优化。预测期限与复审间隔分开配置；连续持仓 v1 为主线，固定期限 v2 留作对照。应用侧使用 `adaptive_mas.decision.create_daily_decision` 与 `schemas/decision_api.v1.schema.json`，没有新建交互页面或网络服务。账本按 CNY 名义金额估值，不是逐股股数或券商成交回放；风险估计采用个股历史波动与单一市场因子，不是完整协方差或 CVaR 优化。GEPA 公共研究 harness 已实现独立的行情/基本面/研究经理 tool-calling 流程和单日 Python/JSON API；它只影响优化器候选范围，不产生校准收益或订单。P9/P10 的历史财务 vintage 和新鲜度仍有限，不能声称严格历史存档或盲测。实现模块和当前使用边界见 [Harness 架构说明](HARNESS_ARCHITECTURE.md) 与 [Harness API](HARNESS_API.md)；代码、配置、验收结果和原数值研究限制见 [P8 最终报告](P8_FINAL_REPORT_20260926.md)。
 
 ## 决策链
 
@@ -13,24 +13,25 @@ flowchart TD
     MS --> FA[横截面因子 Agent]
     MS --> LA[流动性 Agent]
     MS --> RG[市场状态识别]
-    MS -. P9/P10，具备点时资料后 .-> TXT[基本面/公告/新闻/宏观 Agent]
+    MS -. independent public research context .-> TXT[GEPA public research harness]
     TA --> SIG[统一 AgentSignal[]]
     FA --> SIG
     LA --> SIG
-    TXT --> SIG
     SIG --> CAL[信号校准]
     CAL --> REL[已成熟结果驱动的可靠性]
     REL --> GATE[自适应门控]
     RG --> GATE
     GATE --> ALPHA[合成预期收益与不确定性]
+    TXT --> SCOPE[经理引用支持的候选范围]
     ALPHA --> OPT[风险与交易约束组合优化器]
+    SCOPE --> OPT
     OPT --> SIM[执行模拟与已实现结果]
     SIM --> EVAL[评价]
     SIM --> MATURE[配置期限标签成熟]
     MATURE --> REL
 ```
 
-P9/P10 的 Fundamental、Announcement、News、Macro 专家在对应数据源完成点时验证后，接入同一个 `AgentSignal[]` 边界；它们不会绕过校准、可靠性和组合风险约束。
+GEPA harness 与 `AgentSignal[]` 数值预测链隔离：它通过点时公共资料生成结构化报告和带引用的候选排序；排序仅用作 optimizer candidate filter，成熟校准预测仍提供全部 expected-return 数值。完整的角色、数据、成本和候选接纳流程见 [Harness 架构说明](HARNESS_ARCHITECTURE.md)。当前离线回顾缓存没有满足点时条件的公共资料，因此 GEPA 模型评价门保持关闭。
 
 核心原则是分开**预测**、**融合**和**组合决策**。多个 Agent 可以提供不同证据，但不能各自下单或决定最终仓位；组合优化器也不直接解释文本。这样才能在相同数据和成本条件下，把 Agent、门控与优化器分别同简单基线比较。
 

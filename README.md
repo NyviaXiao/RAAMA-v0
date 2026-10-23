@@ -36,6 +36,8 @@ BaoStock 是唯一外部市场数据源。研究期本地行情仅读 `train.csv
 
 应用可直接调用 [decision.py](src/adaptive_mas/decision.py) 中的 `create_daily_decision(research, config, as_of_date, portfolio, training_state, versions)`。传入截至 `as_of_date` 可见的 `ResearchData`、冻结配置、实际现金和持仓市值，以及只含已成熟标签的训练种子；返回 `DailyDecision`，可用 `to_dict()` 序列化为 JSON。预测期限内尚未出现的价格不会阻止决策生成，输出的 `prediction_status` 为 `pending`，建议订单标记为下一交易日待执行。
 
+GEPA 研究入口的 Python/JSON 契约、seed 来源字段、任务成本语义及 `decision.v1` 输出说明见 [Harness API 文档](HARNESS_API.md)。模块图、候选接纳规则、跨案事件隔离与预算细节见 [Harness 架构说明](HARNESS_ARCHITECTURE.md)。
+
 输入账户 JSON 必须且只能包含 `cash_cny` 与 `holdings_cny`：
 
 ```json
@@ -60,9 +62,52 @@ BaoStock 是唯一外部市场数据源。研究期本地行情仅读 `train.csv
 
 每张建议订单还带有历史成交额估算的单日容量、决策日 BaoStock 交易状态，以及“次日执行状态未确认”的标记。下一交易日是否停牌、是否有足够成交额和实际成交金额只能在执行时由市场数据或模拟账本确认；计划订单不会标记为已成交。`evidence.expert_matured_performance` 提供三个专家各自的损失门控权重、近窗口平均成熟 Rank-IC 和滚动成熟样本外 RMSE。
 
-## RAAMA contextual RL 训练闭环
+## GEPA 多智能体日常决策与进化审阅
 
-`run_raama_decision.py` 默认 `--exploration-rate 0`，表示保守地沿用固定 P9；空策略在这个设置下会一直保持 P9。开发期训练必须显式设置非零探索率，并给出评价起始日。起始日及之后会冻结探索和策略更新；回放以这个日期为硬边界校验决策标签。训练示例使用 `1.0` 让每个历史训练日都采样一个当日可用动作，使 20 条/动作门槛在约 279 个训练日内有实际达到的可能。该命令须按日期顺序逐日运行，并只用历史模拟器生成成交和 NAV；不可用于用户真实资金或下真实订单。日期须处于所用缓存范围内：
+日常研究入口为 `scripts/run_harness_decision.py`。它从已保存的六段提示版本加载候选，运行行情专家、基本面专家和研究经理三个 tool-calling agents，再把经理引用支持的候选池交给原有预测与组合优化链。预期收益仍来自成熟校准预测；账户持仓只进入本地优化器，不进入专家提示。校准预测在发送请求前检查，并在最终决策中复用同一次计算。每个任务最多 10 次模型请求，调用记录和精确响应缓存写入共享实验目录。
+
+当前默认训练 seed 不含训练截止日期或预测期限字段；代码库来源协议将其记录为 2026-03-06、三交易日。决策日必须晚于截止日，预测期限必须等于 seed 期限。使用自定义 seed 时，必须从来源记录确认截止日和期限，并通过 `--training-seed-trained-through`、`--training-seed-horizon-sessions` 提供；Python API 也要求调用方提供 `training_seed_trained_through` 和 `training_seed_horizon_sessions`。入口会记录声明值与来源，并在校准或模型请求前拒绝不匹配。
+
+```powershell
+.venv\Scripts\python.exe scripts\run_harness_decision.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z" --portfolio-state-json "portfolio-state.json" --as-of 2026-09-23 --horizon-sessions 3 --risk-budget-annualized 0.20 --training-seed "data\processed\p8_daily_three_session_final\training_seed.json.gz" --training-seed-trained-through 2026-03-06 --training-seed-horizon-sessions 3 --output "daily-decision.json"
+```
+
+GEPA 进化先生成离线审阅包。审阅包包含实际 GEPA 反思模板渲染出的完整请求预览、模型请求字段、历史日期分区和费用/调用上界；反思反馈样例为合成结构示例，不含 API 密钥。此步骤不读取密钥、不发出模型请求。只有后续命令显式提供 `--execute-gepa` 才会启动 GEPA；可选的 `--approved-review-sha256` 用于检查审阅包是否变化：
+
+```powershell
+.venv\Scripts\python.exe scripts\run_harness_evolution.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z" --horizon-sessions 3 --artifact-dir ".tmp\gepa-harness-review"
+.venv\Scripts\python.exe scripts\run_harness_evolution.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z" --horizon-sessions 3 --artifact-dir ".tmp\gepa-harness-review" --execute-gepa --approved-review-sha256 "<outgoing_review.json 中的 review_content_sha256>"
+```
+
+一次进化上限为 156 次 provider 请求：最多 150 次研究轮次、6 次 GEPA 反思；每案最多 10 次，GEPA 最多一次候选变异，并在该次变异中反思全部六个文本组件。探索最多 6 个唯一 `(candidate, as_of)` 评价任务；`max_metric_calls=8` 仅是 GEPA evaluator 回调上限。按每次输入 24,000 bytes、输出 1,200 tokens 及 ¥12/¥36 每百万 token 的保守估算，费用上界为 ¥51.6672；160 次硬上限对应 ¥52.992。实际费用按服务端 token 用量估算，缓存复用另行列出且不算新增 API 费用。
+
+进化和日常入口默认共用 `experiments/gepa_harness/calls.jsonl` 与响应缓存，累计 provider 请求不超过 160。进化最多可用 156 次，因此账户决策与短窗口比较应复用同次运行的 `reuse_demo_research.json`，避免另发模型请求：
+
+```powershell
+$runDir = "data\processed\harness_versions\runs\<run_id>"
+$reuse = Get-Content "$runDir\evolution_report.json" | ConvertFrom-Json
+.venv\Scripts\python.exe scripts\run_harness_decision.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z" --portfolio-state-json "portfolio-state.json" --as-of $reuse.reuse_demo.as_of --horizon-sessions 3 --risk-budget-annualized 0.20 --training-seed "data\processed\p8_daily_three_session_final\training_seed.json.gz" --training-seed-trained-through 2026-03-06 --training-seed-horizon-sessions 3 --reuse-research-json "$runDir\$($reuse.reuse_demo.research_result_file)" --retrospective-public-cache --output "daily-decision.json"
+```
+
+同一账户的短窗口比较仍使用该复用文件和同一校准预测；两个版本从相同现金/持仓开始，由现有模拟器各执行一次调仓并持有 3 个交易日。此 CLI 不发送 provider 请求：
+
+```powershell
+.venv\Scripts\python.exe scripts\run_harness_paired_simulation.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z" --portfolio-state-json "portfolio-state.json" --as-of $reuse.reuse_demo.as_of --horizon-sessions 3 --risk-budget-annualized 0.20 --training-seed "data\processed\p8_daily_three_session_final\training_seed.json.gz" --training-seed-trained-through 2026-03-06 --training-seed-horizon-sessions 3 --reuse-research-json "$runDir\$($reuse.reuse_demo.research_result_file)" --retrospective-public-cache --output "paired-simulation.json"
+```
+
+活动版提示可单独安全导出，结果只含六段文本和完整性哈希：
+
+```powershell
+.venv\Scripts\python.exe scripts\export_harness_version.py --output "active-harness-prompts.json"
+```
+
+所有分区均使用回顾性本地缓存，固定为 3 个探索、2 个选择、2 个冻结评估和 1 个独立新任务复用样本。不能把历史回填资料称作独立盲测。获选的程序性经验会和候选版本一起持久化；复用报告会记录后续任务实际加载的版本与内容哈希。
+
+本地缓存的抓取时间晚于回顾性样本日期，因此评价使用显式来源日期代理，保留真实 fetched_at 和未验证 vintage 标记；严格历史 PIT 均为 false。当前样本每案有 2 个必答事实，样本间公司报告期、公告和新闻事件组无重叠。运行 20261023104652 的唯一候选因输出约束被拒绝，活动版本仍为 seed，没有投资改善证据。安全汇总、seed 提示、候选 diff 和必要审计见 [Harness 安全报告包](reports/harness_20261023/RUN_REPORT.md)。
+
+## RAAMA contextual RL 历史路径
+
+`run_raama_decision.py` 保留按日期顺序的 contextual-RL 回放和反馈工作流，属于历史研究入口；新日常决策使用上面的 GEPA harness 入口。RL 开发必须显式设置非零探索率并给出评价起始日。起始日及之后会冻结探索和策略更新；回放以这个日期为硬边界校验决策标签。训练示例使用 `1.0` 让每个历史训练日都采样一个当日可用动作，使 20 条/动作门槛在约 279 个训练日内有实际达到的可能。该命令须按日期顺序逐日运行，并只用历史模拟器生成成交和 NAV；不可用于用户真实资金或下真实订单。日期须处于所用缓存范围内：
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_raama_decision.py --baostock-run-dir "data\raw\baostock\fetch-20260924T150656Z" --portfolio-state-json "shadow-portfolio-state.json" --as-of 2026-09-22 --evaluation-start-date 2026-09-29 --horizon-sessions 3 --risk-budget-annualized 0.20 --exploration-rate 1.0 --seed 7 --rl-state-file "state-day1.json" --output "daily-decision.json"
@@ -109,7 +154,7 @@ BaoStock 是唯一外部市场数据源。研究期本地行情仅读 `train.csv
 .venv\Scripts\python.exe scripts\infer_agentic_rl_frozen.py --artifact experiments\agentic_rl_historical_20261021\replay\frozen_agentic_policy.json --state-trace experiments\agentic_rl_historical_20261021\replay\C_evaluation_state_trace.jsonl --decision-date 2025-09-15
 ```
 
-`run_raama_decision.py` 当前仍调用原 `contextual_rl` 控制器并读取 `contextual-rl-state.v1`；它尚未加载这份双阶段 Agentic RL 工件。上面的推断脚本用于单日历史策略恢复检查，不代表日常决策入口已切换。
+`run_raama_decision.py` 当前仍调用原 `contextual_rl` 控制器并读取 `contextual-rl-state.v1`；它尚未加载这份双阶段 Agentic RL 工件。日常 public-agent 研究入口已切换为 `scripts/run_harness_decision.py`，预测收益和组合优化仍走冻结校准模型。
 
 授权的 Qwen 标题回顾实验（2026-10-12）结果见[简要报告](experiments/qwen_retrospective_dry_run_20261012/QWEN_RETROSPECTIVE_REPORT_20261012.md)。81 个训练事件中，79 条有效响应进入成熟标签，1 条投递状态不明、1 条响应无效均未计分。P11 在 79 条上得到 28 个非重叠日期、平均方向性超额收益 -1.0793%、95% 下界 -2.8217%；正向门槛未通过，收益调整为 0，研究停止。37 条评价请求未发送，也未进行 RL/query 回放。该研究属于事后合成：公告与财务 vintage 未核实，模型输入只有公告标题和结构化财务指标、没有公告全文；服务商账单尚未核对。因此这项结果不能证明策略改善，也不能作为严格点时或样本外验证。
 

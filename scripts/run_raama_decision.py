@@ -1,4 +1,4 @@
-"""Run a user-account RAAMA decision with auditable multi-agent/RL coordination."""
+"""Run the retained historical contextual-RL decision path."""
 
 from __future__ import annotations
 
