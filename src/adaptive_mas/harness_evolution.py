@@ -798,12 +798,30 @@ def _public_report_projection(report: dict[str, object]) -> dict[str, object]:
             "observations": [
                 {
                     key: observation[key]
-                    for key in ("evidence_id", "field", "value", "report_period")
+                    for key in (
+                        "evidence_id", "field", "value", "unit", "report_period",
+                        "period_start", "period_end", "structured_validation",
+                    )
                     if key in observation
                 }
                 for observation in finding.get("observations", [])
             ],
             "uncertainties": finding.get("uncertainties", []),
+            "citation_validation": [
+                {
+                    key: citation[key]
+                    for key in (
+                        "evidence_id", "available_at", "published_at", "fetched_at",
+                        "vintage_status", "retrospective_backfill_proxy",
+                        "source_timing_status",
+                    )
+                    if key in citation
+                }
+                for citation in finding.get("citation_validation", [])
+                if isinstance(citation, dict)
+            ],
+            "semantic_claim_support": finding.get("semantic_claim_support"),
+            "numeric_candidate_eligibility": finding.get("numeric_candidate_eligibility"),
         })
     projection = {
         "summary": report.get("summary", ""),
@@ -831,8 +849,10 @@ def _public_tool_projection(tool: str, value: object) -> object:
             for key in (
                 "evidence_id", "symbol", "source_type", "dataset", "title",
                 "report_period", "published_at", "available_at", "facts",
+                "facts_units", "reopen_ref",
                 "text_excerpt", "offset", "next_offset", "location", "content_scope",
                 "body_status", "metric", "value", "fetched_at", "vintage_status",
+                "vintage",
                 "retrospective_backfill_proxy", "vintage_verified",
             )
             if key in value
@@ -842,7 +862,7 @@ def _public_tool_projection(tool: str, value: object) -> object:
         return projection
     if tool == "search_financial_facts_and_announcements":
         references = [
-            {key: ref[key] for key in ("evidence_id", "source_type", "title", "locator") if key in ref}
+            {key: ref[key] for key in ("evidence_id", "source_type", "title", "locator", "reopen_ref") if key in ref}
             for ref in value.get("evidence_refs", [])
         ]
         context_messages = []
@@ -850,14 +870,45 @@ def _public_tool_projection(tool: str, value: object) -> object:
             if not isinstance(message, dict):
                 continue
             content = str(message.get("content", ""))
+            try:
+                context = json.loads(content)
+            except json.JSONDecodeError:
+                context = {"unparsed_public_context_excerpt": content[:700]}
+            if isinstance(context, dict):
+                context = {
+                    key: context[key]
+                    for key in (
+                        "decision_time", "symbol", "question", "role", "role_task",
+                        "prior_role_summaries", "public_evidence", "evidence_budgets",
+                    )
+                    if key in context
+                }
+                if isinstance(context.get("public_evidence"), list):
+                    context["public_evidence"] = [
+                        {
+                            key: card[key]
+                            for key in (
+                                "source_type", "exact_title", "published_at", "available_at",
+                                "fetched_at", "vintage_status", "vintage_verified",
+                                "vintage",
+                                "retrospective_backfill_proxy", "report_period", "facts",
+                                "facts_units", "content_scope", "locator",
+                            )
+                            if key in card
+                        }
+                        for card in context["public_evidence"]
+                        if isinstance(card, dict)
+                    ]
             context_messages.append({
                 "role": str(message.get("role", "user")),
-                "content": content[:700],
+                "content": _json(context),
             })
         return {
             "context_messages": context_messages,
             "evidence_refs": references,
             "selected_source_count": value.get("selected_source_count", len(references)),
+            "symbol_selection": value.get("symbol_selection", []),
+            "recall_audit": value.get("recall_audit", []),
             "point_in_time_cutoff": value.get("point_in_time_cutoff"),
         }
     if tool in {"read_trend_signals", "read_reversal_signals", "read_volume_price_signals", "read_market_signals"}:
@@ -868,12 +919,22 @@ def _public_tool_projection(tool: str, value: object) -> object:
                     key: finding[key]
                     for key in (
                         "symbol", "metric", "value", "period_start", "period_end",
-                        "evidence_id", "dataset", "signal_group",
+                        "evidence_id", "dataset", "signal_group", "unit", "reopen_ref",
                     )
                     if key in finding
                 }
                 for finding in value.get("findings", [])
             ],
+        }
+    if tool == "read_market_evidence":
+        return {
+            key: value[key]
+            for key in (
+                "evidence_id", "source_record_id", "symbol", "source_type", "dataset",
+                "published_at", "available_at", "period_start", "period_end", "metric",
+                "value", "unit", "vintage_verified", "reopen_ref",
+            )
+            if key in value
         }
     if tool == "plan_research":
         plan = value.get("plan", {})

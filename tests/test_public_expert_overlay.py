@@ -153,8 +153,9 @@ def test_matured_effect_changes_only_same_day_candidate_and_replays_same_account
     forecast = _forecast()
     overlaid, audit = add_public_expert_overlay(forecast, _snapshot("candidate_effect_eligible"))
 
-    assert overlaid["expected_returns_by_method"]["market_plus_relative_fusion"]["000001"] == 0.011
-    assert overlaid["expected_returns_by_method"]["market_plus_relative_fusion"]["000002"] == 0.002
+    assert overlaid["expected_returns_by_method"]["market_plus_relative_fusion"] == forecast["expected_returns_by_method"]["market_plus_relative_fusion"]
+    assert overlaid["expected_returns_by_method"]["fundamental_p11"]["000001"] == 0.011
+    assert overlaid["expected_returns_by_method"]["fundamental_p11"]["000002"] == 0.002
     assert overlaid["expected_returns_by_method"]["trend"] == forecast["expected_returns_by_method"]["trend"]
     assert overlaid["target_weights_by_method"] == forecast["target_weights_by_method"]
     assert audit["adjustments"]["000001"]["components"][0]["record_ids"] == ["same-day-evidence-1"]
@@ -173,13 +174,13 @@ def test_weekend_carry_signal_is_available_to_next_trading_overlay_once():
     snapshot["carry_forward_expert_signals"] = [{
         "record_id": "qwen:weekend:carry:2024-02-06",
         "record_kind": "event",
-        "expert": "qwen3.7_plus_fundamental_announcement",
+        "expert": "cls_news_rule_v1",
         "symbol": "sh.000001",
         "horizon_sessions": 3,
         "direction_score": 1,
     }]
     snapshot["p11_candidate_effects"] = {
-        "qwen3.7_plus_fundamental_announcement:3s": {
+        "cls_news_rule_v1:3s": {
             "status": "candidate_effect_eligible",
             "candidate_return_adjustment": 0.01,
         }
@@ -187,7 +188,8 @@ def test_weekend_carry_signal_is_available_to_next_trading_overlay_once():
 
     overlaid, audit = add_public_expert_overlay(_forecast(), snapshot)
 
-    assert overlaid["expected_returns_by_method"]["market_plus_relative_fusion"]["000001"] == 0.011
+    assert overlaid["expected_returns_by_method"]["market_plus_relative_fusion"]["000001"] == 0.001
+    assert overlaid["expected_returns_by_method"]["news_p11"]["000001"] == 0.011
     assert audit["adjustments"]["000001"]["components"][0]["record_ids"] == [
         "qwen:weekend:carry:2024-02-06"
     ]

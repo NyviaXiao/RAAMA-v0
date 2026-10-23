@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -27,6 +29,15 @@ PUBLIC_PRICE_SOURCE_URL = "https://www.alibabacloud.com/help/zh/model-studio/qwe
 MAX_CALLS_PER_EXPERIMENT = 160
 MAX_INPUT_BYTES_PER_CALL = 24_000
 MAX_OUTPUT_TOKENS_PER_CALL = 1_200
+FINANCIAL_FACT_UNITS = {
+    "revenue_yoy_pct": "percent",
+    "parent_net_profit_yoy_pct": "percent",
+    "roe_pct": "percent",
+    "income_statement_revenue_yoy_pct": "percent",
+    "income_statement_parent_profit_yoy_pct": "percent",
+    "revenue_cny": "CNY",
+    "parent_net_profit_cny": "CNY",
+}
 
 
 def _json(value: object) -> str:
@@ -40,11 +51,16 @@ def _opaque_id(namespace: str, source_id: str) -> str:
 class InvalidResearchOutput(RuntimeError):
     """A model submitted a report that failed the fixed output contract."""
 
-    def __init__(self, role_id: str, category: str) -> None:
+    def __init__(self, role_id: str, category: str, correction_detail: str | None = None) -> None:
         super().__init__(f"{role_id} report failed fixed validation ({category})")
         self.role_id = role_id
         self.category = category
+        self.correction_detail = correction_detail
         self.partial_tool_trace: list[dict[str, str]] = []
+
+
+class InvalidToolInput(ValueError):
+    """A model supplied arguments that violate a declared tool boundary."""
 
 
 @dataclass
@@ -418,20 +434,92 @@ def _compact_tool_message(message: dict[str, object]) -> dict[str, object]:
         raise TypeError("tool result must be a JSON object")
     keep = {
         "summary", "status", "evidence_refs", "findings", "items", "symbols",
-        "evidence_id", "source_type", "title", "report_period", "facts",
+        "evidence_id", "evidence_ids", "reopen_ref", "source_record_id",
+        "source_type", "title", "exact_title", "symbol", "field", "unit", "report_period", "facts",
+        "facts_units", "vintage", "vintage_status", "vintage_verified",
+        "retrospective_backfill_proxy", "fetched_at",
         "observations", "count", "selected_source_count", "point_in_time_cutoff",
         "metric", "value", "dataset", "published_at", "available_at", "locator", "signal_group",
-        "conclusion", "uncertainties", "evidence_ids", "period_start", "period_end",
+        "conclusion", "uncertainties", "period_start", "period_end", "content_scope",
+        "context_messages", "role", "decision_time", "question", "role_task",
+        "prior_role_summaries", "public_evidence", "evidence_budgets", "generation_budget",
+        "recall_audit", "symbol_selection", "selection_reason", "relevance_terms_matched",
+        "source_information_score",
     }
 
-    def project(value: object) -> object:
+    def project(value: object, parent_key: str | None = None) -> object:
         if isinstance(value, list):
-            return [project(item) for item in value]
+            return [project(item, parent_key) for item in value]
         if isinstance(value, dict):
-            return {key: project(item) for key, item in value.items() if key in keep}
+            if parent_key in {
+                "facts", "facts_units", "reopen_ref", "arguments", "recall_audit",
+                "symbol_selection", "excluded_counts", "dropped_source_refs", "input_budget",
+            }:
+                return {key: project(item, key) for key, item in value.items()}
+            if parent_key == "context_messages":
+                content = value.get("content")
+                if isinstance(content, str):
+                    try:
+                        context = json.loads(content)
+                    except json.JSONDecodeError:
+                        context = {"text": content[:600]}
+                    retained_keys = {
+                        "decision_time", "symbol", "question", "role", "role_task",
+                        "prior_role_summaries", "public_evidence", "evidence_budgets",
+                    }
+                    if isinstance(context, dict):
+                        context = {
+                            key: project(item, key)
+                            for key, item in context.items()
+                            if key in retained_keys
+                        }
+                    return {"role": value.get("role", "user"), "content": _json(context)}
+            return {
+                key: project(item, key)
+                for key, item in value.items()
+                if key in keep
+            }
         return value
 
     return {"tool": message["name"], "result": project(parsed)}
+
+
+def _structured_context_records(value: object) -> list[dict[str, object]]:
+    """Keep compact source facts and exact observations when prose is discarded."""
+    metadata_keys = {
+        "evidence_id", "evidence_ids", "reopen_ref", "source_record_id", "symbol",
+        "source_type", "dataset", "field", "metric", "value", "unit", "facts",
+        "facts_units", "report_period", "period_start", "period_end", "published_at",
+        "available_at", "fetched_at", "vintage", "vintage_status", "vintage_verified",
+        "retrospective_backfill_proxy", "locator", "content_scope",
+    }
+    records: list[dict[str, object]] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, list):
+            for child in item:
+                visit(child)
+        elif isinstance(item, dict):
+            if isinstance(item.get("context_messages"), list):
+                for message in item["context_messages"]:
+                    content = message.get("content") if isinstance(message, dict) else None
+                    if isinstance(content, str):
+                        try:
+                            visit(json.loads(content))
+                        except json.JSONDecodeError:
+                            continue
+            is_source_fact = isinstance(item.get("facts"), dict)
+            is_observation = "evidence_id" in item and "field" in item and "value" in item
+            if is_source_fact or is_observation:
+                records.append({key: child for key, child in item.items() if key in metadata_keys})
+            for child in item.values():
+                visit(child)
+
+    visit(value)
+    unique: dict[str, dict[str, object]] = {}
+    for record in records:
+        unique[_json(record)] = record
+    return list(unique.values())
 
 
 def compact_agent_messages(messages: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -482,6 +570,7 @@ def compact_agent_messages(messages: list[dict[str, object]]) -> list[dict[str, 
             "result": {
                 "evidence_ids": sorted(_evidence_ids(step["result"])),
                 "symbols": sorted(_symbol_codes(step["result"])),
+                "structured_facts": _structured_context_records(step["result"]),
             },
         }
         for step in compacted_summary["steps"]
@@ -499,7 +588,10 @@ def _evidence_ids(value: object) -> set[str]:
         found = set()
         for key, item in value.items():
             if key in {"evidence_id", "evidence_ids"}:
-                found.update({str(item)} if isinstance(item, str) else {str(part) for part in item})
+                if isinstance(item, str):
+                    found.add(item)
+                elif isinstance(item, list):
+                    found.update(str(part) for part in item)
             else:
                 found.update(_evidence_ids(item))
         return found
@@ -562,9 +654,15 @@ SUBMIT_REPORT = _tool(
                                 "evidence_id": {"type": "string"},
                                 "field": {"type": "string"},
                                 "value": {},
+                                "unit": {"type": "string"},
                                 "report_period": {"type": ["string", "null"]},
+                                "period_start": {"type": ["string", "null"]},
+                                "period_end": {"type": ["string", "null"]},
                             },
-                            "required": ["evidence_id", "field", "value", "report_period"],
+                            "required": [
+                                "evidence_id", "field", "value", "unit", "report_period",
+                                "period_start", "period_end",
+                            ],
                             "additionalProperties": False,
                         },
                     },
@@ -590,6 +688,7 @@ def _run_tool_agent(
     client: QwenClient,
     budget: CallBudget,
     max_turns: int,
+    visible_evidence_ids: set[str] | None = None,
 ) -> dict[str, object]:
     final_tool = "finalize_research" if "finalize_research" in handlers else "submit_report"
     if final_tool not in handlers:
@@ -599,7 +698,8 @@ def _run_tool_agent(
             system_prompt,
             "Submission contract: call submit_report with findings as a direct JSON array of objects, "
             "never as a string containing JSON. Provide a complete, readable report and include every "
-            "supported exact observation with its source citation and report period. Keep the report "
+            "supported exact observation with the exact value, unit, source citation, and report period "
+            "or market period boundaries. Keep the report "
             "focused; completeness, concision, and tool efficiency are evaluated as soft scores. "
             "Provide unresolved_items as a separate top-level array.",
         ))
@@ -609,6 +709,8 @@ def _run_tool_agent(
     ]
     trace: list[dict[str, object]] = []
     context_compression: list[dict[str, object]] = []
+    visible_ids = visible_evidence_ids if visible_evidence_ids is not None else set()
+    correction_count = 0
     for turn_index in range(max_turns):
         before_bytes = len(_json(messages).encode("utf-8"))
         messages = compact_agent_messages(messages)
@@ -616,6 +718,7 @@ def _run_tool_agent(
         if after_bytes < before_bytes:
             summary_steps = 0
             reference_only = False
+            facts_and_references_only = False
             if len(messages) > 2 and messages[2].get("role") == "user":
                 try:
                     steps = json.loads(str(messages[2]["content"])).get("steps", [])
@@ -624,11 +727,20 @@ def _run_tool_agent(
                         set(step.get("result", {})).issubset({"evidence_ids", "symbols"})
                         for step in steps
                     )
+                    facts_and_references_only = bool(steps) and all(
+                        set(step.get("result", {})).issubset({"evidence_ids", "symbols", "structured_facts"})
+                        and bool(step.get("result", {}).get("structured_facts"))
+                        for step in steps
+                    )
                 except (json.JSONDecodeError, TypeError, AttributeError):
                     summary_steps = 0
             context_compression.append({
                 "turn": turn_index + 1,
-                "strategy": "reference_only" if reference_only else "completed_steps_summary",
+                "strategy": (
+                    "reference_only" if reference_only else
+                    "facts_and_references_only" if facts_and_references_only else
+                    "completed_steps_summary"
+                ),
                 "before_bytes": before_bytes,
                 "after_bytes": after_bytes,
                 "compressed_tool_steps": summary_steps,
@@ -651,15 +763,61 @@ def _run_tool_agent(
         message = response["choices"][0]["message"]
         tool_calls = message.get("tool_calls", [])
         if not tool_calls:
+            if correction_count == 0 and turn_index + 1 < max_turns:
+                correction_count += 1
+                messages.append({
+                    "role": "user",
+                    "content": f"Output contract error: call one declared tool. Finish with {final_tool} when ready.",
+                })
+                continue
             raise ValueError(f"{role_id} must finish by calling its submit_report/finalize tool")
         assistant_message = {"role": "assistant", **message}
         messages.append(assistant_message)
+        correction_requested = False
         for call in tool_calls:
             function = call["function"]
             name = str(function["name"])
             if name not in handlers:
-                raise ValueError(f"{role_id} requested undeclared tool {name!r}")
-            arguments = json.loads(function["arguments"])
+                if correction_count == 0 and turn_index + 1 < max_turns:
+                    correction_count += 1
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": name,
+                        "content": _json({
+                            "accepted": False,
+                            "error_category": "undeclared_tool",
+                            "declared_tools": sorted(handlers),
+                            "correction_budget_remaining": 0,
+                        }),
+                    })
+                    correction_requested = True
+                    continue
+                raise InvalidResearchOutput(role_id, "undeclared_tool", name)
+            try:
+                raw_arguments = function["arguments"]
+                if not isinstance(raw_arguments, str):
+                    raise TypeError("tool arguments must be a JSON object encoded as text")
+                arguments = json.loads(raw_arguments)
+                if not isinstance(arguments, dict):
+                    raise TypeError("tool arguments must decode to a JSON object")
+            except (json.JSONDecodeError, TypeError) as exc:
+                if correction_count == 0 and turn_index + 1 < max_turns:
+                    correction_count += 1
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": name,
+                        "content": _json({
+                            "accepted": False,
+                            "error_category": "malformed_tool_arguments",
+                            "validation_detail": str(exc),
+                            "correction_budget_remaining": 0,
+                        }),
+                    })
+                    correction_requested = True
+                    continue
+                raise InvalidResearchOutput(role_id, "malformed_tool_arguments", str(exc)) from None
             try:
                 result = handlers[name](arguments)
             except InvalidResearchOutput as exc:
@@ -668,13 +826,61 @@ def _run_tool_agent(
                     {"role": role_id, "tool": item["tool"], "status": "completed"}
                     for item in trace
                 ] + [{"role": role_id, "tool": name, "status": "rejected"}]
-                raise
+                if correction_count >= 1 or turn_index + 1 >= max_turns:
+                    raise
+                correction_count += 1
+                trace.append({
+                    "tool": name,
+                    "arguments": arguments,
+                    "result": {"accepted": False, "error_category": exc.category},
+                    "tool_call_id": call["id"],
+                    "status": "correctable_rejection",
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": name,
+                    "content": _json({
+                        "accepted": False,
+                        "error_category": exc.category,
+                        "validation_detail": exc.correction_detail,
+                        "correction_budget_remaining": 0,
+                        "instruction": "Correct the submitted report once using only the evidence and exact values already returned by tools, or leave the disputed item unresolved.",
+                    }),
+                })
+                correction_requested = True
+                continue
+            except InvalidToolInput as exc:
+                if correction_count == 0 and turn_index + 1 < max_turns:
+                    correction_count += 1
+                    trace.append({
+                        "tool": name,
+                        "arguments": arguments,
+                        "result": {"accepted": False, "error_category": "tool_input_rejected"},
+                        "tool_call_id": call["id"],
+                        "status": "correctable_rejection",
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": name,
+                        "content": _json({
+                            "accepted": False,
+                            "error_category": "tool_input_rejected",
+                            "validation_detail": str(exc),
+                            "correction_budget_remaining": 0,
+                        }),
+                    })
+                    correction_requested = True
+                    continue
+                raise InvalidResearchOutput(role_id, "tool_input_rejected", str(exc)) from None
             trace.append({
                 "tool": name,
                 "arguments": arguments,
                 "result": result,
                 "tool_call_id": call["id"],
             })
+            visible_ids.update(_evidence_ids(result))
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"],
@@ -691,6 +897,8 @@ def _run_tool_agent(
                     "turn_count": turn_index + 1,
                     "model": client.model,
                 }
+        if correction_requested:
+            continue
     raise RuntimeError(f"{role_id} exceeded its {max_turns}-turn tool-calling limit")
 
 
@@ -718,14 +926,14 @@ def _market_handlers(
     handlers = {}
 
     def read_market_signals(arguments: dict[str, object]) -> dict[str, object]:
-        limit = int(arguments.get("limit_per_signal", 6))
-        if not 1 <= limit <= 6:
-            raise ValueError("market signal limit must be within 1..6 per signal group")
+        limit = arguments.get("limit_per_signal", 6)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 6:
+            raise InvalidToolInput("market signal limit must be an integer within 1..6 per signal group")
         symbols = arguments.get("symbols", [])
         if not isinstance(symbols, list) or any(
-            len(str(symbol)) != 6 or not str(symbol).isdigit() for symbol in symbols
+            not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit() for symbol in symbols
         ):
-            raise ValueError("symbols must be a list of six-digit security codes")
+            raise InvalidToolInput("symbols must be a list of six-digit security codes")
         findings = []
         for group, (source_tool, rows) in signal_groups.items():
             eligible = [row for row in rows if not symbols or row.symbol in symbols]
@@ -747,6 +955,11 @@ def _market_handlers(
                     "period_end": signal.evidence.end_date.isoformat(),
                     "metric": signal.evidence.feature,
                     "value": float(signal.score),
+            "unit": "indicator_score",
+            "reopen_ref": {
+                "tool": "read_market_evidence",
+                "arguments": {"evidence_id": evidence_id},
+            },
                     "source_refs_local_only": list(signal.evidence.source_refs),
                     "vintage_verified": True,
                 }
@@ -755,22 +968,49 @@ def _market_handlers(
                     "symbol": signal.symbol,
                     "metric": signal.evidence.feature,
                     "value": round(float(signal.score), 10),
+                    "unit": "indicator_score",
                     "period_start": signal.evidence.start_date.isoformat(),
                     "period_end": signal.evidence.end_date.isoformat(),
                     "evidence_id": evidence_id,
+                    "reopen_ref": evidence_catalog[evidence_id]["reopen_ref"],
                     "dataset": "BaoStock adjusted daily market bars",
                 })
         return {"count": len(findings), "findings": findings}
 
     handlers["read_market_signals"] = read_market_signals
-    tools = [_tool(
-        "read_market_signals",
-        "Read bounded point-in-time trend, reversal, and volume-price evidence for the requested symbols.",
-        {
-            "symbols": {"type": "array", "items": {"type": "string", "pattern": "^[0-9]{6}$"}, "maxItems": 20},
-            "limit_per_signal": {"type": "integer", "minimum": 1, "maximum": 6},
-        },
-    )]
+    def read_market_evidence(arguments: dict[str, object]) -> dict[str, object]:
+        evidence_id = arguments.get("evidence_id")
+        if not isinstance(evidence_id, str):
+            raise InvalidToolInput("evidence_id must be a string previously returned by this task's tools")
+        if evidence_id not in evidence_catalog:
+            raise InvalidToolInput("market evidence ID was not previously returned by this task's tools")
+        source = evidence_catalog[evidence_id]
+        return {
+            key: source[key]
+            for key in (
+                "evidence_id", "source_record_id", "symbol", "source_type", "dataset",
+                "published_at", "available_at", "period_start", "period_end", "metric",
+                "value", "unit", "vintage_verified", "reopen_ref",
+            )
+        }
+
+    handlers["read_market_evidence"] = read_market_evidence
+    tools = [
+        _tool(
+            "read_market_signals",
+            "Read bounded point-in-time trend, reversal, and volume-price evidence for the requested symbols.",
+            {
+                "symbols": {"type": "array", "items": {"type": "string", "pattern": "^[0-9]{6}$"}, "maxItems": 20},
+                "limit_per_signal": {"type": "integer", "minimum": 1, "maximum": 6},
+            },
+        ),
+        _tool(
+            "read_market_evidence",
+            "Reopen the exact market observation returned earlier in this task.",
+            {"evidence_id": {"type": "string"}},
+            ["evidence_id"],
+        ),
+    ]
     return tools, handlers, evidence_catalog
 
 
@@ -807,6 +1047,14 @@ def _fundamental_handlers(
                 )
                 if key in source
             }
+            facts_units = {
+                field: str(source.get("facts_units", {}).get(field, FINANCIAL_FACT_UNITS[field]))
+                for field in safe_facts
+            }
+            reopen_ref = {
+                "tool": "read_cached_source",
+                "arguments": {"evidence_id": evidence_id},
+            }
             title = str(source.get("title", ""))
             full_text = str(source.get("full_text", ""))
             extracted_text_ref = source.get("extracted_text_ref")
@@ -824,10 +1072,13 @@ def _fundamental_handlers(
                 "title": title or None,
                 **({"body_text": full_text} if full_text else {}),
                 "facts": safe_facts,
+                "facts_units": facts_units,
+                "reopen_ref": reopen_ref,
                 "report_period": source.get("report_period"),
                 "published_at": source.get("published_at"),
                 "available_at": source.get("available_at"),
                 "fetched_at": source.get("fetched_at"),
+                "vintage": source.get("content_sha256"),
                 "vintage_status": source.get("vintage_status"),
                 "retrospective_backfill_proxy": bool(source.get("retrospective_backfill_proxy", False)),
                 "vintage_verified": bool(source.get("vintage_verified", False)),
@@ -846,6 +1097,8 @@ def _fundamental_handlers(
                 "published_at": source.get("published_at"),
                 "report_period": source.get("report_period"),
                 "facts": safe_facts,
+                "facts_units": facts_units,
+                "reopen_ref": reopen_ref,
                 "title": title,
                 "full_text": full_text,
                 "extracted_text_ref": extracted_text_ref,
@@ -863,9 +1116,12 @@ def _fundamental_handlers(
             "published_at": row.get("published_at"),
             "available_at": row.get("available_at"),
             "fetched_at": row.get("fetched_at"),
+            "vintage": row.get("vintage"),
             "vintage_status": row.get("vintage_status"),
             "retrospective_backfill_proxy": bool(row.get("retrospective_backfill_proxy", False)),
             "facts": row.get("facts", {}),
+            "facts_units": row.get("facts_units", {}),
+            "reopen_ref": row.get("reopen_ref"),
             "vintage_verified": bool(row.get("vintage_verified", False)),
             "content_scope": row.get("content_scope"),
             "full_text_local_only": bool(row.get("full_text") or row.get("extracted_text_ref")),
@@ -874,23 +1130,73 @@ def _fundamental_handlers(
     }
 
     def search_sources(arguments: dict[str, object]) -> dict[str, object]:
-        question = str(arguments.get("question", "财报与公告的重要证据及其报告期"))
+        question = arguments.get("question", "财报与公告的重要证据及其报告期")
+        if not isinstance(question, str) or not question.strip() or len(question) > 200:
+            raise InvalidToolInput("question must be a nonempty string up to 200 characters")
         symbols = arguments.get("symbols", [])
-        limit = int(arguments.get("limit", 8))
-        if not 1 <= limit <= 4:
-            raise ValueError("fundamental search limit must be within 1..4")
+        limit = arguments.get("limit", 4)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 4:
+            raise InvalidToolInput("fundamental search limit must be an integer within 1..4")
         if not isinstance(symbols, list) or any(
-            len(str(symbol)) != 6 or not str(symbol).isdigit() for symbol in symbols
+            not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit() for symbol in symbols
         ):
-            raise ValueError("symbols must be a list of six-digit security codes")
+            raise InvalidToolInput("symbols must be a list of six-digit security codes")
         selected = [row for row in public_sources if not symbols or row["symbol"] in symbols]
         selected.sort(key=lambda row: (
             str(row.get("available_at", "")),
             str(row.get("title") or ""),
         ), reverse=True)
+        by_symbol: dict[str, list[dict[str, object]]] = {}
+        for row in selected:
+            by_symbol.setdefault(str(row["symbol"]), []).append(row)
+        terms = []
+        for term in re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", question):
+            if re.fullmatch(r"[\u4e00-\u9fff]+", term):
+                terms.extend(term[index:index + 2] for index in range(len(term) - 1))
+            else:
+                terms.append(term.casefold())
+
+        def symbol_rank(symbol: str) -> tuple[int, int, str, int]:
+            rows = by_symbol[symbol]
+            searchable = " ".join(
+                " ".join((
+                    str(row.get("title") or ""),
+                    str(row.get("source_type") or ""),
+                    str(row.get("dataset") or ""),
+                    " ".join(str(field) for field in (row.get("facts") or {})),
+                ))
+                for row in rows
+            ).casefold()
+            relevance = sum(term in searchable for term in terms)
+            information = sum(
+                len(row.get("facts", {})) + bool(row.get("body_text"))
+                for row in rows
+            )
+            latest = max(str(row.get("available_at", "")) for row in rows)
+            return relevance, information, latest, int(hashlib.sha256(f"{question}\0{symbol}".encode()).hexdigest()[:8], 16)
+
+        if symbols:
+            selected_symbols = list(dict.fromkeys(str(symbol) for symbol in symbols if str(symbol) in by_symbol))
+            selection_audit = [
+                {"symbol": symbol, "selection_reason": "explicitly_requested"}
+                for symbol in selected_symbols[:limit]
+            ]
+        else:
+            ranked_symbols = sorted(by_symbol, key=symbol_rank, reverse=True)
+            selected_symbols = ranked_symbols[:limit]
+            selection_audit = [
+                {
+                    "symbol": symbol,
+                    "selection_reason": "query_relevance_then_source_information_and_recency",
+                    "relevance_terms_matched": symbol_rank(symbol)[0],
+                    "source_information_score": symbol_rank(symbol)[1],
+                }
+                for symbol in selected_symbols
+            ]
         contexts = []
         references = []
-        for symbol in sorted({str(row["symbol"]) for row in selected})[:limit]:
+        recall_audits = []
+        for symbol in selected_symbols:
             context = build_public_context(
                 decision_time=decision_time,
                 symbol=symbol,
@@ -903,30 +1209,57 @@ def _fundamental_handlers(
                 output_token_reserve=400,
             )
             contexts.append(context["messages"][-1])
+            recall_audits.append({"symbol": symbol, **context["selection_audit"]})
             for reference in context["local_reference_map"]:
+                evidence_id = reference["source_record_ids"][0]
+                source = source_records[evidence_id]
                 references.append({
-                    "evidence_id": reference["source_record_ids"][0],
+                    "evidence_id": evidence_id,
                     "source_type": reference["source_type"],
                     "title": reference["exact_title"],
                     "locator": reference["locator"],
+                    "symbol": symbol,
+                    "dataset": source.get("dataset"),
+                    "report_period": source.get("report_period"),
+                    "published_at": source.get("published_at"),
+                    "available_at": source.get("available_at"),
+                    "fetched_at": source.get("fetched_at"),
+                    "vintage": source.get("vintage"),
+                    "vintage_status": source.get("vintage_status"),
+                    "vintage_verified": source.get("vintage_verified"),
+                    "retrospective_backfill_proxy": source.get("retrospective_backfill_proxy"),
+                    "facts": source.get("facts", {}),
+                    "facts_units": source.get("facts_units", {}),
+                    "reopen_ref": {
+                        "tool": "read_cached_source",
+                        "arguments": {"evidence_id": evidence_id},
+                    },
                 })
         return {
             "context_messages": contexts,
             "evidence_refs": references,
             "selected_source_count": len(references),
+            "symbol_selection": selection_audit,
+            "recall_audit": recall_audits,
             "point_in_time_cutoff": decision_time.isoformat(),
         }
 
     def read_source(arguments: dict[str, object]) -> dict[str, object]:
-        evidence_id = str(arguments["evidence_id"])
+        evidence_id = arguments.get("evidence_id")
+        if not isinstance(evidence_id, str) or evidence_id not in source_records:
+            raise InvalidToolInput("evidence_id must identify a source returned by this task's tools")
         source = source_records[evidence_id]
         available_at = datetime.fromisoformat(str(source["available_at"]))
         if available_at > decision_time:
-            raise ValueError("source is unavailable at the requested decision time")
-        offset = int(arguments.get("offset", 0))
-        length = int(arguments.get("length", 1_200))
-        if offset < 0 or not 1 <= length <= 1_600:
-            raise ValueError("read offset must be nonnegative and length within 1..1600")
+            raise InvalidToolInput("source is unavailable at the requested decision time")
+        offset = arguments.get("offset", 0)
+        length = arguments.get("length", 1_200)
+        if (
+            isinstance(offset, bool) or not isinstance(offset, int)
+            or isinstance(length, bool) or not isinstance(length, int)
+            or offset < 0 or not 1 <= length <= 1_600
+        ):
+            raise InvalidToolInput("read offset must be a nonnegative integer and length an integer within 1..1600")
         text = source["full_text"]
         if source.get("extracted_text_ref"):
             text = Path(str(source["extracted_text_ref"])).read_text(encoding="utf-8")
@@ -940,7 +1273,10 @@ def _fundamental_handlers(
                 "published_at": source.get("published_at"),
                 "available_at": source.get("available_at"),
                 "fetched_at": source.get("fetched_at"),
+                "vintage": source.get("vintage"),
                 "vintage_status": source.get("vintage_status"),
+                "facts_units": source.get("facts_units", {}),
+                "reopen_ref": source.get("reopen_ref"),
                 "retrospective_backfill_proxy": bool(source.get("retrospective_backfill_proxy", False)),
                 "content_scope": "title_only",
                 "body_status": "title_only_body_unavailable_no_fetch_performed",
@@ -958,9 +1294,12 @@ def _fundamental_handlers(
             "published_at": source.get("published_at"),
             "available_at": source.get("available_at"),
             "fetched_at": source.get("fetched_at"),
+            "vintage": source.get("vintage"),
             "vintage_status": source.get("vintage_status"),
             "retrospective_backfill_proxy": bool(source.get("retrospective_backfill_proxy", False)),
             "facts": source.get("facts", {}),
+            "facts_units": source.get("facts_units", {}),
+            "reopen_ref": source.get("reopen_ref"),
             "text_excerpt": excerpt,
             "offset": offset,
             "next_offset": offset + len(excerpt) if offset + len(excerpt) < len(text) else None,
@@ -1000,6 +1339,9 @@ def _validate_report(
     report: dict[str, object],
     catalog: dict[str, dict[str, object]],
     role_id: str,
+    *,
+    visible_evidence_ids: set[str] | None = None,
+    decision_time: datetime | None = None,
 ) -> dict[str, object]:
     allowed_symbols = {str(row["symbol"]) for row in catalog.values()}
     findings_input = report["findings"]
@@ -1015,6 +1357,7 @@ def _validate_report(
     ):
         raise TypeError(f"{role_id} unresolved_items must be an array of strings")
     findings = []
+    visible_ids = set(catalog) if visible_evidence_ids is None else visible_evidence_ids
     for finding in findings_input:
         if not isinstance(finding, dict):
             raise TypeError(f"{role_id} finding entries must be JSON objects")
@@ -1040,19 +1383,107 @@ def _validate_report(
             for evidence_id in evidence_ids
         ):
             raise ValueError(f"{role_id} cited evidence that was not supplied for {symbol}")
+        if any(evidence_id not in visible_ids for evidence_id in evidence_ids):
+            raise ValueError(f"{role_id} cited evidence that was not exposed to the agent")
+        citation_timing = {}
+        for evidence_id in evidence_ids:
+            try:
+                citation_timing[evidence_id] = _citation_timing_status(
+                    catalog[evidence_id],
+                    decision_time,
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"{role_id} citation {evidence_id} failed timing validation: {exc}"
+                ) from None
         observations = []
         for observation in finding.get("observations", []):
-            if not isinstance(observation, dict) or not isinstance(observation.get("evidence_id"), str):
-                raise TypeError(f"{role_id} observations must be objects with a string evidence_id")
+            if not isinstance(observation, dict) or not all(
+                isinstance(observation.get(key), str)
+                for key in ("evidence_id", "field", "unit")
+            ):
+                raise TypeError(f"{role_id} observations require string evidence_id, field, and unit")
             evidence_id = observation["evidence_id"]
             if evidence_id not in evidence_ids:
                 raise ValueError(f"{role_id} observation is missing its finding citation")
-            observations.append(dict(observation))
+            if evidence_id not in visible_ids:
+                raise ValueError(f"{role_id} observation cites evidence that was not exposed to the agent")
+            source = catalog[evidence_id]
+            field_name = observation["field"]
+            value = observation.get("value")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(f"{role_id} structured observation value must be a finite number")
+            report_period = observation.get("report_period")
+            period_start = observation.get("period_start")
+            period_end = observation.get("period_end")
+            if "facts" in source:
+                facts = source["facts"]
+                if not isinstance(facts, dict) or field_name not in facts:
+                    raise ValueError(f"{role_id} structured field {field_name!r} was not exposed by the cited source")
+                expected = facts[field_name]
+                expected_unit = (source.get("facts_units") or {}).get(field_name) or FINANCIAL_FACT_UNITS.get(field_name)
+                expected_period = source.get("report_period")
+                if expected_period is None or not isinstance(report_period, str):
+                    raise ValueError(f"{role_id} financial observation has no verified report period")
+                if report_period != expected_period:
+                    raise ValueError(f"{role_id} financial observation report period does not match its source")
+                if period_start is not None or period_end is not None:
+                    raise ValueError(f"{role_id} financial observation cannot substitute market period boundaries for a report period")
+            elif "metric" in source and "value" in source:
+                expected = source["value"]
+                expected_unit = str(source.get("unit", "indicator_score"))
+                if field_name != str(source["metric"]):
+                    raise ValueError(f"{role_id} market observation field does not match its source metric")
+                if report_period is not None:
+                    raise ValueError(f"{role_id} market observation cannot claim a financial report period")
+                if period_start != source.get("period_start") or period_end != source.get("period_end"):
+                    raise ValueError(f"{role_id} market observation period boundaries do not match its source")
+            else:
+                raise ValueError(f"{role_id} cited source exposes no structured value for an observation")
+            if not expected_unit:
+                raise ValueError(f"{role_id} cited source has no verified unit for {field_name!r}")
+            if observation["unit"] != expected_unit:
+                raise ValueError(f"{role_id} structured observation unit does not match its source")
+            if isinstance(expected, bool) or not isinstance(expected, (int, float)) or not math.isfinite(float(expected)):
+                raise ValueError(f"{role_id} cited source does not expose a finite numeric value for {field_name!r}")
+            if not math.isclose(float(value), float(expected), rel_tol=1e-9, abs_tol=1e-10):
+                raise ValueError(f"{role_id} structured observation value does not match its cited source")
+            available_at = source.get("available_at")
+            validated = dict(observation)
+            validated.update({
+                "structured_validation": "exact_source_value_unit_period_match",
+                "source_available_at": str(available_at),
+                "source_vintage_verified": bool(source.get("vintage_verified", False)),
+                "source_timing_status": citation_timing[evidence_id],
+                "numeric_candidate_eligible": False,
+                "numeric_candidate_ineligibility_reason": "requires a mature frozen calibration mapping; exact observation is not an expected return",
+            })
+            observations.append(validated)
         findings.append({
             **finding,
             "agent_id": role_id,
             "evidence": [catalog[evidence_id] for evidence_id in evidence_ids],
+            "citation_validation": [
+                {
+                    "evidence_id": evidence_id,
+                    "available_at": catalog[evidence_id].get("available_at"),
+                    "published_at": catalog[evidence_id].get("published_at"),
+                    "fetched_at": catalog[evidence_id].get("fetched_at"),
+                    "vintage_status": catalog[evidence_id].get("vintage_status"),
+                    "retrospective_backfill_proxy": bool(catalog[evidence_id].get("retrospective_backfill_proxy", False)),
+                    "source_timing_status": citation_timing[evidence_id],
+                }
+                for evidence_id in evidence_ids
+            ],
             "observations": observations,
+            "semantic_claim_support": {
+                "status": "citations_present_semantic_entailment_not_automatically_verified",
+                "evidence_ids": list(evidence_ids),
+            },
+            "numeric_candidate_eligibility": {
+                "status": "ineligible_without_mature_calibrated_mapping",
+                "expected_returns_changed": False,
+            },
         })
     return {
         "agent_id": role_id,
@@ -1066,18 +1497,68 @@ def _validate_report(
     }
 
 
+def _source_datetime(value: object) -> datetime:
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=SHANGHAI)
+    return parsed.astimezone(SHANGHAI)
+
+
+def _citation_timing_status(source: dict[str, object], decision_time: datetime | None) -> str:
+    available_at = source.get("available_at")
+    if not available_at:
+        raise ValueError("cited source has no verified availability timestamp")
+    if decision_time is None:
+        return "not_checked_decision_time_missing"
+    if _source_datetime(available_at) > decision_time:
+        raise ValueError("cited source was unavailable at decision time")
+    published_at = source.get("published_at")
+    if published_at and _source_datetime(published_at) > decision_time:
+        raise ValueError("cited source was published after decision time")
+    if bool(source.get("retrospective_backfill_proxy", False)):
+        return "retrospective_publication_proxy"
+    fetched_at = source.get("fetched_at")
+    if not fetched_at:
+        if source.get("source_type") == "public_market_data" and source.get("vintage_verified") is True:
+            return "market_derived_available_at"
+        return "capture_time_unknown"
+    if _source_datetime(fetched_at) > decision_time:
+        raise ValueError("cited source was captured after decision time")
+    return "captured_by_decision_time"
+
+
 def _accept_report(
     arguments: dict[str, object],
     catalog: dict[str, dict[str, object]],
     role_id: str,
+    *,
+    visible_evidence_ids: set[str] | None = None,
+    decision_time: datetime | None = None,
 ) -> dict[str, object]:
     normalized_fields = ["findings"] if isinstance(arguments.get("findings"), str) else []
     try:
-        accepted_report = _validate_report(arguments, catalog, role_id)
+        accepted_report = _validate_report(
+            arguments,
+            catalog,
+            role_id,
+            visible_evidence_ids=visible_evidence_ids,
+            decision_time=decision_time,
+        )
     except (TypeError, ValueError) as exc:
         message = str(exc).lower()
-        category = "report_field_limit" if "limit" in message or "exceeds" in message else "report_schema_or_evidence"
-        raise InvalidResearchOutput(role_id, category) from None
+        if "value does not match" in message:
+            category = "observation_value_mismatch"
+        elif "unit does not match" in message:
+            category = "observation_unit_mismatch"
+        elif "report period" in message:
+            category = "observation_period_mismatch"
+        elif "not exposed" in message:
+            category = "evidence_not_exposed"
+        elif "limit" in message or "exceeds" in message:
+            category = "report_field_limit"
+        else:
+            category = "report_schema_or_evidence"
+        raise InvalidResearchOutput(role_id, category, str(exc)) from None
     return {
         "accepted_report": accepted_report,
         "accepted": True,
@@ -1102,9 +1583,16 @@ def run_research_harness(
     settings = config or {}
     market_tools, market_handlers, market_catalog = _market_handlers(research, as_of, settings)
     market_finalized: dict[str, object] = {}
+    market_visible_evidence_ids: set[str] = set()
 
     def submit_market(arguments: dict[str, object]) -> dict[str, object]:
-        accepted = _accept_report(arguments, market_catalog, "market")
+        accepted = _accept_report(
+            arguments,
+            market_catalog,
+            "market",
+            visible_evidence_ids=market_visible_evidence_ids,
+            decision_time=decision_time,
+        )
         report = accepted["accepted_report"]
         market_finalized["report"] = report
         return accepted
@@ -1126,6 +1614,7 @@ def run_research_harness(
         client=client,
         budget=budget,
         max_turns=2,
+        visible_evidence_ids=market_visible_evidence_ids,
     )
     market_report = market_result["report"]
 
@@ -1133,9 +1622,16 @@ def run_research_harness(
         public_snapshot, decision_time
     )
     fundamental_finalized: dict[str, object] = {}
+    fundamental_visible_evidence_ids: set[str] = set()
 
     def submit_fundamental(arguments: dict[str, object]) -> dict[str, object]:
-        accepted = _accept_report(arguments, fundamental_catalog, "fundamental")
+        accepted = _accept_report(
+            arguments,
+            fundamental_catalog,
+            "fundamental",
+            visible_evidence_ids=fundamental_visible_evidence_ids,
+            decision_time=decision_time,
+        )
         report = accepted["accepted_report"]
         fundamental_finalized["report"] = report
         return accepted
@@ -1176,6 +1672,7 @@ def run_research_harness(
             client=client,
             budget=budget,
             max_turns=4,
+            visible_evidence_ids=fundamental_visible_evidence_ids,
         )
     except InvalidResearchOutput as exc:
         exc.partial_tool_trace = [
@@ -1187,6 +1684,12 @@ def run_research_harness(
 
     evidence_catalog = {**market_catalog, **fundamental_catalog}
     all_reports = {"market": market_report, "fundamental": fundamental_report}
+    manager_visible_evidence_ids = {
+        str(evidence_id)
+        for report in all_reports.values()
+        for finding in report["findings"]
+        for evidence_id in finding["evidence_ids"]
+    }
     manager_state: dict[str, object] = {
         "query_count": 0,
         "query_attempted": False,
@@ -1196,23 +1699,23 @@ def run_research_harness(
 
     def query_specialist(arguments: dict[str, object]) -> dict[str, object]:
         if manager_state.get("plan") is None:
-            raise ValueError("research manager must create a plan before asking a specialist")
+            raise InvalidToolInput("research manager must create a plan before asking a specialist")
         if manager_state["query_attempted"]:
-            raise ValueError("research manager may make at most one directed query per task")
-        role = str(arguments["role"])
-        if role not in {"market", "fundamental"}:
-            raise ValueError("directed query role must be market or fundamental")
-        symbol = str(arguments["symbol"])
-        if len(symbol) != 6 or not symbol.isdigit():
-            raise ValueError("directed query symbol must be six digits")
-        question = str(arguments["question"])
-        if not question.strip() or len(question) > 240:
-            raise ValueError("directed query must be 1..240 characters")
+            raise InvalidToolInput("research manager may make at most one directed query per task")
+        role = arguments.get("role")
+        if not isinstance(role, str) or role not in {"market", "fundamental"}:
+            raise InvalidToolInput("directed query role must be market or fundamental")
+        symbol = arguments.get("symbol")
+        if not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit():
+            raise InvalidToolInput("directed query symbol must be six digits")
+        question = arguments.get("question")
+        if not isinstance(question, str) or not question.strip() or len(question) > 240:
+            raise InvalidToolInput("directed query must be 1..240 characters")
         plan = manager_state["plan"]
         if (role, symbol, question) != (
             plan["target_role"], plan["target_symbol"], plan["question"]
         ):
-            raise ValueError("directed query must match the research manager's declared plan")
+            raise InvalidToolInput("directed query must match the research manager's declared plan")
         manager_state["query_attempted"] = True
         remaining_task_turns = budget.remaining_task_logical_turns
         if min(budget.remaining_provider_calls, remaining_task_turns) < 3:
@@ -1245,18 +1748,25 @@ def run_research_harness(
                 if finding["symbol"] == symbol
             ],
         }
+        query_visible_evidence_ids = {
+            str(evidence_id)
+            for finding in prior_handoff["findings"]
+            for evidence_id in finding["evidence_ids"]
+        }
 
         def read_prior_evidence(evidence_arguments: dict[str, object]) -> dict[str, object]:
             if int(manager_state.get("prior_evidence_read_count", 0)) >= 1:
-                raise ValueError("directed specialist may reopen at most one source")
-            evidence_id = str(evidence_arguments["evidence_id"])
+                raise InvalidToolInput("directed specialist may reopen at most one source")
+            evidence_id = evidence_arguments.get("evidence_id")
+            if not isinstance(evidence_id, str):
+                raise InvalidToolInput("evidence_id must be a string from the research handoff")
             handed_off_ids = {
                 str(value)
                 for finding in prior_handoff["findings"]
                 for value in finding["evidence_ids"]
             }
             if evidence_id not in handed_off_ids:
-                raise ValueError("directed specialist may reopen only evidence handed off for its planned symbol")
+                raise InvalidToolInput("directed specialist may reopen only evidence handed off for its planned symbol")
             manager_state["prior_evidence_read_count"] = int(manager_state.get("prior_evidence_read_count", 0)) + 1
             if role == "fundamental":
                 return fundamental_handlers["read_cached_source"]({"evidence_id": evidence_id})
@@ -1273,7 +1783,13 @@ def run_research_harness(
             }
 
         def submit_targeted(arguments: dict[str, object]) -> dict[str, object]:
-            return _accept_report(arguments, catalog, f"{role}_directed_query")
+            return _accept_report(
+                arguments,
+                catalog,
+                f"{role}_directed_query",
+                visible_evidence_ids=query_visible_evidence_ids,
+                decision_time=decision_time,
+            )
 
         query_result = _run_tool_agent(
             role_id=f"{role}_directed_query",
@@ -1304,6 +1820,7 @@ def run_research_harness(
             client=client,
             budget=budget,
             max_turns=2,
+            visible_evidence_ids=query_visible_evidence_ids,
         )
         report = query_result["report"]
         manager_state["directed_queries"].append({
@@ -1338,16 +1855,16 @@ def run_research_harness(
 
     def plan_research(arguments: dict[str, object]) -> dict[str, object]:
         if manager_state.get("plan") is not None:
-            raise ValueError("research plan can be created only once")
-        role = str(arguments["target_role"])
-        symbol = str(arguments["target_symbol"])
-        question = str(arguments["question"])
-        if role not in {"market", "fundamental"}:
-            raise ValueError("plan target_role must be market or fundamental")
-        if len(symbol) != 6 or not symbol.isdigit():
-            raise ValueError("plan target_symbol must be six digits")
-        if not question.strip() or len(question) > 240:
-            raise ValueError("plan question must be 1..240 characters")
+            raise InvalidToolInput("research plan can be created only once")
+        role = arguments.get("target_role")
+        symbol = arguments.get("target_symbol")
+        question = arguments.get("question")
+        if not isinstance(role, str) or role not in {"market", "fundamental"}:
+            raise InvalidToolInput("plan target_role must be market or fundamental")
+        if not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit():
+            raise InvalidToolInput("plan target_symbol must be six digits")
+        if not isinstance(question, str) or not question.strip() or len(question) > 240:
+            raise InvalidToolInput("plan question must be 1..240 characters")
         manager_state["plan"] = {
             "target_role": role,
             "target_symbol": symbol,
@@ -1357,10 +1874,21 @@ def run_research_harness(
 
     def finalize(arguments: dict[str, object]) -> dict[str, object]:
         if manager_state.get("plan") is None:
-            raise ValueError("research manager must create a plan before finalizing")
-        no_query_reason = str(arguments["no_query_reason"])
+            raise InvalidToolInput("research manager must create a plan before finalizing")
+        no_query_reason = arguments.get("no_query_reason")
+        summary = arguments.get("summary")
+        priority_symbols_arg = arguments.get("priority_symbols")
+        unresolved_items = arguments.get("unresolved_items")
+        if (
+            not isinstance(no_query_reason, str)
+            or not isinstance(summary, str)
+            or not isinstance(priority_symbols_arg, list)
+            or not isinstance(unresolved_items, list)
+            or any(not isinstance(item, str) for item in unresolved_items)
+        ):
+            raise InvalidToolInput("finalize_research requires summary, priority_symbols, unresolved_items, and no_query_reason with the declared types")
         if manager_state["query_count"] == 0 and len(no_query_reason.strip()) < 8:
-            raise ValueError("when no specialist query is made, explain the evidence-based stopping reason")
+            raise InvalidToolInput("when no specialist query is made, explain the evidence-based stopping reason")
         all_symbols = {
             str(finding["symbol"])
             for report in all_reports.values()
@@ -1368,25 +1896,28 @@ def run_research_harness(
         }
         seen = set()
         priorities = []
-        for row in arguments["priority_symbols"]:
+        for row in priority_symbols_arg:
+            if not isinstance(row, dict) or not isinstance(row.get("symbol"), str) or not isinstance(row.get("evidence_ids"), list):
+                raise InvalidToolInput("priority_symbols must contain symbol and evidence_ids objects")
             symbol = str(row["symbol"])
             evidence_ids = [str(value) for value in row["evidence_ids"]]
             if symbol not in all_symbols or symbol in seen:
-                raise ValueError("priority symbols must be unique and supported by specialist reports")
+                raise InvalidToolInput("priority symbols must be unique and supported by specialist reports")
             if not evidence_ids or any(
                 evidence_id not in evidence_catalog
                 or str(evidence_catalog[evidence_id]["symbol"]) != symbol
+                or evidence_id not in manager_visible_evidence_ids
                 for evidence_id in evidence_ids
             ):
-                raise ValueError("priority symbol citations must resolve to public evidence for that symbol")
+                raise InvalidToolInput("priority symbol citations must resolve to public evidence for that symbol")
             seen.add(symbol)
             priorities.append({"symbol": symbol, "evidence_ids": evidence_ids})
         if len(priorities) > 12:
-            raise ValueError("research manager priority list exceeds the fixed 12-symbol limit")
+            raise InvalidToolInput("research manager priority list exceeds the fixed 12-symbol limit")
         manager_state["final"] = {
-            "summary": str(arguments["summary"]),
+            "summary": summary,
             "priority_symbols": priorities,
-            "unresolved_items": list(arguments["unresolved_items"]),
+            "unresolved_items": unresolved_items,
             "no_query_reason": no_query_reason,
             "research_plan": manager_state["plan"],
         }
@@ -1478,6 +2009,7 @@ def run_research_harness(
             client=client,
             budget=budget,
             max_turns=3,
+            visible_evidence_ids=manager_visible_evidence_ids,
         )
     except InvalidResearchOutput as exc:
         exc.partial_tool_trace = [

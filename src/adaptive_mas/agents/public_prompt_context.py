@@ -164,6 +164,8 @@ def _fingerprint(source: dict[str, object]) -> str:
         "report_period": source.get("report_period"),
         "body_text": source.get("body_text", source.get("text")),
         "facts": source.get("facts"),
+        "facts_units": source.get("facts_units"),
+        "vintage": source.get("vintage"),
         "sections": source.get("sections"),
     }
     return hashlib.sha256(_canonical(public_identity).encode("utf-8")).hexdigest()
@@ -293,6 +295,7 @@ def _source_card(source: dict[str, object], question_terms: set[str]) -> dict[st
         "published_at": str(source["published_at"]) if source.get("published_at") is not None else None,
         "available_at": str(source["available_at"]),
         "fetched_at": str(source["fetched_at"]) if source.get("fetched_at") is not None else None,
+        "vintage": source.get("vintage"),
         "vintage_status": source.get("vintage_status"),
         "retrospective_backfill_proxy": bool(source.get("retrospective_backfill_proxy", False)),
         "vintage_verified": bool(source.get("vintage_verified", False)),
@@ -305,6 +308,7 @@ def _source_card(source: dict[str, object], question_terms: set[str]) -> dict[st
             "locator": f"report_period={report_period}; fields={fields}",
             "report_period": str(report_period) if report_period is not None else None,
             "facts": facts,
+            "facts_units": source.get("facts_units", {}),
         })
         return card
     if not body_present:
