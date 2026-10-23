@@ -677,6 +677,8 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
         strict_pit_reasons.append("invalid_fetched_at")
     if capture_lag_source_ids:
         strict_pit_reasons.append("capture_after_decision_time")
+    if time_checks and not all(time_checks):
+        strict_pit_reasons.append("published_or_available_after_decision_time_or_unknown")
     strict_historical_pit_verified = not strict_pit_reasons
     tool_efficiency = sum(useful_calls) / len(useful_calls) if useful_calls else 0.0
     case_usage = result["task_usage"]

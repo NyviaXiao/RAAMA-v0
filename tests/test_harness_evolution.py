@@ -369,6 +369,21 @@ def test_scorer_does_not_infer_strict_pit_from_an_unknown_evidence_mode() -> Non
     assert "public_evidence_mode_unknown" in metrics["strict_historical_pit_reasons"]
 
 
+@pytest.mark.parametrize("timestamp_field", ["published_at", "available_at"])
+def test_scorer_rejects_strict_pit_when_public_availability_is_after_cutoff(timestamp_field: str) -> None:
+    result = _synthetic_result()
+    result["public_evidence_mode"] = "captured_public_cache_cutoff"
+    result["evidence_catalog"]["public-evidence-1"][timestamp_field] = "2026-09-02T09:00:00+08:00"
+    result["evidence_catalog"]["public-evidence-1"]["fetched_at"] = "2026-08-31T09:00:00+08:00"
+
+    metrics = score_research_result(result)
+
+    assert metrics["point_in_time_accuracy"] == 0.0
+    assert metrics["strict_capture_time_accuracy"] == 1.0
+    assert metrics["strict_historical_pit_verified"] is False
+    assert "published_or_available_after_decision_time_or_unknown" in metrics["strict_historical_pit_reasons"]
+
+
 def test_scorer_maps_exact_market_metric_and_uses_the_actual_required_fact_count() -> None:
     result = _synthetic_result()
     source = result["evidence_catalog"]["public-evidence-1"]
