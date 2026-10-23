@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RAAMA GEPA 多智能体研究工作台</title>
+<style>
+:root{font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;color:#172033;background:#f3f6fb}
+body{max-width:1080px;margin:36px auto;padding:0 20px}header,section{background:#fff;border:1px solid #dbe3ef;border-radius:14px;padding:22px;margin:16px 0;box-shadow:0 4px 20px #182f5010}
+h1{margin:0 0 8px;font-size:1.8rem}h2{font-size:1.15rem;margin:0 0 14px}p{margin:8px 0}.badge{display:inline-block;background:#edf3ff;color:#244c90;border-radius:99px;padding:4px 10px;font-size:.86rem}.notice{border-left:4px solid #d49324;padding-left:12px;color:#5c481f}
+table{border-collapse:collapse;width:100%;margin:12px 0}th,td{text-align:left;border-bottom:1px solid #e5eaf2;padding:9px}td{font-variant-numeric:tabular-nums}ul{margin:8px 0;padding-left:20px}li{padding:5px 0}small{display:block;color:#65728a}code{color:#314f84}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}.card{background:#f8faff;padding:14px;border-radius:10px}footer{color:#5f6b7b;font-size:.9rem;padding:12px}
+</style></head><body>
+<header><span class="badge">离线 · 历史证据</span><h1>RAAMA GEPA 多智能体研究工作台</h1>
+<p>展示已保存的多角色研究轨迹、评估器 v2、候选选择与记忆版本流程。</p>
+<p class="notice">重评分使用同一份历史报告，不是新模型运行、投资结果或收益改善证据。</p></header>
+<section><h2>已保存运行 · 20261023104652</h2><div class="grid"><div class="card"><strong>研究日期</strong><br>2026-08-31</div><div class="card"><strong>运行结果</strong><br>rejected · 活动版本保持为 seed</div><div class="card"><strong>严格历史时点验证</strong><br>False</div></div>
+<ul><li><strong>基本面专家</strong> · 4 tool calls: search_financial_facts_and_announcements → search_financial_facts_and_announcements → read_cached_source → submit_report</li>
+<li><strong>行情专家</strong> · 2 tool calls: read_market_signals → submit_report</li>
+<li><strong>研究经理</strong> · 3 tool calls: plan_research → query_specialist → finalize_research</li></ul><p>这份历史记录没有保存上下文压缩信息，也没有单独保存定向专家的内部工具轨迹。</p></section>
+<section><h2>同一报告，由两个评估器评分</h2><table><thead><tr><th>指标</th><th>历史报告记录</th><th>评估器 v2（重算）</th></tr></thead><tbody><tr><th>综合评分</th><td>69.3%</td><td>89.9%</td></tr>
+<tr><th>事实准确率</th><td>25.0%</td><td>100.0%</td></tr>
+<tr><th>必答事实覆盖</th><td>50.0%</td><td>50.0%</td></tr>
+<tr><th>引用准确率</th><td>100.0%</td><td>100.0%</td></tr>
+<tr><th>报告期准确率</th><td>100.0%</td><td>100.0%</td></tr>
+<tr><th>时点准确率</th><td>100.0%</td><td>100.0%</td></tr>
+<tr><th>工具效率</th><td>60.0%</td><td>60.0%</td></tr></tbody></table>
+<p>评估器 v2 修正了行情来源字段映射（精确匹配 <code>metric</code> 并读取 <code>value</code>），按实际条数计算必答事实，空集合标为不适用，并把简洁度与任务完成度作为软评分。分数变化来自评估逻辑，没有改动模型输出。</p></section>
+<section><h2>真实候选提案</h2><p>历史提案改动了六个文本组件，并按当时的结论长度硬限制被拒绝。活动版本仍是 seed；没有真实采纳的版本或学到的程序性记忆。</p><ul><li><code>market_prompt</code><small>SHA-256 52fa136b907a…</small></li>
+<li><code>fundamental_prompt</code><small>SHA-256 dbd53514230d…</small></li>
+<li><code>manager_prompt</code><small>SHA-256 83fac8c33abe…</small></li>
+<li><code>context_policy</code><small>SHA-256 e6e5a0d7529e…</small></li>
+<li><code>handoff_schema</code><small>SHA-256 755892a213ab…</small></li>
+<li><code>procedural_experience</code><small>SHA-256 87ab340bb6f6…</small></li></ul><p>决策记录：rejected; the original run used a hard 120-character conclusion cap and did not admit the proposal to independent selection.</p><p>原始候选差异文件：<a href="rejected-proposal.diff">查看六组件差异</a></p></section>
+<section><h2>持久记忆与回滚</h2><div class="grid"><div class="card"><strong>历史运行</strong><br>活动版本：seed<br>后续任务加载持久记忆：False</div><div class="card"><strong>隔离的合成演示</strong><br>采用 → 读回记忆 → 回滚至 seed：True / True<br>是否修改真实活动指针：否</div></div><p class="notice">该流程演示使用临时目录和合成夹具，只验证版本机制，不代表模型效果或收益提升。</p></section>
+<footer>生成页面时没有发出模型请求。缺少完整历史报告的分区标记为“轨迹不完整 / 不可比较”，没有补造输出。</footer>
+</body></html>

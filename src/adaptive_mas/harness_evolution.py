@@ -49,6 +49,18 @@ PUBLIC_FACT_FIELDS = (
     "income_statement_revenue_yoy_pct",
     "income_statement_parent_profit_yoy_pct",
 )
+EVALUATOR_VERSION = "adaptive-mas.harness-evaluator.v2"
+SCORE_WEIGHTS = {
+    "fact_accuracy": 0.20,
+    "required_fact_coverage": 0.12,
+    "citation_precision": 0.15,
+    "report_period_accuracy": 0.12,
+    "point_in_time_accuracy": 0.13,
+    "tool_efficiency": 0.08,
+    "cost_efficiency": 0.05,
+    "concision_score": 0.07,
+    "completion_score": 0.08,
+}
 
 
 def _json(value: object) -> str:
@@ -91,6 +103,16 @@ class HarnessVersionStore:
                 },
             }
         active = json.loads(self.active_path.read_text(encoding="utf-8"))
+        if str(active.get("version_id")) == "seed":
+            return seed_candidate(), "seed", {
+                "status": "seed_candidate",
+                "rollback": active.get("rollback"),
+                "procedural_memory": {
+                    "status": "seed_defaults",
+                    "loaded_from_persistent_store": False,
+                    "updated_from_prior_task": False,
+                },
+            }
         version_path = self.root / active["version_file"]
         version = json.loads(version_path.read_text(encoding="utf-8"))
         candidate = dict(version["candidate"])
@@ -111,6 +133,7 @@ class HarnessVersionStore:
                 "content_sha256": content_sha256,
                 "updated_from_prior_task": bool(memory_record["updated_from_prior_task"]),
                 "source_run_id": memory_record["source_run_id"],
+                "source": memory_record.get("source"),
                 "previous_content_sha256": memory_record["previous_content_sha256"],
             }
         else:
@@ -129,12 +152,19 @@ class HarnessVersionStore:
         selection: dict[str, object],
         reason: str,
         run_id: str,
+        origin: str = "official_gepa_optimize_anything",
+        procedural_memory_source: str = "GEPA reflective mutation accepted by independent selection",
+        version_id: str | None = None,
     ) -> tuple[str, str]:
         current, current_id, _ = self.load_active()
         if candidate == current:
             raise ValueError("cannot adopt a candidate identical to the active version")
         candidate_sha256 = hashlib.sha256(_json(candidate).encode("utf-8")).hexdigest()
-        version_id = f"h{datetime.now(SHANGHAI):%Y%m%d%H%M%S}-{candidate_sha256[:10]}"
+        version_id = version_id or f"h{datetime.now(SHANGHAI):%Y%m%d%H%M%S}-{candidate_sha256[:10]}"
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", version_id) or version_id == "seed":
+            raise ValueError("version_id must be a safe, non-seed identifier")
+        if (self.root / "versions" / f"{version_id}.json").exists():
+            raise ValueError(f"version {version_id!r} already exists")
         version_file = Path("versions") / f"{version_id}.json"
         memory_file = Path("procedural_memory") / f"{version_id}.json"
         experience = candidate["procedural_experience"]
@@ -146,7 +176,7 @@ class HarnessVersionStore:
             "schema_version": "adaptive-mas.procedural-memory.v1",
             "version_id": version_id,
             "source_run_id": run_id,
-            "source": "GEPA reflective mutation accepted by independent selection",
+            "source": procedural_memory_source,
             "content": experience,
             "content_sha256": experience_sha256,
             "previous_content_sha256": previous_experience_sha256,
@@ -164,7 +194,7 @@ class HarnessVersionStore:
             "procedural_experience_updated": memory_record["updated_from_prior_task"],
             "selection": selection,
             "adoption_reason": reason,
-            "origin": "official_gepa_optimize_anything",
+            "origin": origin,
             "run_id": run_id,
             "adopted_at": datetime.now(SHANGHAI).isoformat(),
         }
@@ -186,6 +216,72 @@ class HarnessVersionStore:
             )
         )
         return version_id, diff
+
+    def candidate_for_version(self, version_id: str) -> tuple[dict[str, str], dict[str, object]]:
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", version_id):
+            raise ValueError("version_id contains unsupported characters")
+        if version_id == "seed":
+            return seed_candidate(), {"version_id": "seed", "origin": "seed_candidate"}
+        version_path = self.root / "versions" / f"{version_id}.json"
+        if not version_path.is_file():
+            raise FileNotFoundError(f"unknown harness version {version_id!r}")
+        version = json.loads(version_path.read_text(encoding="utf-8"))
+        candidate = dict(version["candidate"])
+        if set(candidate) != set(seed_candidate()) or any(not isinstance(value, str) for value in candidate.values()):
+            raise ValueError(f"harness version {version_id!r} has an invalid component schema")
+        expected_hash = hashlib.sha256(_json(candidate).encode("utf-8")).hexdigest()
+        if expected_hash != version.get("candidate_sha256"):
+            raise ValueError(f"harness version {version_id!r} failed its candidate hash check")
+        return candidate, version
+
+    def compare(self, left_version_id: str, right_version_id: str) -> dict[str, object]:
+        left, left_meta = self.candidate_for_version(left_version_id)
+        right, right_meta = self.candidate_for_version(right_version_id)
+        component_changes = [key for key in sorted(seed_candidate()) if left[key] != right[key]]
+        diff_parts = []
+        for key in component_changes:
+            left_lines = left[key].splitlines(keepends=True)
+            right_lines = right[key].splitlines(keepends=True)
+            if left_lines and not left[key].endswith("\n"):
+                left_lines[-1] += "\n"
+            if right_lines and not right[key].endswith("\n"):
+                right_lines[-1] += "\n"
+            diff_parts.extend(difflib.unified_diff(
+                left_lines,
+                right_lines,
+                fromfile=f"{left_version_id}/{key}",
+                tofile=f"{right_version_id}/{key}",
+            ))
+        diff = "".join(diff_parts)
+        return {
+            "left_version_id": left_version_id,
+            "right_version_id": right_version_id,
+            "left_origin": left_meta.get("origin", "seed_candidate"),
+            "right_origin": right_meta.get("origin", "seed_candidate"),
+            "changed_components": component_changes,
+            "left_candidate_sha256": hashlib.sha256(_json(left).encode("utf-8")).hexdigest(),
+            "right_candidate_sha256": hashlib.sha256(_json(right).encode("utf-8")).hexdigest(),
+            "diff": diff,
+        }
+
+    def rollback(self, version_id: str, *, reason: str) -> dict[str, object]:
+        if not reason.strip():
+            raise ValueError("rollback requires a reason")
+        _, target = self.candidate_for_version(version_id)
+        _, previous_version_id, _ = self.load_active()
+        active_record: dict[str, object] = {
+            "schema_version": "adaptive-mas.active-harness.v1",
+            "version_id": version_id,
+            "version_file": None if version_id == "seed" else f"versions/{version_id}.json",
+            "rollback": {
+                "from_version_id": previous_version_id,
+                "to_version_id": version_id,
+                "reason": reason,
+                "rolled_back_at": datetime.now(SHANGHAI).isoformat(),
+            },
+        }
+        _write_json(self.active_path, active_record)
+        return {**active_record["rollback"], "target_origin": target.get("origin", "seed_candidate")}
 
     def export_active(self, output_path: str | Path) -> dict[str, object]:
         """Export active prompt text and integrity hashes without task or account artifacts."""
@@ -430,7 +526,7 @@ def _collect_exposed_evidence_ids(value: object) -> set[str]:
 
 
 def score_research_result(result: dict[str, object]) -> dict[str, object]:
-    """Fixed source-grounded evaluator; it never scores prose length or direction agreement."""
+    """Versioned public-source evaluator with soft completeness and efficiency scores."""
     catalog = result["evidence_catalog"]
     evidence_catalog: dict[str, dict[str, object]] = catalog
     as_of = date.fromisoformat(str(result["as_of"]))
@@ -504,6 +600,8 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
                     continue
                 if observation["field"] == "value":
                     expected = source.get("value")
+                elif observation["field"] == source.get("metric"):
+                    expected = source.get("value")
                 else:
                     expected = source.get("facts", {}).get(str(observation["field"]))
                 cited_in_finding = evidence_id in finding["evidence_ids"]
@@ -572,10 +670,31 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
         )
         for requirement in required
     ]
-    required_fact_coverage = (
-        sum(required_satisfied) / max(2, len(required_satisfied))
-        if required_satisfied else 0.0
-    )
+    required_fact_coverage = sum(required_satisfied) / len(required_satisfied) if required_satisfied else None
+    report_text_scores = []
+    role_completion = []
+    completion_roles = ("market", "fundamental", "research_manager")
+    for role in completion_roles:
+        agent = result["agents"].get(role)
+        if not isinstance(agent, dict):
+            role_completion.append(False)
+            continue
+        report = agent.get("report")
+        tool_trace = agent.get("tool_trace", [])
+        expected_final = "finalize_research" if role == "research_manager" else "submit_report"
+        completed = (
+            isinstance(report, dict)
+            and bool(tool_trace)
+            and tool_trace[-1].get("tool") == expected_final
+        )
+        role_completion.append(completed)
+        if isinstance(report, dict):
+            summary = report.get("summary", "")
+            report_text_scores.append(_soft_length_score(summary, 200))
+            for finding in report.get("findings", []):
+                report_text_scores.append(_soft_length_score(finding.get("conclusion", ""), 120))
+    completion_score = sum(role_completion) / len(role_completion)
+    concision_score = sum(report_text_scores) / len(report_text_scores) if report_text_scores else 0.0
     required_diagnostics = []
     for requirement, satisfied in zip(required, required_satisfied, strict=True):
         sources = [
@@ -612,6 +731,7 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
         for row in scored_observations if not row["correct"]
     ][:6]
     metrics = {
+        "evaluator_version": EVALUATOR_VERSION,
         "fact_accuracy": fact_accuracy,
         "citation_precision": citation_precision,
         "report_period_accuracy": report_period_accuracy,
@@ -625,10 +745,14 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
         "retrospective_capture_lag_source_count": len(capture_lag_source_ids),
         "public_evidence_mode": str(result.get("public_evidence_mode", "unknown")),
         "required_fact_coverage": required_fact_coverage,
+        "required_fact_coverage_status": "not_applicable" if required_fact_coverage is None else "scored",
         "required_fact_count": len(required_satisfied),
         "required_facts_satisfied": sum(required_satisfied),
         "tool_efficiency": tool_efficiency,
         "cost_efficiency": cost_efficiency,
+        "concision_score": concision_score,
+        "completion_score": completion_score,
+        "completion_status": "complete" if completion_score == 1.0 else "partial",
         "verified_observation_count": sum(observations),
         "observation_count": len(observations),
         "unique_citation_count": len(set(cited_ids)),
@@ -647,16 +771,21 @@ def score_research_result(result: dict[str, object]) -> dict[str, object]:
             "citation_failures": citation_issues[:6],
         },
     }
+    applicable_weights = {
+        name: weight for name, weight in SCORE_WEIGHTS.items()
+        if metrics.get(name) is not None
+    }
+    weight_total = sum(applicable_weights.values())
     metrics["score"] = (
-        0.25 * fact_accuracy
-        + 0.15 * required_fact_coverage
-        + 0.15 * citation_precision
-        + 0.15 * report_period_accuracy
-        + 0.15 * point_in_time_accuracy
-        + 0.10 * tool_efficiency
-        + 0.05 * cost_efficiency
+        sum(float(metrics[name]) * weight for name, weight in applicable_weights.items()) / weight_total
+        if weight_total else 0.0
     )
     return metrics
+
+
+def _soft_length_score(value: object, target: int) -> float:
+    length = len(str(value).strip())
+    return 1.0 if length <= target else target / length
 
 
 def _public_report_projection(report: dict[str, object]) -> dict[str, object]:
@@ -809,11 +938,11 @@ def _reflection_safe_info(result: dict[str, object], metrics: dict[str, object])
                             for key in ("field", "value", "report_period")
                             if key in observation
                         }
-                        for observation in finding.get("observations", [])[:2]
+                        for observation in finding.get("observations", [])
                     ],
-                    "uncertainties": [str(item)[:100] for item in finding.get("uncertainties", [])[:2]],
+                    "uncertainties": [str(item)[:100] for item in finding.get("uncertainties", [])],
                 }
-                for finding in report.get("findings", [])[:3]
+                for finding in report.get("findings", [])
             ],
             "unresolved_count": len(report.get("unresolved_items", [])),
         }
@@ -834,8 +963,10 @@ def _reflection_safe_info(result: dict[str, object], metrics: dict[str, object])
             "calls_returning_public_evidence": evidence_result_count,
         }
     metric_fields = (
-        "score", "fact_accuracy", "required_fact_coverage", "citation_precision",
+        "evaluator_version", "score", "fact_accuracy", "required_fact_coverage",
+        "required_fact_coverage_status", "citation_precision",
         "report_period_accuracy", "point_in_time_accuracy", "tool_efficiency",
+        "concision_score", "completion_score", "completion_status",
         "point_in_time_metric_scope", "strict_capture_time_accuracy",
         "strict_historical_pit_verified", "retrospective_capture_lag_source_count",
         "public_evidence_mode",
@@ -960,13 +1091,18 @@ def evaluate_candidate(
         ) / 1_000_000
         partial_tool_trace = validation_failure.partial_tool_trace
         quality_metrics = {
+            "evaluator_version": EVALUATOR_VERSION,
             "score": 0.0,
             "fact_accuracy": 0.0,
-            "required_fact_coverage": 0.0,
+            "required_fact_coverage": 0.0 if case.required_observations else None,
+            "required_fact_coverage_status": "scored" if case.required_observations else "not_applicable",
             "citation_precision": 0.0,
             "report_period_accuracy": 0.0,
             "point_in_time_accuracy": 0.0,
             "tool_efficiency": 0.0,
+            "concision_score": 0.0,
+            "completion_score": 0.0,
+            "completion_status": "partial",
             "point_in_time_metric_scope": "report rejected by fixed output validation; no observations scored",
             "strict_capture_time_accuracy": 0.0,
             "strict_historical_pit_verified": False,
@@ -1007,6 +1143,7 @@ def evaluate_candidate(
                 "as_of": case.as_of.isoformat(),
                 "status": "research_failed_output_contract",
                 "partial_tool_trace": partial_tool_trace,
+                "context_compression": getattr(validation_failure, "context_compression", []),
                 "task_usage": task_usage,
             })
         return 0.0, side_info
@@ -1119,14 +1256,16 @@ def _selection_summary(
     metrics = [row["metrics"] for row in rows]
     fields = (
         "fact_accuracy", "required_fact_coverage", "citation_precision", "report_period_accuracy",
-        "point_in_time_accuracy", "tool_efficiency", "cost_efficiency", "score",
+        "point_in_time_accuracy", "tool_efficiency", "cost_efficiency", "concision_score",
+        "completion_score", "score",
     )
+    means = {}
+    for metric in fields:
+        values = [row[metric] for row in metrics if row.get(metric) is not None]
+        means[metric] = sum(float(value) for value in values) / len(values) if values else None
     return {
         "case_count": len(rows),
-        "metrics": {
-            field: sum(float(row[field]) for row in metrics) / len(metrics)
-            for field in fields
-        },
+        "metrics": means,
         "per_case": [
             {"as_of": row["as_of"], **row["metrics"]}
             for row in rows
@@ -1139,7 +1278,11 @@ def _quality_gates_hold(candidate: dict[str, object], baseline: dict[str, object
         "fact_accuracy", "required_fact_coverage", "citation_precision",
         "report_period_accuracy", "point_in_time_accuracy",
     ):
-        if float(candidate[metric]) < float(baseline[metric]):
+        candidate_value = candidate.get(metric)
+        baseline_value = baseline.get(metric)
+        if baseline_value is None:
+            continue
+        if candidate_value is None or float(candidate_value) < float(baseline_value):
             return False
     return float(candidate["score"]) > float(baseline["score"])
 
@@ -1501,6 +1644,7 @@ def run_gepa_evolution(
     run_logical_calls = budget.logical_calls[run_logical_start:]
     output = {
         "schema_version": "adaptive-mas.gepa-evolution.v1",
+        "evaluator_version": EVALUATOR_VERSION,
         "run_id": run_id,
         "status": "accepted" if accepted else "rejected",
         "optimizer": "gepa.optimize_anything",

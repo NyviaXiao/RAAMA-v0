@@ -1,0 +1,221 @@
+{
+  "artifact_limits": "No raw prompts, source text, evidence IDs, request payloads, account data, credentials, or test.csv contents are embedded.",
+  "evolution": {
+    "archived_diff_file": "rejected-proposal.diff",
+    "candidate_proposals_generated": 1,
+    "candidate_proposals_rejected": 1,
+    "candidate_status": "rejected_before_candidate_pool_admission",
+    "changed_components": [
+      "market_prompt",
+      "fundamental_prompt",
+      "manager_prompt",
+      "context_policy",
+      "handoff_schema",
+      "procedural_experience"
+    ],
+    "component_sha256": {
+      "context_policy": "e6e5a0d7529ef5186d9c118726ad0a5460cee6f07ef26b00accd42cb7d7b311d",
+      "fundamental_prompt": "dbd53514230dac7fbffa0682556523ed7167aa1444aac762b4b5072de6b9a765",
+      "handoff_schema": "755892a213ab85cc9578960759a5a4109cb9f7e73a405c5c1cbab5cd694c4f56",
+      "manager_prompt": "83fac8c33abe90b77d25e78132333eab67189413717e4d25cfbaa44043f1f37f",
+      "market_prompt": "52fa136b907a77ad5412fa269ee5c76ef09033748c82aea0a8a107d4dab7a4bf",
+      "procedural_experience": "87ab340bb6f6df9409c3eb3abbf82c543f50ca19cf3d45329cc4f7e7896ed87f"
+    },
+    "decision_scope": "The v2 evaluator is not applied retroactively to adopt this candidate.",
+    "historical_decision": "rejected; the original run used a hard 120-character conclusion cap and did not admit the proposal to independent selection.",
+    "optimizer": "gepa.optimize_anything",
+    "reflection_components": [
+      "context_policy",
+      "fundamental_prompt",
+      "handoff_schema",
+      "manager_prompt",
+      "market_prompt",
+      "procedural_experience"
+    ],
+    "reflection_provenance": "Six components verified against persisted reflection responses in candidate_audit.json; includes work before checkpoint resume."
+  },
+  "historical_evidence_notice": "All model-run evidence below is retrospective and comes from saved local artifacts.",
+  "historical_run": {
+    "active_version_after": "seed",
+    "active_version_before": "seed",
+    "as_of": "2026-08-31",
+    "evidence_mode": "retrospective_source_publication_proxy",
+    "old_evaluator_recorded_score": 0.6926880434782609,
+    "run_id": "20261023104652",
+    "saved_role_traces": [
+      {
+        "context_compression": "not recorded in this historical artifact",
+        "directed_agent_detail": "not present",
+        "role": "fundamental",
+        "status": "full saved tool trace",
+        "tool_call_count": 4,
+        "tool_calls": [
+          "search_financial_facts_and_announcements",
+          "search_financial_facts_and_announcements",
+          "read_cached_source",
+          "submit_report"
+        ]
+      },
+      {
+        "context_compression": "not recorded in this historical artifact",
+        "directed_agent_detail": "not present",
+        "role": "market",
+        "status": "full saved tool trace",
+        "tool_call_count": 2,
+        "tool_calls": [
+          "read_market_signals",
+          "submit_report"
+        ]
+      },
+      {
+        "context_compression": "not recorded in this historical artifact",
+        "directed_agent_detail": "not separately recorded in this historical artifact",
+        "role": "research_manager",
+        "status": "full saved tool trace",
+        "tool_call_count": 3,
+        "tool_calls": [
+          "plan_research",
+          "query_specialist",
+          "finalize_research"
+        ]
+      }
+    ],
+    "status": "rejected",
+    "strict_historical_pit_verified": false
+  },
+  "model_requests_during_showcase": 0,
+  "partial_trace_policy": "Exploration/frozen summaries without complete reports are labeled partial trace / not comparable; no missing manager output is reconstructed.",
+  "procedural_memory": {
+    "active_memory_status": "seed_defaults",
+    "active_version": "seed",
+    "later_task_loaded_persisted_memory": false,
+    "later_task_memory_status": "seed_defaults",
+    "later_task_version": "seed",
+    "real_accepted_version_exists": false
+  },
+  "rescore_file": "evaluator_v2_rescore.json",
+  "schema_version": "adaptive-mas.gepa-showcase.v2",
+  "structured_execution_trace": [
+    {
+      "as_of": "2026-08-31",
+      "candidate_version_id": "seed",
+      "evaluator_v2_metric_scores": {
+        "case_model_turn_count": 9,
+        "citation_precision": 1.0,
+        "completion_score": 1.0,
+        "completion_status": "complete",
+        "concision_score": 0.9444444444444444,
+        "cost_efficiency": 0.9037608695652174,
+        "estimated_model_cost_cny": 0.318744,
+        "evaluator_version": "adaptive-mas.harness-evaluator.v2",
+        "fact_accuracy": 1.0,
+        "observation_count": 4,
+        "point_in_time_accuracy": 1.0,
+        "report_period_accuracy": 1.0,
+        "required_fact_count": 2,
+        "required_fact_coverage": 0.5,
+        "required_fact_coverage_status": "scored",
+        "required_facts_satisfied": 1,
+        "research_tool_call_count": 5,
+        "score": 0.899299154589372,
+        "strict_capture_time_accuracy": 0.0,
+        "strict_historical_pit_verified": false,
+        "tool_efficiency": 0.6,
+        "verified_observation_count": 4
+      },
+      "evidence_status": "one complete retrospective saved trace",
+      "roles_and_tools": [
+        {
+          "context_compression": "not recorded in this historical artifact",
+          "directed_agent_detail": "not present",
+          "role": "fundamental",
+          "status": "full saved tool trace",
+          "tool_call_count": 4,
+          "tool_calls": [
+            "search_financial_facts_and_announcements",
+            "search_financial_facts_and_announcements",
+            "read_cached_source",
+            "submit_report"
+          ]
+        },
+        {
+          "context_compression": "not recorded in this historical artifact",
+          "directed_agent_detail": "not present",
+          "role": "market",
+          "status": "full saved tool trace",
+          "tool_call_count": 2,
+          "tool_calls": [
+            "read_market_signals",
+            "submit_report"
+          ]
+        },
+        {
+          "context_compression": "not recorded in this historical artifact",
+          "directed_agent_detail": "not separately recorded in this historical artifact",
+          "role": "research_manager",
+          "status": "full saved tool trace",
+          "tool_call_count": 3,
+          "tool_calls": [
+            "plan_research",
+            "query_specialist",
+            "finalize_research"
+          ]
+        }
+      ],
+      "stage": "saved_multi_agent_execution"
+    },
+    {
+      "candidate_sha256": "02ade42b001fe888b2a5ea9eb2d50e2f0c1d78cec322799f928e058ebc63f24b",
+      "candidate_status": "rejected_before_candidate_pool_admission",
+      "changed_components": [
+        "market_prompt",
+        "fundamental_prompt",
+        "manager_prompt",
+        "context_policy",
+        "handoff_schema",
+        "procedural_experience"
+      ],
+      "reflection_components": [
+        "context_policy",
+        "fundamental_prompt",
+        "handoff_schema",
+        "manager_prompt",
+        "market_prompt",
+        "procedural_experience"
+      ],
+      "reflection_provenance": "Six components verified against persisted reflection responses in candidate_audit.json; includes work before checkpoint resume.",
+      "stage": "gepa_reflection_and_proposal"
+    },
+    {
+      "active_version_after": "seed",
+      "active_version_before": "seed",
+      "decision": "rejected under the original output contract before candidate-pool admission",
+      "stage": "independent_selection_and_adoption",
+      "status": "not_run_for_proposal"
+    },
+    {
+      "memory_status": "seed_defaults",
+      "persistent_memory_loaded": false,
+      "stage": "later_task_memory_load",
+      "version_id": "seed"
+    }
+  ],
+  "synthetic_lifecycle_demo": {
+    "adopted_fixture_version_id": "synthetic-demo-v1",
+    "adopted_origin": "synthetic_fixture_only",
+    "changed_components": [
+      "procedural_experience"
+    ],
+    "is_synthetic_fixture": true,
+    "label": "synthetic mechanism demonstration only",
+    "live_active_pointer_modified": false,
+    "model_improvement_or_returns_claimed": false,
+    "model_requests": 0,
+    "procedural_memory_loaded_from_store": true,
+    "rollback_restored_seed": true,
+    "rollback_target": "seed",
+    "store_is_temporary_and_isolated": true,
+    "temporary_store_deleted_after_demo": true
+  },
+  "title": "RAAMA GEPA multi-agent harness: offline engineering showcase"
+}

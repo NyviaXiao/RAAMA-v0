@@ -28,15 +28,16 @@ flowchart LR
 |---|---|---|
 | `agents/public_experts.py` | 从本地公共数据缓存生成财务事实、公告/新闻和来源索引 | 不启动网络抓取；公告全文按需从已缓存文本读取 |
 | `agents/public_prompt_context.py` | 按 `as_of` 过滤已发布且已可用记录，限制上下文大小并保留不透明证据引用 | 不暴露本地 `source_record_id`、路径、预测或账户字段 |
-| `agents/harness.py` | OpenAI-compatible function-call 循环、行情/基本面/经理工具、schema 校验、上下文压缩、响应缓存与持久 ledger | 三个工具角色逐步交接；每案最多 10 个模型轮次；整个实验最多 160 次 provider 调用 |
+| `agents/harness.py` | OpenAI-compatible function-call 循环、行情/基本面/经理工具、schema 校验、上下文压缩、响应缓存与持久 ledger | 三个工具角色逐步交接；报告长度和条数参与软评分；类型、来源引用、同标的和时点仍硬校验；每案最多 10 轮，整个实验最多 160 次 provider 调用 |
 | `agents/harness_prompts.py` | 六个可由 GEPA 修改的文本组件 | 工具 schema、固定评价权重和投资优化器不随候选演化 |
-| `harness_evolution.py` | 官方 `gepa.optimize_anything`、离线分组、评价、候选审计、版本与程序性经验存储 | 3 个探索、2 个选择、2 个冻结配对评价、1 个独立复用任务；最多一轮单组件反思变异 |
+| `harness_evolution.py` | 官方 `gepa.optimize_anything`、离线分组、版本化评价、候选审计、版本与程序性经验存储 | 3 个探索、2 个选择、2 个冻结配对评价、1 个独立复用任务；最多一轮覆盖六个文本组件的反思变异 |
 | `harness_runtime.py` | 稳定 Python 单日入口 | 预测预检仅运行一次，拒绝 seed 日期/期限不匹配，然后调用现有 `create_daily_decision` |
 | `decision.py` | 校准预测与组合优化集成 | task cost 从单任务 `task_usage` 读取；不使用累计 ledger 账单作为一个决策的成本 |
 | `scripts/run_harness_decision.py` | JSON 账户输入、缓存/seed 加载、版本/调用状态、`DailyDecision` JSON 输出 | 暖启动、配置错误、seed provenance 不匹配时不发请求 |
 | `scripts/run_harness_evolution.py` | 离线 payload 审阅包；显式 `--execute-gepa` 后运行回顾性 GEPA | 先用共享 ledger 预留最多 156 次；未知请求结果未解决时停止 |
 | `scripts/run_harness_paired_simulation.py` | 复用研究 JSON、同一次校准预测和相同初始账户，比较基准/候选筛选的短窗口模拟 | 无 provider 请求；只做一次下个交易日调仓并持有到期限结束 |
 | `scripts/export_harness_version.py` | 导出活动版提示文本及完整性哈希 | 只导出六段提示，不含运行、账户、预测、评价或本地路径 |
+| `scripts/harness_showcase.py` | 离线重评分、静态展示、版本比较和显式回滚 | 默认只读取发布的安全 JSON；`--rescore-local` 才读取本机完整轨迹；临时合成版本演示不改活动版本 |
 
 ## 一次日常决策
 
@@ -53,11 +54,19 @@ flowchart LR
 
 - 日期由公开本地缓存确定并去重；分组为 exploration 3、selection 2、frozen evaluation 2、单独 reuse 1。所有分组均为回顾性，不是盲测。
 - GEPA 的 evaluator 输入只有公开决策日。公开研究结果通过固定事实/引用评价器评分：事实准确、必答事实覆盖、引用精度、报告期和点时准确、工具效率、模型成本。
+- evaluator v2 精确处理市场来源的 `metric`/`value` 字段契约；必答事实按实际条数计算，零条记为 N/A 并从综合分权重中剔除后重新归一。简洁度、输出完整度和工具效率均为软评分；来源真实性、引用对应、类型、报告期和点时仍由硬边界保护。
 - 探索评价由 `(candidate, as_of)` 缓存去重，至多 6 个唯一任务；`max_metric_calls=8` 是 GEPA evaluator 回调上限，不是唯一 case 数。
 - 每案最多 10 轮；一次 GEPA 变异反思全部六个文本组件，各发一个请求。最坏上界是 15 个研究任务 × 10 轮 + 6 次反思 = 156 次 provider 请求。六个候选组件均保留在版本中。
 - 候选需先严格提高探索集分数，再在两例独立选择集上严格提高综合分，并且事实、引用、报告期和点时指标不低于活动版本，方可写入活动版本。否则保留现有版本。
 - 两个冻结日期对活动旧版和接纳新版做配对评价，不能用于候选选择。独立 reuse 日期验证新任务重新加载活动版本及持久化程序性经验。
+- 每个新 agent trace 记录角色、工具轮次和发生过的上下文压缩统计，不记录压缩前后的正文。已有旧 trace 缺少该字段时明确标注“未记录”。
 当前实测结果和可提交安全产物见 [安全运行报告](reports/harness_20261023/RUN_REPORT.md)。原始 outgoing review、反思 payload、冻结逐轮记录、调用账单和响应缓存仅保留在本机。未来 run 的空白模板见 HARNESS_RUN_REPORT_TEMPLATE.md。
+
+## v2 评估与离线展示
+
+已发布的静态页 [GEPA 多智能体研究工作台](reports/harness_20261023/showcase.html) 和 [v2 重评分 JSON](reports/harness_20261023/evaluator_v2_rescore.json) 不包含完整报告轨迹、原始提示或来源正文。它们对保存的 2026-08-31 报告分别显示历史评估器与 evaluator v2：事实准确率由 25% 修正为 100%，因为旧评估器将三个行情事实查入了错误字段；这是同一输出的评估口径修正，不是新模型表现。必答事实覆盖仍为 1/2。历史 `RUN_REPORT.md` 的结果与分数未改写。其余仅有汇总分数的历史分区标为轨迹不完整、不可比较。
+
+在完整本机数据可用时，`python scripts/harness_showcase.py render --rescore-local` 可重新计算该单个完整轨迹；普通 `render` 只读取随仓库发布的安全 JSON。版本差异可用 `python scripts/harness_showcase.py compare --version-dir <store> --left <version-a> --right <version-b>` 查看；显式回滚使用 `python scripts/harness_showcase.py rollback --version-dir <store> --version-id <existing-version> --reason <reason>`。只在用户明确指定 store 和版本后才会更改活动指针。展示页的采用/记忆读回/回滚闭环由临时目录中的合成 fixture 演示，不代表真实候选被采纳、模型质量提升或投资收益。
 
 ## 成本、隐私和故障
 

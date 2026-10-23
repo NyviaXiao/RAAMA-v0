@@ -101,9 +101,17 @@ $reuse = Get-Content "$runDir\evolution_report.json" | ConvertFrom-Json
 .venv\Scripts\python.exe scripts\export_harness_version.py --output "active-harness-prompts.json"
 ```
 
-所有分区均使用回顾性本地缓存，固定为 3 个探索、2 个选择、2 个冻结评估和 1 个独立新任务复用样本。不能把历史回填资料称作独立盲测。获选的程序性经验会和候选版本一起持久化；复用报告会记录后续任务实际加载的版本与内容哈希。
+所有分区均使用回顾性本地缓存，固定为 3 个探索、2 个选择、2 个冻结评估和 1 个独立新任务复用样本。不能把历史回填资料称作独立盲测。获选的程序性经验会和候选版本一起持久化；复用报告会记录后续任务实际加载的版本与内容哈希。版本可通过 `scripts/harness_showcase.py compare` 查看组件差异，并通过显式 `rollback` 命令恢复指定版本。
 
-本地缓存的抓取时间晚于回顾性样本日期，因此评价使用显式来源日期代理，保留真实 fetched_at 和未验证 vintage 标记；严格历史 PIT 均为 false。当前样本每案有 2 个必答事实，样本间公司报告期、公告和新闻事件组无重叠。运行 20261023104652 的唯一候选因输出约束被拒绝，活动版本仍为 seed，没有投资改善证据。安全汇总、seed 提示、候选 diff 和必要审计见 [Harness 安全报告包](reports/harness_20261023/RUN_REPORT.md)。
+本地缓存的抓取时间晚于回顾性样本日期，因此评价使用显式来源日期代理，保留真实 fetched_at 和未验证 vintage 标记；严格历史 PIT 均为 false。当前样本每案有 2 个必答事实，样本间公司报告期、公告和新闻事件组无重叠。运行 20261023104652 的唯一候选在原 evaluator v1 的硬性结论长度约束下被拒绝，活动版本仍为 seed，没有投资改善证据。安全汇总、seed 提示、候选 diff 和必要审计见 [Harness 安全报告包](reports/harness_20261023/RUN_REPORT.md)。
+
+离线展示页随附同一份 2026-08-31 reuse trace 的 evaluator v2 安全重评分：旧评分中的事实准确率从 25% 修正为 100%，原因是旧评估器把行情字段按 `source.facts` 查询，而实际工具契约使用精确 `source.metric` 与 `source.value` 映射；必答事实覆盖仍为 1/2（50%）。这是同一保存报告的评估器修正，不是模型进化或新输出，旧版运行报告保留原分数。展示页同时呈现已保存的多角色工具轨迹、真实六组件候选审计，以及隔离临时目录中的合成采用/记忆读回/回滚机制演示。冻结集仅有指标摘要的部分轨迹会标为不可比较；页面不会补写模型输出，也不发模型请求、不展示原始提示或来源正文：
+
+```powershell
+.venv\Scripts\python.exe scripts\harness_showcase.py render
+```
+
+默认从随仓库发布的安全汇总和重评分 JSON 生成静态页面，不依赖未发布的完整缓存轨迹。若本地保有历史完整轨迹，可显式运行 `.venv\Scripts\python.exe scripts\harness_showcase.py render --rescore-local` 重新计算 evaluator v2 指标。打开[离线展示页](reports/harness_20261023/showcase.html)。历史重评分只更改评估器口径，不代表新一轮模型表现；合成版本演示不代表真实 GEPA 采纳或投资改善。
 
 ## RAAMA contextual RL 历史路径
 

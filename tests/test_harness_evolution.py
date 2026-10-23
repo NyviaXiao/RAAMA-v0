@@ -3,16 +3,19 @@ from __future__ import annotations
 import json
 from datetime import date
 
+import pytest
+
 from gepa.optimize_anything import _build_reflection_prompt_template
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
-from adaptive_mas.agents.harness import CallBudget
+from adaptive_mas.agents.harness import CallBudget, _validate_report
 from adaptive_mas.agents.harness_prompts import seed_candidate
 from adaptive_mas.harness_evolution import (
     HarnessCase,
     HarnessVersionStore,
     build_retrospective_cases,
     _public_tool_projection,
+    _selection_summary,
     _reflection_safe_info,
     score_research_result,
     split_retrospective_cases,
@@ -275,7 +278,110 @@ def test_scorer_does_not_reward_duplicate_citations_or_repeated_evidence_reads()
     assert metrics["unique_citation_count"] == 1
     assert metrics["duplicate_citation_count"] == 1
     assert metrics["tool_efficiency"] == 0.5
-    assert metrics["required_fact_coverage"] == 0.5
+    assert metrics["required_fact_coverage"] == 1.0
+
+
+def test_scorer_maps_exact_market_metric_and_uses_the_actual_required_fact_count() -> None:
+    result = _synthetic_result()
+    source = result["evidence_catalog"]["public-evidence-1"]
+    source["metric"] = "exact_market_metric"
+    source["value"] = 12.5
+    finding = result["agents"]["market"]["report"]["findings"][0]
+    finding["observations"][0]["field"] = "exact_market_metric"
+    finding["observations"][0]["value"] = 12.5
+    result["required_observations"] = [{
+        "symbol": "600000",
+        "field": "exact_market_metric",
+        "report_period": "2026Q2",
+    }]
+
+    metrics = score_research_result(result)
+
+    assert metrics["fact_accuracy"] == 1.0
+    assert metrics["required_fact_count"] == 1
+    assert metrics["required_fact_coverage"] == 1.0
+    assert metrics["evaluator_version"] == "adaptive-mas.harness-evaluator.v2"
+
+    finding["observations"][0]["field"] = "near_match_alias"
+    metrics = score_research_result(result)
+    assert metrics["fact_accuracy"] == 0.0
+    assert metrics["required_fact_coverage"] == 0.0
+
+
+def test_empty_required_fact_set_is_not_applicable_and_summary_skips_it() -> None:
+    result = _synthetic_result()
+    result["required_observations"] = []
+
+    metrics = score_research_result(result)
+    summary = _selection_summary([
+        {"as_of": "2026-09-01", "metrics": metrics},
+        {"as_of": "2026-09-02", "metrics": {**metrics, "required_fact_coverage": 1.0}},
+    ])
+
+    assert metrics["required_fact_coverage"] is None
+    assert metrics["required_fact_coverage_status"] == "not_applicable"
+    assert summary["metrics"]["required_fact_coverage"] == 1.0
+
+
+def test_report_text_and_collection_sizes_are_soft_but_evidence_boundary_is_hard() -> None:
+    source = _synthetic_result()["evidence_catalog"]["public-evidence-1"]
+    source["source_record_id"] = "public-record-test"
+    catalog = {source["evidence_id"]: source}
+    observation = {
+        "evidence_id": source["evidence_id"],
+        "field": "revenue_yoy_pct",
+        "value": 12.5,
+        "report_period": "2026Q2",
+    }
+    report = {
+        "summary": "s" * 260,
+        "findings": [{
+            "symbol": source["symbol"],
+            "conclusion": "c" * 150,
+            "evidence_ids": [source["evidence_id"]] * 5,
+            "observations": [observation, observation],
+            "uncertainties": ["u"] * 3,
+        } for _ in range(4)],
+        "unresolved_items": ["unresolved"] * 5,
+    }
+
+    accepted = _validate_report(report, catalog, "market")
+    assert len(accepted["findings"]) == 4
+    assert len(accepted["findings"][0]["observations"]) == 2
+    assert len(accepted["unresolved_items"]) == 5
+
+    report["findings"][0]["evidence_ids"] = ["unknown-source"]
+    with pytest.raises(ValueError, match="cited evidence that was not supplied"):
+        _validate_report(report, catalog, "market")
+
+
+def test_version_compare_memory_reload_and_explicit_seed_rollback_are_isolated(tmp_path) -> None:
+    store = HarnessVersionStore(tmp_path)
+    candidate = seed_candidate()
+    candidate["procedural_experience"] += " Synthetic fixture content only."
+    version_id, _ = store.adopt(
+        candidate,
+        previous_version_id="seed",
+        selection={"fixture_only": True},
+        reason="synthetic fixture",
+        run_id="synthetic-test",
+        origin="synthetic_fixture_only",
+        procedural_memory_source="synthetic fixture",
+        version_id="synthetic-test-v1",
+    )
+
+    compared = store.compare("seed", version_id)
+    loaded, loaded_id, version = store.load_active()
+    rollback = store.rollback("seed", reason="test fixture cleanup")
+    _, restored_id, restored = store.load_active()
+
+    assert compared["changed_components"] == ["procedural_experience"]
+    assert loaded_id == version_id and loaded == candidate
+    assert version["procedural_memory"]["loaded_from_persistent_store"] is True
+    assert version["procedural_memory"]["source"] == "synthetic fixture"
+    assert rollback["to_version_id"] == "seed"
+    assert restored_id == "seed"
+    assert restored["procedural_memory"]["status"] == "seed_defaults"
 
 
 def test_actual_gepa_reflection_renderer_stays_inside_outgoing_payload_limit() -> None:

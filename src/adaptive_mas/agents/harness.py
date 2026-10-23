@@ -545,18 +545,17 @@ SUBMIT_REPORT = _tool(
     "submit_report",
     "Finish the specialist review using only evidence IDs returned by your tools.",
     {
-        "summary": {"type": "string", "maxLength": 200},
+        "summary": {"type": "string"},
         "findings": {
             "type": "array",
-            "maxItems": 3,
             "items": {
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
-                    "conclusion": {"type": "string", "maxLength": 120},
-                    "evidence_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 4},
+                    "conclusion": {"type": "string"},
+                    "evidence_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                     "observations": {
-                        "type": "array", "maxItems": 1,
+                        "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -569,13 +568,13 @@ SUBMIT_REPORT = _tool(
                             "additionalProperties": False,
                         },
                     },
-                    "uncertainties": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+                    "uncertainties": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["symbol", "conclusion", "evidence_ids", "observations", "uncertainties"],
                 "additionalProperties": False,
             },
         },
-        "unresolved_items": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+        "unresolved_items": {"type": "array", "items": {"type": "string"}},
     },
     ["summary", "findings", "unresolved_items"],
 )
@@ -599,18 +598,41 @@ def _run_tool_agent(
         system_prompt = "\n\n".join((
             system_prompt,
             "Submission contract: call submit_report with findings as a direct JSON array of objects, "
-            "never as a string containing JSON. Keep summary within 200 characters, return at most "
-            "three findings and at most one exact observation per finding, and provide unresolved_items "
-            "as a separate top-level array. Include each supported required fact in that one-observation "
-            "budget; leave only unsupported required facts unresolved. Use concise conclusions.",
+            "never as a string containing JSON. Provide a complete, readable report and include every "
+            "supported exact observation with its source citation and report period. Keep the report "
+            "focused; completeness, concision, and tool efficiency are evaluated as soft scores. "
+            "Provide unresolved_items as a separate top-level array.",
         ))
     messages: list[dict[str, object]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": _json(task)},
     ]
     trace: list[dict[str, object]] = []
+    context_compression: list[dict[str, object]] = []
     for turn_index in range(max_turns):
+        before_bytes = len(_json(messages).encode("utf-8"))
         messages = compact_agent_messages(messages)
+        after_bytes = len(_json(messages).encode("utf-8"))
+        if after_bytes < before_bytes:
+            summary_steps = 0
+            reference_only = False
+            if len(messages) > 2 and messages[2].get("role") == "user":
+                try:
+                    steps = json.loads(str(messages[2]["content"])).get("steps", [])
+                    summary_steps = len(steps)
+                    reference_only = bool(steps) and all(
+                        set(step.get("result", {})).issubset({"evidence_ids", "symbols"})
+                        for step in steps
+                    )
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    summary_steps = 0
+            context_compression.append({
+                "turn": turn_index + 1,
+                "strategy": "reference_only" if reference_only else "completed_steps_summary",
+                "before_bytes": before_bytes,
+                "after_bytes": after_bytes,
+                "compressed_tool_steps": summary_steps,
+            })
         if turn_index == max_turns - 1:
             messages[0] = {
                 **messages[0],
@@ -641,6 +663,7 @@ def _run_tool_agent(
             try:
                 result = handlers[name](arguments)
             except InvalidResearchOutput as exc:
+                exc.context_compression = list(context_compression)
                 exc.partial_tool_trace = [
                     {"role": role_id, "tool": item["tool"], "status": "completed"}
                     for item in trace
@@ -664,6 +687,8 @@ def _run_tool_agent(
                     "role_id": role_id,
                     "report": result["accepted_report"],
                     "tool_trace": trace,
+                    "context_compression": context_compression,
+                    "turn_count": turn_index + 1,
                     "model": client.model,
                 }
     raise RuntimeError(f"{role_id} exceeded its {max_turns}-turn tool-calling limit")
@@ -982,36 +1007,32 @@ def _validate_report(
         findings_input = json.loads(findings_input)
     if not isinstance(findings_input, list):
         raise TypeError(f"{role_id} findings must be a JSON array")
-    if len(findings_input) > 3:
-        raise ValueError(f"{role_id} may submit at most three findings")
-    if not isinstance(report["summary"], str) or len(report["summary"]) > 200:
-        raise ValueError(f"{role_id} summary exceeds the 200-character limit")
+    if not isinstance(report["summary"], str):
+        raise TypeError(f"{role_id} summary must be a string")
     unresolved_items = report["unresolved_items"]
-    if not isinstance(unresolved_items, list) or len(unresolved_items) > 4 or any(
+    if not isinstance(unresolved_items, list) or any(
         not isinstance(item, str) for item in unresolved_items
     ):
-        raise ValueError(f"{role_id} unresolved_items must be an array of at most four items")
+        raise TypeError(f"{role_id} unresolved_items must be an array of strings")
     findings = []
     for finding in findings_input:
         if not isinstance(finding, dict):
             raise TypeError(f"{role_id} finding entries must be JSON objects")
-        if not isinstance(finding.get("observations"), list) or len(finding["observations"]) > 1:
-            raise ValueError(f"{role_id} may submit at most one observation per finding")
+        if not isinstance(finding.get("observations"), list):
+            raise TypeError(f"{role_id} finding observations must be an array")
         if not isinstance(finding.get("symbol"), str) or not isinstance(finding.get("conclusion"), str):
             raise TypeError(f"{role_id} finding symbol and conclusion must be strings")
-        if len(finding["conclusion"]) > 120:
-            raise ValueError(f"{role_id} finding conclusion exceeds the 120-character limit")
         symbol = finding["symbol"]
         evidence_ids = finding["evidence_ids"]
-        if not isinstance(evidence_ids, list) or not 1 <= len(evidence_ids) <= 4 or any(
+        if not isinstance(evidence_ids, list) or not evidence_ids or any(
             not isinstance(value, str) for value in evidence_ids
         ):
-            raise ValueError(f"{role_id} evidence_ids must be an array of one to four strings")
+            raise TypeError(f"{role_id} evidence_ids must be a non-empty array of strings")
         uncertainties = finding.get("uncertainties")
-        if not isinstance(uncertainties, list) or len(uncertainties) > 2 or any(
+        if not isinstance(uncertainties, list) or any(
             not isinstance(value, str) for value in uncertainties
         ):
-            raise ValueError(f"{role_id} uncertainties must be an array of at most two strings")
+            raise TypeError(f"{role_id} uncertainties must be an array of strings")
         if symbol not in allowed_symbols:
             raise ValueError(f"{role_id} reported symbol {symbol} without supplied evidence")
         if not evidence_ids or any(
@@ -1166,7 +1187,12 @@ def run_research_harness(
 
     evidence_catalog = {**market_catalog, **fundamental_catalog}
     all_reports = {"market": market_report, "fundamental": fundamental_report}
-    manager_state: dict[str, object] = {"query_count": 0, "query_attempted": False, "final": None}
+    manager_state: dict[str, object] = {
+        "query_count": 0,
+        "query_attempted": False,
+        "final": None,
+        "directed_queries": [],
+    }
 
     def query_specialist(arguments: dict[str, object]) -> dict[str, object]:
         if manager_state.get("plan") is None:
@@ -1280,6 +1306,15 @@ def run_research_harness(
             max_turns=2,
         )
         report = query_result["report"]
+        manager_state["directed_queries"].append({
+            "role_id": f"{role}_directed_query",
+            "tool_trace": [
+                {"tool": item["tool"], "status": "completed"}
+                for item in query_result["tool_trace"]
+            ],
+            "context_compression": query_result["context_compression"],
+            "turn_count": query_result["turn_count"],
+        })
         manager_state["query_count"] = int(manager_state["query_count"]) + 1
         all_reports[f"{role}_directed_query"] = report
         return {
@@ -1461,11 +1496,24 @@ def run_research_harness(
         "as_of": as_of.isoformat(),
         "decision_time": decision_time.isoformat(),
         "agents": {
-            "market": {"report": market_report, "tool_trace": market_result["tool_trace"]},
-            "fundamental": {"report": fundamental_report, "tool_trace": fundamental_result["tool_trace"]},
+            "market": {
+                "report": market_report,
+                "tool_trace": market_result["tool_trace"],
+                "context_compression": market_result["context_compression"],
+                "turn_count": market_result["turn_count"],
+            },
+            "fundamental": {
+                "report": fundamental_report,
+                "tool_trace": fundamental_result["tool_trace"],
+                "context_compression": fundamental_result["context_compression"],
+                "turn_count": fundamental_result["turn_count"],
+            },
             "research_manager": {
                 "report": manager_result["report"],
                 "tool_trace": manager_result["tool_trace"],
+                "context_compression": manager_result["context_compression"],
+                "turn_count": manager_result["turn_count"],
+                "directed_queries": manager_state["directed_queries"],
             },
         },
         "evidence_catalog": evidence_catalog,
