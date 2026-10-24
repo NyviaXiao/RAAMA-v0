@@ -639,6 +639,7 @@ def test_hard_risk_review_blocks_optimizer_orders_and_feedback_reports_actual_ho
     assert reviews["conservative"]["status"] == "constraint_needs_attention"
     assert outcome["actual_hold_state"]["annualized_risk"] == pytest.approx(0.1)
     assert "所有新增订单已阻断" in feedback["summary"]
+    assert "不保证最大回撤或最大亏损" in feedback["summary"]
 
     unresolved_input = decision_module.replace(
         decision,
@@ -659,6 +660,29 @@ def test_hard_risk_review_blocks_optimizer_orders_and_feedback_reports_actual_ho
     assert unresolved_outcome["status"] == "blocked_risk_unresolved"
     assert unresolved_outcome["actual_hold_state"]["risk_within_budget"] is False
     assert unresolved_feedback["status"] == "risk_blocked"
+
+    cash_floor_input = decision_module.replace(
+        decision,
+        current_cash_cny=0.0,
+        current_holdings_cny={"600000": 1_000_000.0},
+        evidence={"risk_model": {
+            "market_annualized_volatility": 0.1,
+            "annualized_volatility_by_symbol": {"600000": 0.2},
+            "factor_beta_by_symbol": {"600000": 1.0},
+        }},
+    )
+    cash_blocked, _, cash_outcome = decision_module._hard_risk_review(
+        cash_floor_input,
+        {"maximum_symbol_weight": 1.0, "maximum_one_way_turnover": 0.5, "minimum_cash_weight": 0.2},
+    )
+    cash_feedback = investment_manager_explanation(cash_blocked.to_dict())
+    assert cash_outcome["actual_hold_state"]["risk_within_budget"] is True
+    assert cash_outcome["actual_hold_state"]["actual_constraints_satisfied"] is False
+    assert cash_outcome["actual_hold_state"]["unresolved_failed_checks"] == [
+        "minimum_cash_ratio_after_costs",
+    ]
+    assert cash_outcome["status"] == "blocked_risk_unresolved"
+    assert cash_feedback["risk_unresolved"] is True
 
 
 def test_replay_builds_net_account_feedback_and_excludes_holdout_before_update():

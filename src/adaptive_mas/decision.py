@@ -268,18 +268,39 @@ def _hard_risk_review(
         "annualized_risk": current_risk,
         "risk_budget_annualized": decision.annualized_risk_budget,
         "cash_cny": decision.current_cash_cny,
+        "cash_weight": decision.current_cash_cny / decision.current_nav_cny,
         "new_orders": 0,
         "cash_movement": 0.0,
         "note": "Existing positions remain; any pre-existing limit breach is reported and requires separate remediation.",
     }
-    actual_hold_state["risk_within_budget"] = (
+    actual_hold_checks = {
+        "annualized_risk_within_user_budget": (
         current_risk is not None
         and current_risk <= decision.annualized_risk_budget + 1e-10
+        ),
+        "single_name_weight_within_limit": (
+            max(current_weights.values(), default=0.0)
+            <= float(config.get("maximum_symbol_weight", 1.0)) + 1e-10
+        ),
+        "minimum_cash_ratio_after_costs": (
+            decision.current_cash_cny / decision.current_nav_cny
+            >= float(config.get("minimum_cash_weight", 0.0)) - 1e-10
+        ),
+        "cash_nonnegative": decision.current_cash_cny >= -1e-8,
+        "turnover_within_limit": (
+            0.0 <= float(config.get("maximum_one_way_turnover", 1.0)) + 1e-10
+        ),
+    }
+    actual_hold_state["checks"] = actual_hold_checks
+    actual_hold_state["unresolved_failed_checks"] = sorted(
+        key for key, passed in actual_hold_checks.items() if not passed
     )
+    actual_hold_state["risk_within_budget"] = actual_hold_checks["annualized_risk_within_user_budget"]
+    actual_hold_state["actual_constraints_satisfied"] = all(actual_hold_checks.values())
     outcome["actual_hold_state"] = actual_hold_state
     outcome["status"] = (
         "blocked_risk_unresolved"
-        if not actual_hold_state["risk_within_budget"]
+        if not actual_hold_state["actual_constraints_satisfied"]
         else "blocked_proposal"
     )
     blocked = replace(
@@ -414,6 +435,7 @@ def optimize_forecast_target(
         market_annualized_volatility=market_vol,
         max_change_weights=capacity_weights,
         maximum_target_weights=maximum_target_weights,
+        minimum_cash_weight=float(config.get("minimum_cash_weight", 0.0)),
         iterations=int(config.get("optimizer_iterations", 400)),
     )
     return result, current_weights
@@ -462,6 +484,9 @@ def create_daily_decision(
     }
     if versions:
         version_info.update(versions)
+    risk_profile = config.get("risk_profile")
+    if isinstance(risk_profile, Mapping):
+        version_info["risk_profile_sha256"] = str(risk_profile["profile_sha256"])
     selected_method = str(config.get("optimizer_return_method", "loss_gated_fusion"))
     optimization_config = config
     collaboration_trace = None
@@ -643,6 +668,7 @@ def create_daily_decision(
             one_way_turnover=0.0,
             evidence={
                 "input_cutoff": as_of_date.isoformat(),
+                "risk_profile": config.get("risk_profile"),
                 "selected_optimizer_return_method": selected_method,
                 "forecast_error_status": forecast["forecast_error_status"],
                 "reason": collaboration_warmup_reason or "等待成熟预测误差后才允许优化并生成订单",
@@ -803,6 +829,7 @@ def create_daily_decision(
                 "annualized_volatility_by_symbol": forecast["annualized_volatility_by_symbol"],
                 "factor_beta_by_symbol": forecast["factor_beta_by_symbol"],
             },
+            "risk_profile": config.get("risk_profile"),
             "prediction_record_status": forecast["status"],
             "harness": harness_trace,
         },
@@ -834,7 +861,8 @@ def create_daily_decision(
         investment_feedback["risk_orders_blocked"] = hard_risk_outcome["orders_blocked"]
         investment_feedback["risk_actual_hold_state"] = hard_risk_outcome.get("actual_hold_state")
         investment_feedback["risk_unresolved"] = bool(
-            hard_risk_outcome.get("actual_hold_state", {}).get("risk_within_budget") is False
+            hard_risk_outcome.get("actual_hold_state", {}).get("actual_constraints_satisfied") is False
+            or hard_risk_outcome.get("actual_hold_state", {}).get("risk_within_budget") is False
         )
         collaboration_trace["investment_manager"] = investment_feedback
         query_cost = float(
@@ -901,7 +929,8 @@ def create_daily_decision(
         investment_feedback["risk_orders_blocked"] = hard_risk_outcome["orders_blocked"]
         investment_feedback["risk_actual_hold_state"] = hard_risk_outcome.get("actual_hold_state")
         investment_feedback["risk_unresolved"] = bool(
-            hard_risk_outcome.get("actual_hold_state", {}).get("risk_within_budget") is False
+            hard_risk_outcome.get("actual_hold_state", {}).get("actual_constraints_satisfied") is False
+            or hard_risk_outcome.get("actual_hold_state", {}).get("risk_within_budget") is False
         )
         harness_trace["risk_role_reviews"] = hard_risk_reviews
         harness_trace["hard_risk_outcome"] = hard_risk_outcome

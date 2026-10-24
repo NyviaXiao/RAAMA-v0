@@ -916,6 +916,7 @@ def test_daily_decision_schema_lists_account_and_order_contracts():
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     daily = schema["$defs"]["dailyDecision"]
     order = schema["$defs"]["decisionOrder"]
+    risk_profile = schema["$defs"]["riskProfile"]
 
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert "risk_adjusted_net_incremental_value_cny" in daily["required"]
@@ -924,6 +925,9 @@ def test_daily_decision_schema_lists_account_and_order_contracts():
     assert "estimated_liquidity_capacity_cny" in order["required"]
     assert "source_prediction_id" in order["required"]
     assert "prediction_id" in daily["properties"]["predictions_by_symbol"]["additionalProperties"]["required"]
+    assert "risk_profile" in daily["properties"]["evidence"]["properties"]
+    assert risk_profile["properties"]["execution_allowed"]["const"] is True
+    assert "profile_sha256" in risk_profile["required"]
 
 
 def test_matured_calibration_sufficient_statistics_match_batch_fit():

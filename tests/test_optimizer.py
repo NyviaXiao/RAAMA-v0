@@ -18,6 +18,7 @@ def _optimize(
     sell_cost=0.001,
     max_changes=None,
     max_targets=None,
+    minimum_cash=0.0,
 ):
     symbols = set(expected_returns) | set(current_weights)
     return optimize_portfolio(
@@ -35,6 +36,7 @@ def _optimize(
         sell_cost_rate=sell_cost,
         max_change_weights=max_changes,
         maximum_target_weights=max_targets,
+        minimum_cash_weight=minimum_cash,
         iterations=600,
     )
 
@@ -85,6 +87,20 @@ def test_cash_constraint_includes_buy_and_sell_fees():
 
     assert result.expected_transaction_cost > 0
     assert sum(result.target_weights.values()) + result.expected_transaction_cost <= 1 + 1e-9
+
+
+def test_minimum_cash_floor_is_enforced_after_transaction_costs():
+    result = _optimize(
+        {"000001": 0.10, "000002": 0.10},
+        {},
+        maximum_symbol_weight=0.8,
+        turnover=0.5,
+        buy_cost=0.02,
+        sell_cost=0.03,
+        minimum_cash=0.20,
+    )
+
+    assert sum(result.target_weights.values()) + result.expected_transaction_cost <= 0.80 + 1e-8
 
 
 def test_historical_market_risk_is_independent_of_the_risk_budget():

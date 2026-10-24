@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import http.client
 import json
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
+from types import SimpleNamespace
+
+import pytest
 
 from adaptive_mas.harness_service import (
     HarnessJobWorker,
@@ -11,6 +15,7 @@ from adaptive_mas.harness_service import (
     HarnessServiceStore,
     LocalHarnessHTTPServer,
     ServiceConflict,
+    _replay_runner,
     validate_decision_job,
     validate_execution_ledger_request,
 )
@@ -155,6 +160,97 @@ def test_decision_job_validation_is_local_and_provider_disabled(tmp_path):
         assert "inside" in str(exc)
     else:
         raise AssertionError("project-root escape must be rejected")
+
+
+def test_risk_profile_validation_preserves_legacy_numeric_and_uses_template_without_hidden_numeric(tmp_path):
+    root = _project(tmp_path)
+    legacy = validate_decision_job(_request(root), root)
+    assert legacy["risk_budget_annualized"] == 0.2
+    assert legacy["risk_profile"]["sources"]["risk_budget_annualized"][0]["source"] == "legacy_numeric_field"
+
+    template_request = _request(root) | {"risk_template": "conservative"}
+    template_request.pop("risk_budget_annualized")
+    profiled = validate_decision_job(template_request, root)
+    assert profiled["risk_budget_annualized"] == 0.12
+    assert profiled["risk_profile"]["template"] == "conservative"
+    assert profiled["risk_profile"]["sources"]["risk_budget_annualized"][0]["source"] == "template_default"
+
+    store = HarnessServiceStore(tmp_path / "risk-profile-identity.sqlite3")
+    store.submit("template-task", "same-profile-key", profiled)
+    changed_profile = validate_decision_job(
+        template_request | {"risk_template": "balanced"}, root
+    )
+    with pytest.raises(ServiceConflict):
+        store.submit("changed-template-task", "same-profile-key", changed_profile)
+
+
+@pytest.mark.parametrize(
+    "bad_field",
+    [
+        {"risk_expression": False},
+        {"risk_template": True},
+        {"risk_budget_annualized": True},
+        {"risk_budget_annualized": None},
+        {"risk_expression": "最多亏损10%"},
+        {"risk_expression": "不要保守"},
+    ],
+)
+def test_unsafe_or_wrongly_typed_risk_input_cannot_enter_worker_queue(tmp_path, bad_field):
+    root = _project(tmp_path)
+    with pytest.raises(ValueError):
+        validate_decision_job(_request(root) | bad_field, root)
+
+
+def test_preview_api_exposes_unresolved_without_creating_executable_task(tmp_path):
+    server, thread = _server(tmp_path)
+    root = _project(tmp_path)
+    try:
+        status, profile = _http(server, "POST", "/api/risk-profile/parse", {
+            "config": str(root / "configs/daily.toml"),
+            "risk_expression": "最大回撤10%",
+        })
+        assert status == 200
+        assert profile["execution_allowed"] is False
+        assert profile["unresolved"]
+        status, error = _http(server, "POST", "/api/tasks", {
+            "task_id": "blocked-risk",
+            "idempotency_key": "blocked-risk",
+            "request": _request(root) | {"risk_expression": "最大回撤10%"},
+        })
+        assert status == 400
+        assert "needs clarification" in error["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_worker_handoff_preserves_the_same_canonical_profile(tmp_path, monkeypatch):
+    root = _project(tmp_path)
+    request = _request(root) | {"risk_template": "balanced", "risk_expression": "单票不超过4%"}
+    request.pop("risk_budget_annualized")
+    normalized = validate_decision_job(request, root)
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        risk_path = command[command.index("--risk-profile-json") + 1]
+        output_path = command[command.index("--output") + 1]
+        observed["profile"] = json.loads((root / risk_path).read_text(encoding="utf-8")) if not Path(risk_path).is_absolute() else json.loads(Path(risk_path).read_text(encoding="utf-8"))
+        observed["command"] = command
+        Path(output_path).write_text("{}", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("adaptive_mas.harness_service.subprocess.run", fake_run)
+    result = _replay_runner(
+        {"task_id": "profile-handoff", "request": normalized},
+        project_root=root,
+        database_path=tmp_path / "isolated" / "service.sqlite3",
+    )
+
+    assert result == {}
+    assert observed["profile"] == normalized["risk_profile"]
+    assert "--risk-budget-annualized" not in observed["command"]
+    assert observed["profile"]["constraints"]["maximum_symbol_weight"] == 0.04
 
 
 def test_sqlite_idempotency_concurrent_claims_and_worker_recovery(tmp_path):

@@ -48,6 +48,73 @@
         "prediction_horizon_sessions": { "type": "integer", "minimum": 1 }
       }
     },
+    "riskProfile": {
+      "type": "object",
+      "required": [
+        "schema_version", "template", "template_version", "original_expression",
+        "constraints", "units", "sources", "unresolved", "status",
+        "execution_allowed", "drawdown_guarantee", "scope_note", "profile_sha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "raama-risk-profile.v1" },
+        "template": { "type": ["string", "null"], "enum": ["conservative", "balanced", "aggressive", null] },
+        "template_version": { "type": ["string", "null"] },
+        "original_expression": { "type": "string" },
+        "constraints": {
+          "type": "object",
+          "required": ["risk_budget_annualized", "maximum_symbol_weight", "maximum_one_way_turnover", "minimum_cash_weight"],
+          "additionalProperties": false,
+          "properties": {
+            "risk_budget_annualized": { "type": "number", "exclusiveMinimum": 0, "maximum": 2 },
+            "maximum_symbol_weight": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+            "maximum_one_way_turnover": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minimum_cash_weight": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 }
+          }
+        },
+        "units": {
+          "type": "object",
+          "required": ["risk_budget_annualized", "maximum_symbol_weight", "maximum_one_way_turnover", "minimum_cash_weight"],
+          "additionalProperties": false,
+          "properties": {
+            "risk_budget_annualized": { "const": "annualized_volatility_fraction" },
+            "maximum_symbol_weight": { "const": "portfolio_weight_fraction" },
+            "maximum_one_way_turnover": { "const": "one_way_turnover_fraction" },
+            "minimum_cash_weight": { "const": "portfolio_weight_fraction" }
+          }
+        },
+        "sources": {
+          "type": "object",
+          "required": ["risk_budget_annualized", "maximum_symbol_weight", "maximum_one_way_turnover", "minimum_cash_weight"],
+          "additionalProperties": false,
+          "properties": {
+            "risk_budget_annualized": { "$ref": "#/$defs/riskSources" },
+            "maximum_symbol_weight": { "$ref": "#/$defs/riskSources" },
+            "maximum_one_way_turnover": { "$ref": "#/$defs/riskSources" },
+            "minimum_cash_weight": { "$ref": "#/$defs/riskSources" }
+          }
+        },
+        "unresolved": { "type": "array", "maxItems": 0 },
+        "status": { "const": "resolved" },
+        "execution_allowed": { "const": true },
+        "drawdown_guarantee": { "const": false },
+        "scope_note": { "type": "string" },
+        "profile_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "riskSources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["value", "evidence", "source"],
+        "additionalProperties": false,
+        "properties": {
+          "value": { "type": "number" },
+          "evidence": { "type": "string" },
+          "source": { "enum": ["natural_language_expression", "structured_constraint", "legacy_numeric_field", "template_default", "system_default"] }
+        }
+      }
+    },
     "dailyDecision": {
       "type": "object",
       "required": [
@@ -109,7 +176,18 @@
         "annualized_risk": { "type": ["number", "null"], "minimum": 0 },
         "annualized_risk_budget": { "type": "number", "exclusiveMinimum": 0 },
         "one_way_turnover": { "type": "number", "minimum": 0, "maximum": 1 },
-        "evidence": { "type": "object" },
+        "evidence": {
+          "type": "object",
+          "properties": {
+            "risk_profile": {
+              "anyOf": [
+                { "$ref": "#/$defs/riskProfile" },
+                { "type": "null" }
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
         "versions": {
           "type": "object",
           "properties": {

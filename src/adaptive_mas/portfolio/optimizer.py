@@ -45,6 +45,7 @@ def optimize_portfolio(
     market_annualized_volatility: float = 0.0,
     max_change_weights: dict[str, float] | None = None,
     maximum_target_weights: dict[str, float] | None = None,
+    minimum_cash_weight: float = 0.0,
     iterations: int = 400,
 ) -> OptimizationResult:
     """Maximize calibrated return less risk, forecast error and actual trade cost.
@@ -60,6 +61,8 @@ def optimize_portfolio(
         raise ValueError("单票权重上限必须处于 (0, 1]")
     if not 0 <= maximum_one_way_turnover <= 1:
         raise ValueError("单向换手预算必须处于 [0, 1]")
+    if not math.isfinite(minimum_cash_weight) or not 0 <= minimum_cash_weight < 1:
+        raise ValueError("最低现金比例必须处于 [0, 1)")
     if risk_budget_annualized <= 0 or risk_aversion < 0:
         raise ValueError("风险预算必须为正，风险厌恶系数不能为负")
     if market_annualized_volatility < 0 or not math.isfinite(market_annualized_volatility):
@@ -112,6 +115,7 @@ def optimize_portfolio(
             raise ValueError(f"单票成交容量无效：{symbol} {maximum_change}")
 
     current = {symbol: float(current_weights.get(symbol, 0.0)) for symbol in symbols}
+    maximum_cash_use = 1.0 - minimum_cash_weight
     if math.fsum(current.values()) > 1 + 1e-8:
         raise PortfolioInfeasibleError("当前持仓权重超过净值，无法满足现金非负约束")
 
@@ -155,11 +159,11 @@ def optimize_portfolio(
             symbol: min(max(values[symbol], lower[symbol]), upper[symbol])
             for symbol in symbols
         }
-        if cash_used(projected) <= 1.0:
+        if cash_used(projected) <= maximum_cash_use:
             return projected
         lower_cash_use = cash_used(lower)
-        if lower_cash_use > 1.0 + 1e-10:
-            raise PortfolioInfeasibleError("最低持仓加交易费用会导致现金为负")
+        if lower_cash_use > maximum_cash_use + 1e-10:
+            raise PortfolioInfeasibleError("最低持仓加交易费用无法满足最低现金比例")
         left = min(values[symbol] - upper[symbol] for symbol in symbols) - 1.0
         right = max(values[symbol] - lower[symbol] for symbol in symbols) + 1.0
         for _ in range(64):
@@ -168,7 +172,7 @@ def optimize_portfolio(
                 symbol: min(max(values[symbol] - level, lower[symbol]), upper[symbol])
                 for symbol in symbols
             }
-            if cash_used(trial) > 1.0:
+            if cash_used(trial) > maximum_cash_use:
                 left = level
             else:
                 right = level
@@ -216,7 +220,7 @@ def optimize_portfolio(
     def base_feasible(weights: dict[str, float]) -> bool:
         return (
             within_position_bounds(weights)
-            and cash_used(weights) <= 1.0 + 1e-10
+            and cash_used(weights) <= maximum_cash_use + 1e-10
             and risk_of(weights) <= risk_budget_annualized + 1e-10
         )
 
@@ -400,8 +404,8 @@ def optimize_portfolio(
         raise PortfolioInfeasibleError("目标权重超过本次单向换手预算")
     if annualized_risk > risk_budget_annualized + 1e-7:
         raise PortfolioInfeasibleError("风险预算与现金/交易约束无法同时满足")
-    if cash_used(weights) > 1 + 1e-7:
-        raise PortfolioInfeasibleError("组合求解结果违反含交易成本的现金非负约束")
+    if cash_used(weights) > maximum_cash_use + 1e-7:
+        raise PortfolioInfeasibleError("组合求解结果违反扣费后最低现金比例约束")
     if any(weight < lower[symbol] - 1e-7 for symbol, weight in weights.items()):
         raise PortfolioInfeasibleError("组合求解结果违反单票成交容量下限")
     if any(weight > upper[symbol] + 1e-7 for symbol, weight in weights.items()):

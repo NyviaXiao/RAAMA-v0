@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from adaptive_mas.data import load_oos_research_data
 from adaptive_mas.decision import PortfolioState
 from adaptive_mas.harness_runtime import create_harness_daily_decision
+from adaptive_mas.risk_profile import resolve_risk_profile, validate_canonical_risk_profile
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -28,7 +29,11 @@ def main() -> None:
     parser.add_argument("--portfolio-state-json", type=Path, required=True)
     parser.add_argument("--as-of", type=date.fromisoformat, required=True)
     parser.add_argument("--horizon-sessions", type=int, required=True)
-    parser.add_argument("--risk-budget-annualized", type=float, required=True)
+    parser.add_argument("--risk-budget-annualized", type=float)
+    parser.add_argument("--risk-template", choices=("conservative", "balanced", "aggressive"))
+    parser.add_argument("--risk-expression")
+    parser.add_argument("--risk-constraints-json", help="JSON object containing explicit fractional risk limits")
+    parser.add_argument("--risk-profile-json", type=Path, help="Validated canonical profile passed by the local task worker")
     parser.add_argument("--config", type=Path, default=project_dir / "configs" / "daily_three_session.toml")
     default_training_seed = (
         project_dir / "data" / "processed" / "p8_daily_three_session_continuous_v1" / "training_seed.json.gz"
@@ -88,7 +93,30 @@ def main() -> None:
     config_bytes = args.config.read_bytes()
     config = tomllib.loads(config_bytes.decode("utf-8"))
     config["prediction_horizon_sessions"] = args.horizon_sessions
-    config["risk_budget_annualized"] = args.risk_budget_annualized
+    if args.risk_profile_json is not None:
+        if args.risk_template or args.risk_expression or args.risk_constraints_json or args.risk_budget_annualized is not None:
+            raise ValueError("--risk-profile-json cannot be combined with other risk profile inputs")
+        risk_profile = validate_canonical_risk_profile(
+            json.loads(args.risk_profile_json.read_text(encoding="utf-8"))
+        )
+    else:
+        risk_constraints = json.loads(args.risk_constraints_json) if args.risk_constraints_json else None
+        if risk_constraints is not None and not isinstance(risk_constraints, dict):
+            raise ValueError("--risk-constraints-json must contain a JSON object")
+        risk_profile = resolve_risk_profile(
+            risk_template=args.risk_template,
+            risk_expression=args.risk_expression,
+            risk_constraints=risk_constraints,
+            risk_budget_annualized=args.risk_budget_annualized,
+            base_defaults={
+                "risk_budget_annualized": config.get("risk_budget_annualized", 0.20),
+                "maximum_symbol_weight": config.get("maximum_symbol_weight", 0.05),
+                "maximum_one_way_turnover": config.get("maximum_one_way_turnover", 0.50),
+                "minimum_cash_weight": config.get("minimum_cash_weight", 0.0),
+            },
+        )
+        if not risk_profile["execution_allowed"]:
+            raise ValueError("risk profile needs clarification: " + " ".join(risk_profile["unresolved"]))
     account = json.loads(args.portfolio_state_json.read_text(encoding="utf-8"))
     if set(account) != {"cash_cny", "holdings_cny"} or not isinstance(account["holdings_cny"], dict):
         raise ValueError("portfolio JSON must contain only cash_cny and holdings_cny")
@@ -161,6 +189,7 @@ def main() -> None:
         state_store_path=run_root / "harness_state.sqlite3",
         task_id=run_id,
         idempotency_key=run_id,
+        risk_profile=risk_profile,
     )
     payload = json.dumps(decision.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:

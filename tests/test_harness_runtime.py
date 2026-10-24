@@ -664,9 +664,11 @@ def test_warmup_runtime_uses_canonical_task_id_when_idempotency_key_is_reused(tm
     from types import SimpleNamespace
 
     from adaptive_mas.harness_state import HarnessStateStore
+    from adaptive_mas.risk_profile import resolve_risk_profile
 
     as_of = date(2026, 9, 23)
     research, config, portfolio, training_state = _runtime_inputs(as_of)
+    profile = resolve_risk_profile(risk_template="balanced")
     diagnostic = {
         "prediction_decisions": [{
             "prediction_date": as_of.isoformat(),
@@ -674,11 +676,22 @@ def test_warmup_runtime_uses_canonical_task_id_when_idempotency_key_is_reused(tm
             "forecast_errors_by_method": {"loss_gated_fusion": None},
         }],
     }
-    monkeypatch.setattr(harness_runtime, "run_mvp_research", lambda *_args, **_kwargs: diagnostic)
+    preflight_configs = []
+    monkeypatch.setattr(
+        harness_runtime,
+        "run_mvp_research",
+        lambda _research, received_config, **_kwargs: preflight_configs.append(received_config) or diagnostic,
+    )
+    decision_calls = []
     monkeypatch.setattr(
         harness_runtime,
         "create_daily_decision",
-        lambda *_args, **_kwargs: SimpleNamespace(evidence={}),
+        lambda *args, **kwargs: decision_calls.append((args, kwargs)) or SimpleNamespace(evidence={}),
+    )
+    monkeypatch.setattr(
+        harness_runtime.QwenClient,
+        "from_environment",
+        lambda *_args, **_kwargs: pytest.fail("warmup must not invoke a provider"),
     )
     monkeypatch.setattr(
         harness_runtime,
@@ -695,6 +708,7 @@ def test_warmup_runtime_uses_canonical_task_id_when_idempotency_key_is_reused(tm
             "holdings_cny": dict(sorted(portfolio.holdings_cny.items())),
         },
         "config_sha256": harness_runtime._stable_hash(config),
+        "risk_profile_sha256": profile["profile_sha256"],
         "training_state_sha256": harness_runtime._stable_hash(training_state),
         "versions": {},
         "forecast_status": "warmup",
@@ -722,9 +736,17 @@ def test_warmup_runtime_uses_canonical_task_id_when_idempotency_key_is_reused(tm
         state_store_path=tmp_path / "warmup-state.sqlite3",
         task_id="retry-warmup-generated-id",
         idempotency_key="warmup-idempotency-key",
+        risk_profile=profile,
     )
 
     assert result.evidence["harness"]["status"] == "skipped_forecast_warmup"
+    assert result.evidence["risk_profile"] == profile
+    assert result.evidence["harness"]["investment_manager_feedback"]["risk_profile_sha256"] == profile["profile_sha256"]
+    assert "平衡" in result.evidence["harness"]["investment_manager_feedback"]["summary"]
+    assert "不保证最大回撤或最大亏损" in result.evidence["harness"]["investment_manager_feedback"]["summary"]
+    assert preflight_configs and "risk_profile" not in preflight_configs[0]
+    assert decision_calls[0][0][1]["risk_profile"] == profile
+    assert decision_calls[0][0][5]["risk_profile_sha256"] == profile["profile_sha256"]
     assert store.get_task("canonical-warmup-task")["status"] == "completed"
     assert store.get_task("retry-warmup-generated-id") is None
 

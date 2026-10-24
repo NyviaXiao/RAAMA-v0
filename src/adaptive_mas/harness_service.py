@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import uuid
 from contextlib import closing
 from datetime import date, datetime, timezone
@@ -29,6 +30,7 @@ from adaptive_mas.observability import decision_summary, export_span_if_configur
 from adaptive_mas.execution_ledger import simulate_execution_ledger
 from adaptive_mas.release_governance import HarnessReleaseStore
 from adaptive_mas.research_provenance import stable_hash
+from adaptive_mas.risk_profile import resolve_risk_profile, validate_canonical_risk_profile
 
 
 class ServiceConflict(RuntimeError):
@@ -485,11 +487,47 @@ def _within_root(value: object, root: Path, *, must_exist: bool, want_dir: bool 
     return str(resolved)
 
 
+def parse_risk_profile_request(
+    request: Mapping[str, object], project_root: str | Path
+) -> dict[str, object]:
+    """Parse a preview request with the same versioned rules used at task submission."""
+    allowed = {"risk_template", "risk_expression", "risk_constraints", "risk_budget_annualized", "config"}
+    extra = set(request) - allowed
+    if extra:
+        raise ValueError(f"unsupported risk profile fields: {sorted(extra)}")
+    for key in ("risk_template", "risk_expression"):
+        if key in request and not isinstance(request[key], str):
+            raise ValueError(f"{key} must be text")
+    if "risk_constraints" in request and not isinstance(request["risk_constraints"], Mapping):
+        raise ValueError("risk_constraints must be an object")
+    if "risk_budget_annualized" in request and request["risk_budget_annualized"] is None:
+        raise ValueError("risk_budget_annualized must be a finite number when supplied")
+    root = Path(project_root).resolve()
+    config_path = _within_root(
+        request.get("config", "configs/daily_three_session.toml"), root,
+        must_exist=True, want_dir=False,
+    )
+    config_values = tomllib.loads(Path(config_path).read_text(encoding="utf-8"))
+    return resolve_risk_profile(
+        risk_template=request.get("risk_template"),
+        risk_expression=request.get("risk_expression"),
+        risk_constraints=request.get("risk_constraints"),
+        risk_budget_annualized=request.get("risk_budget_annualized"),
+        base_defaults={
+            "risk_budget_annualized": config_values.get("risk_budget_annualized", 0.20),
+            "maximum_symbol_weight": config_values.get("maximum_symbol_weight", 0.05),
+            "maximum_one_way_turnover": config_values.get("maximum_one_way_turnover", 0.50),
+            "minimum_cash_weight": config_values.get("minimum_cash_weight", 0.0),
+        },
+    )
+
+
 def validate_decision_job(request: Mapping[str, object], project_root: str | Path) -> dict[str, object]:
     """Accept only an offline artifact-reuse decision; the worker cannot make provider calls."""
     root = Path(project_root).resolve()
     allowed = {
-        "mode", "as_of", "horizon_sessions", "risk_budget_annualized", "baostock_run_dir",
+        "mode", "as_of", "horizon_sessions", "risk_budget_annualized", "risk_template",
+        "risk_expression", "risk_constraints", "baostock_run_dir",
         "portfolio", "training_seed", "training_seed_trained_through", "training_seed_horizon_sessions",
         "reuse_research_json", "config", "public_cache_dir", "harness_version_dir",
     }
@@ -511,13 +549,6 @@ def validate_decision_job(request: Mapping[str, object], project_root: str | Pat
         raise ValueError("training seed horizon must match horizon_sessions")
     if trained_through >= as_of:
         raise ValueError("training seed cutoff must precede as_of")
-    risk_budget = request.get("risk_budget_annualized")
-    try:
-        risk_budget = float(risk_budget)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("risk_budget_annualized must be finite and positive") from exc
-    if not math.isfinite(risk_budget) or not 0 < risk_budget <= 2:
-        raise ValueError("risk_budget_annualized must be finite and between 0 and 2")
     portfolio = request.get("portfolio")
     if not isinstance(portfolio, Mapping) or set(portfolio) != {"cash_cny", "holdings_cny"}:
         raise ValueError("portfolio must contain only cash_cny and holdings_cny")
@@ -545,7 +576,6 @@ def validate_decision_job(request: Mapping[str, object], project_root: str | Pat
         "mode": "decision_reuse",
         "as_of": as_of.isoformat(),
         "horizon_sessions": horizon,
-        "risk_budget_annualized": risk_budget,
         "portfolio": {"cash_cny": cash, "holdings_cny": normalized_holdings},
         "training_seed_trained_through": trained_through.isoformat(),
         "training_seed_horizon_sessions": horizon,
@@ -560,6 +590,19 @@ def validate_decision_job(request: Mapping[str, object], project_root: str | Pat
         raw = request.get(key, default)
         if raw is not None:
             normalized[key] = _within_root(raw, root, must_exist=True, want_dir=want_dir)
+    profile = parse_risk_profile_request(
+        {
+            key: request[key]
+            for key in ("risk_template", "risk_expression", "risk_constraints", "risk_budget_annualized")
+            if key in request
+        } | {"config": normalized["config"]},
+        root,
+    )
+    if not profile["execution_allowed"]:
+        raise ValueError("risk profile needs clarification: " + " ".join(profile["unresolved"]))
+    normalized["risk_profile"] = profile
+    normalized["risk_budget_annualized"] = profile["constraints"]["risk_budget_annualized"]
+    normalized["minimum_cash_weight"] = profile["constraints"]["minimum_cash_weight"]
     return normalized
 
 
@@ -605,9 +648,13 @@ def _replay_runner(job: Mapping[str, object], *, project_root: Path, database_pa
     artifact_dir = run_root / "service_artifacts" / str(job["task_id"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
     portfolio_path = artifact_dir / "portfolio_state.json"
+    risk_profile_path = artifact_dir / "risk_profile.json"
     output_path = artifact_dir / "decision.json"
     portfolio_path.write_text(
         json.dumps(request["portfolio"], ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    risk_profile_path.write_text(
+        json.dumps(request["risk_profile"], ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
     )
     command = [
         sys.executable,
@@ -616,7 +663,7 @@ def _replay_runner(job: Mapping[str, object], *, project_root: Path, database_pa
         "--portfolio-state-json", str(portfolio_path),
         "--as-of", str(request["as_of"]),
         "--horizon-sessions", str(request["horizon_sessions"]),
-        "--risk-budget-annualized", str(request["risk_budget_annualized"]),
+        "--risk-profile-json", str(risk_profile_path),
         "--config", str(request["config"]),
         "--training-seed", str(request["training_seed"]),
         "--training-seed-trained-through", str(request["training_seed_trained_through"]),
@@ -855,6 +902,13 @@ class HarnessRequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self._read_json()
+            if path == "/api/risk-profile/parse":
+                profile_request = payload.get("request", payload)
+                if not isinstance(profile_request, Mapping):
+                    raise ValueError("request must contain a risk profile object")
+                profile = parse_risk_profile_request(profile_request, context["project_root"])
+                self._send_json(200, profile)
+                return
             if path == "/api/tasks":
                 request = validate_decision_job(payload.get("request", payload), context["project_root"])
                 idempotency_key = str(payload.get("idempotency_key", "")).strip()

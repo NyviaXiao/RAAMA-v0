@@ -26,6 +26,7 @@ from adaptive_mas.harness_runtime import _market_snapshot_identity
 from adaptive_mas.package_identity import source_package_identity
 from adaptive_mas.release_governance import HarnessReleaseStore
 from adaptive_mas.research_provenance import build_research_package_provenance, stable_hash
+from adaptive_mas.risk_profile import resolve_risk_profile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -147,7 +148,21 @@ def prepare_synthetic_service_fixture(fixture_root: str | Path) -> dict[str, Any
     config_path.write_bytes(synthetic_config.encode("utf-8") + industry_toml.encode("utf-8"))
     config_bytes = config_path.read_bytes()
     config = tomllib.loads(config_bytes.decode("utf-8"))
-    config.update({"prediction_horizon_sessions": HORIZON, "risk_budget_annualized": RISK_BUDGET})
+    risk_template = "balanced"
+    risk_expression = "年化风险不超过15%，单票不超过5%，单向换手不超过30%，至少保留20%现金"
+    risk_profile = resolve_risk_profile(
+        risk_template=risk_template,
+        risk_expression=risk_expression,
+        base_defaults={
+            "risk_budget_annualized": config.get("risk_budget_annualized", RISK_BUDGET),
+            "maximum_symbol_weight": config.get("maximum_symbol_weight", 0.05),
+            "maximum_one_way_turnover": config.get("maximum_one_way_turnover", 0.50),
+            "minimum_cash_weight": config.get("minimum_cash_weight", 0.0),
+        },
+    )
+    if not risk_profile["execution_allowed"]:
+        raise AssertionError(risk_profile["unresolved"])
+    config.update({"prediction_horizon_sessions": HORIZON})
 
     cutoff = TRAINED_THROUGH
     training_run = run_mvp_research(market, config, as_of_date=cutoff, ensure_as_of_decision=True)
@@ -366,6 +381,9 @@ def prepare_synthetic_service_fixture(fixture_root: str | Path) -> dict[str, Any
         "as_of": AS_OF.isoformat(),
         "horizon_sessions": HORIZON,
         "risk_budget_annualized": RISK_BUDGET,
+        "risk_template": risk_template,
+        "risk_expression": risk_expression,
+        "risk_profile": risk_profile,
         "training_seed_trained_through": cutoff.isoformat(),
         "training_seed_horizon_sessions": HORIZON,
         "baostock_run_dir": str(data_dir),

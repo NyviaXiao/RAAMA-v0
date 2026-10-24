@@ -122,6 +122,7 @@ def decision_summary(result: Mapping[str, object]) -> dict[str, object]:
     predictions = result.get("predictions_by_symbol", {})
     versions = result.get("versions", {})
     evidence = result.get("evidence", {})
+    risk_profile = evidence.get("risk_profile") if isinstance(evidence, Mapping) else None
     harness = evidence.get("harness", {}) if isinstance(evidence, Mapping) else {}
     cost = harness.get("decision_cost_accounting", {}) if isinstance(harness, Mapping) else {}
     return {
@@ -146,6 +147,7 @@ def decision_summary(result: Mapping[str, object]) -> dict[str, object]:
         "current_nav_cny": result.get("current_nav_cny"),
         "annualized_risk": result.get("annualized_risk"),
         "annualized_risk_budget": result.get("annualized_risk_budget"),
+        "risk_profile": risk_profile,
         "risk_adjusted_net_incremental_value_cny": result.get(
             "risk_adjusted_net_incremental_value_cny"
         ),

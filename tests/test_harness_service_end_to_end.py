@@ -119,7 +119,7 @@ def test_loopback_service_worker_cli_and_sqlite_result_survive_restart() -> None
             request = {
                 key: value for key, value in fixture.items()
                 if key in {
-                    "mode", "as_of", "horizon_sessions", "risk_budget_annualized",
+                    "mode", "as_of", "horizon_sessions", "risk_template", "risk_expression",
                     "training_seed_trained_through", "training_seed_horizon_sessions",
                     "baostock_run_dir", "training_seed", "reuse_research_json", "config",
                     "public_cache_dir", "harness_version_dir", "portfolio",
@@ -156,6 +156,21 @@ def test_loopback_service_worker_cli_and_sqlite_result_survive_restart() -> None
             assert research["agents"]["research_manager"]["report"]["risk_research"][0]["dimension"] == "industry"
             assert feedback["risk_research"][0]["source_record_ids"]
             assert harness["hard_risk_outcome"]["status"]
+            assert completed["request"]["risk_profile"]["profile_sha256"] == result["evidence"]["risk_profile"]["profile_sha256"]
+            assert result["evidence"]["risk_profile"]["constraints"] == {
+                "risk_budget_annualized": 0.15,
+                "maximum_symbol_weight": 0.05,
+                "maximum_one_way_turnover": 0.30,
+                "minimum_cash_weight": 0.20,
+            }
+            assert result["versions"]["risk_profile_sha256"] == result["evidence"]["risk_profile"]["profile_sha256"]
+            runtime_identity = harness["runtime_package_identity"]
+            assert runtime_identity["risk_profile_sha256"] == result["evidence"]["risk_profile"]["profile_sha256"]
+            assert feedback["risk_profile"] == result["evidence"]["risk_profile"]
+            assert feedback["drawdown_guarantee"] is False
+            assert "不保证最大回撤或最大亏损" in feedback["summary"]
+            assert harness["hard_risk_outcome"]["checks"]["minimum_cash_ratio_after_costs"] is True
+            assert result["estimated_cash_after_costs_cny"] >= result["current_nav_cny"] * 0.20 - 1e-7
             assert result["predictions_by_symbol"]
             assert result["evidence"]["prediction_record_status"] not in {None, "warmup"}
             assert completed["result_summary"]["logical_research_cost_cny"] == 0.0
@@ -168,6 +183,7 @@ def test_loopback_service_worker_cli_and_sqlite_result_survive_restart() -> None
             restored = _request(f"{base_url}/api/tasks/{persisted_task_id}?detail=1")
             assert restored["status"] == "completed"
             assert restored["result"] == result
+            assert restored["request"]["risk_profile"] == completed["request"]["risk_profile"]
 
             duplicate = _request(f"{base_url}/api/tasks", method="POST", payload={
                 "task_id": "synthetic-service-e2e-retry",

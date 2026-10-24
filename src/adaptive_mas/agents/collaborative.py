@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -520,6 +521,8 @@ def risk_role_reviews(decision: dict[str, object], config: dict[str, object]) ->
     nav = float(decision["current_nav_cny"])
     risk = decision["annualized_risk"]
     risk_budget = float(decision["annualized_risk_budget"])
+    minimum_cash_weight = float(config.get("minimum_cash_weight", 0.0))
+    cash_after_costs_weight = float(decision["estimated_cash_after_costs_cny"]) / nav
     common_checks = {
         "annualized_risk_within_user_budget": (
             risk is not None and risk <= risk_budget + 1e-10
@@ -528,6 +531,9 @@ def risk_role_reviews(decision: dict[str, object], config: dict[str, object]) ->
             highest_weight <= float(config["maximum_symbol_weight"]) + 1e-10
         ),
         "cash_after_costs_nonnegative": decision["estimated_cash_after_costs_cny"] >= -1e-8,
+        "minimum_cash_ratio_after_costs": (
+            cash_after_costs_weight + 1e-10 >= minimum_cash_weight
+        ),
         "turnover_within_limit": (
             decision["one_way_turnover"]
             <= float(config["maximum_one_way_turnover"]) + 1e-10
@@ -560,6 +566,7 @@ def risk_role_reviews(decision: dict[str, object], config: dict[str, object]) ->
             {
                 "cash_after_costs_cny": decision["estimated_cash_after_costs_cny"],
                 "cash_after_costs_nav_fraction": decision["estimated_cash_after_costs_cny"] / nav,
+                "minimum_cash_weight": minimum_cash_weight,
                 "highest_target_weight": highest_weight,
                 "one_way_turnover": decision["one_way_turnover"],
             },
@@ -617,13 +624,32 @@ def investment_manager_explanation(decision: dict[str, object], research_manager
         else "风险估计不可用"
     )
     hard_risk_outcome = (decision.get("evidence") or {}).get("hard_risk_outcome", {})
+    risk_profile = (decision.get("evidence") or {}).get("risk_profile")
     actual_hold_state = hard_risk_outcome.get("actual_hold_state")
-    risk_unresolved = isinstance(actual_hold_state, dict) and actual_hold_state.get("risk_within_budget") is False
+    risk_unresolved = isinstance(actual_hold_state, dict) and (
+        actual_hold_state.get("actual_constraints_satisfied") is False
+        or actual_hold_state.get("risk_within_budget") is False
+    )
     summary = (
         f"{decision['as_of_date']} 决策：{risk_summary}；"
         f"预计交易成本 ¥{decision['expected_transaction_cost_cny']:,.2f}，"
         f"扣费后现金 ¥{decision['estimated_cash_after_costs_cny']:,.2f}。"
     )
+    if isinstance(risk_profile, Mapping):
+        constraints = risk_profile.get("constraints", {})
+        template = {
+            "conservative": "保守",
+            "balanced": "平衡",
+            "aggressive": "进取",
+        }.get(risk_profile.get("template"), "系统默认")
+        if isinstance(constraints, Mapping):
+            summary += (
+                f"风险档案 {template}（版本 {risk_profile.get('template_version') or risk_profile.get('schema_version')}）："
+                f"单票上限 {float(constraints.get('maximum_symbol_weight', 0)):.2%}，"
+                f"单向换手上限 {float(constraints.get('maximum_one_way_turnover', 0)):.2%}，"
+                f"最低现金 {float(constraints.get('minimum_cash_weight', 0)):.2%}。"
+            )
+    summary += "年化波动率预算不保证最大回撤或最大亏损。"
     if decision["status"] == "risk_blocked":
         summary += "硬性风控未通过，所有新增订单已阻断。"
     if risk_unresolved:
@@ -648,6 +674,14 @@ def investment_manager_explanation(decision: dict[str, object], research_manager
         "risk_orders_blocked": bool(hard_risk_outcome.get("orders_blocked", False)),
         "risk_actual_hold_state": actual_hold_state,
         "risk_unresolved": risk_unresolved,
+        "risk_profile": risk_profile,
+        "risk_profile_sha256": (
+            risk_profile.get("profile_sha256") if isinstance(risk_profile, Mapping) else None
+        ),
+        "risk_profile_execution_allowed": (
+            risk_profile.get("execution_allowed") if isinstance(risk_profile, Mapping) else True
+        ),
+        "drawdown_guarantee": False,
         "source_of_numeric_plan": "existing calibrated-return optimizer; narrative agent scores do not create expected returns or order amounts",
     }
 

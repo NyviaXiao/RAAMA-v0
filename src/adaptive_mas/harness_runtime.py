@@ -29,6 +29,7 @@ from adaptive_mas.research_provenance import (
     stable_hash as _stable_hash,
     validate_research_package_provenance as _validate_research_package_provenance,
 )
+from adaptive_mas.risk_profile import apply_risk_profile, validate_canonical_risk_profile
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -72,6 +73,7 @@ def create_harness_daily_decision(
     state_store_path: str | Path | None = None,
     task_id: str | None = None,
     idempotency_key: str | None = None,
+    risk_profile: Mapping[str, object] | None = None,
 ) -> DailyDecision:
     """Run public agents, apply their sourced candidate filter and return a normal DailyDecision.
 
@@ -79,8 +81,15 @@ def create_harness_daily_decision(
     requests. A warm-up decision returns without using the public-agent model budget.
     """
     portfolio.validate()
+    checked_risk_profile = (
+        validate_canonical_risk_profile(risk_profile) if risk_profile is not None else None
+    )
+    decision_config = (
+        apply_risk_profile(config, checked_risk_profile)
+        if checked_risk_profile is not None else config
+    )
     horizon = int(config.get("prediction_horizon_sessions", 0))
-    risk_budget = float(config.get("risk_budget_annualized", math.nan))
+    risk_budget = float(decision_config.get("risk_budget_annualized", math.nan))
     if horizon < 1:
         raise ValueError("prediction_horizon_sessions must be positive")
     if training_seed_horizon_sessions < 1:
@@ -155,18 +164,44 @@ def create_harness_daily_decision(
             if retrospective_public_cache else "captured_public_cache_cutoff"
         ),
     }
+    if checked_risk_profile is not None:
+        decision_versions.update({
+            "risk_profile_sha256": str(checked_risk_profile["profile_sha256"]),
+            "risk_profile_schema_version": str(checked_risk_profile["schema_version"]),
+        })
     if calibrated_forecast["forecast_errors_by_method"].get("loss_gated_fusion") is None:
         baseline = create_daily_decision(
             research,
-            config,
+            decision_config,
             as_of,
             portfolio,
             training_state,
             decision_versions,
             research_diagnostic=research_diagnostic,
         )
+        profile_constraints = (
+            checked_risk_profile.get("constraints", {})
+            if checked_risk_profile is not None else {}
+        )
+        profile_template = (
+            checked_risk_profile.get("template") if checked_risk_profile is not None else None
+        )
+        profile_template_label = {
+            "conservative": "保守",
+            "balanced": "平衡",
+            "aggressive": "进取",
+        }.get(profile_template, "系统默认")
+        profile_summary = (
+            f"风险档案 {profile_template_label}，年化波动率上限 {float(profile_constraints['risk_budget_annualized']):.2%}，"
+            f"单票上限 {float(profile_constraints['maximum_symbol_weight']):.2%}，"
+            f"单向换手上限 {float(profile_constraints['maximum_one_way_turnover']):.2%}，"
+            f"最低现金 {float(profile_constraints['minimum_cash_weight']):.2%}。"
+            if isinstance(profile_constraints, Mapping) and checked_risk_profile is not None
+            else ""
+        )
         warmup_evidence = {
             **baseline.evidence,
+            "risk_profile": checked_risk_profile,
             "harness": {
                 "status": "skipped_forecast_warmup",
                 "provider_call_count": 0,
@@ -179,9 +214,15 @@ def create_harness_daily_decision(
                 },
                 "investment_manager_feedback": {
                     "status": "warmup_no_action",
-                    "summary": "尚无成熟校准收益方案；未生成订单，等待成熟反馈。",
+                    "summary": f"尚无成熟校准收益方案；未生成订单，等待成熟反馈。{profile_summary}年化波动率预算不保证最大回撤或最大亏损。",
                     "orders": [],
                     "risk_review_status": "not_applicable_without_proposal",
+                    "risk_profile": checked_risk_profile,
+                    "risk_profile_sha256": (
+                        checked_risk_profile.get("profile_sha256")
+                        if checked_risk_profile is not None else None
+                    ),
+                    "drawdown_guarantee": False,
                 },
             },
         }
@@ -199,6 +240,10 @@ def create_harness_daily_decision(
                     "holdings_cny": dict(sorted(portfolio.holdings_cny.items())),
                 },
                 "config_sha256": _stable_hash(config),
+                "risk_profile_sha256": (
+                    checked_risk_profile.get("profile_sha256")
+                    if checked_risk_profile is not None else None
+                ),
                 "training_state_sha256": _stable_hash(training_state),
                 "versions": dict(versions or {}),
                 "forecast_status": calibrated_forecast.get("status"),
@@ -310,6 +355,10 @@ def create_harness_daily_decision(
         "candidate_sha256": candidate_sha256,
         "config_sha256": _stable_hash(config),
         "task_combination_config_sha256": _stable_hash(config),
+        "risk_profile_sha256": (
+            checked_risk_profile.get("profile_sha256")
+            if checked_risk_profile is not None else None
+        ),
         "training_state_sha256": _stable_hash(training_state),
         "training_seed_provenance": training_seed_provenance,
         "versions": dict(versions or {}),
@@ -335,6 +384,10 @@ def create_harness_daily_decision(
             "holdings_cny": dict(sorted(portfolio.holdings_cny.items())),
         },
         "config_sha256": _stable_hash(config),
+        "risk_profile_sha256": (
+            checked_risk_profile.get("profile_sha256")
+            if checked_risk_profile is not None else None
+        ),
         "training_state_sha256": _stable_hash(training_state),
         "training_seed_provenance": training_seed_provenance,
         "versions": dict(versions or {}),
@@ -622,10 +675,15 @@ def create_harness_daily_decision(
         "tool_schema_sha256": implementation_identity["tool_schema_sha256"],
         "evaluator_sha256": implementation_identity["evaluator_sha256"],
     })
+    if checked_risk_profile is not None:
+        updated_versions.update({
+            "risk_profile_sha256": str(checked_risk_profile["profile_sha256"]),
+            "risk_profile_schema_version": str(checked_risk_profile["schema_version"]),
+        })
     try:
         decision = create_daily_decision(
             research,
-            config,
+            decision_config,
             as_of,
             portfolio,
             training_state,
