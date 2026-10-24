@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from adaptive_mas.agents.harness_prompts import seed_candidate, validate_candidate
 from adaptive_mas.package_identity import source_package_identity
@@ -24,6 +25,28 @@ _PACKAGE_ARTIFACTS = (
     "training_seed", "training_state", "calibration", "model_versions", "data_versions", "tool_schema"
 )
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _qualify_evidence(
+    partition: str,
+    *,
+    fixture_only: bool,
+    quality_pass: bool,
+    economic_pass: bool = False,
+    shadow_pass: bool = False,
+) -> tuple[str, bool]:
+    """Classify partition evidence without conflating research and release gates."""
+    if fixture_only:
+        return "fixture_only", False
+    if partition in {"development", "selection"}:
+        passed = quality_pass
+    elif partition == "independent_acceptance":
+        passed = quality_pass and economic_pass
+    elif partition == "forward_shadow":
+        passed = shadow_pass
+    else:
+        raise ValueError("unknown release-evidence partition")
+    return ("passed" if passed else "rejected"), passed
 
 
 def _json(value: object) -> str:
@@ -68,11 +91,15 @@ class HarnessReleaseStore:
         root: str | Path,
         *,
         project_root: str | Path | None = None,
+        task_store_path: str | Path | None = None,
         test_mode: bool = False,
     ) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.project_root = Path(project_root or Path(__file__).resolve().parents[2]).resolve()
+        self.task_store_path = Path(
+            task_store_path or self.project_root / "data" / "processed" / "harness_service" / "harness_state.sqlite3"
+        ).resolve()
         self.test_mode = bool(test_mode)
         self.database_path = self.root / "release_governance.sqlite3"
         with closing(self._connect()) as connection:
@@ -117,6 +144,26 @@ class HarnessReleaseStore:
                     label_matured_date TEXT,
                     PRIMARY KEY(run_id, event_group_id)
                 );
+                CREATE TABLE IF NOT EXISTS global_partition_claims (
+                    evaluation_scope_sha256 TEXT NOT NULL,
+                    partition_name TEXT NOT NULL,
+                    protocol_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    PRIMARY KEY(evaluation_scope_sha256, partition_name)
+                );
+                CREATE TABLE IF NOT EXISTS global_viewed_ranges (
+                    evaluation_scope_sha256 TEXT NOT NULL,
+                    protocol_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    partition_name TEXT NOT NULL,
+                    event_group_id TEXT NOT NULL,
+                    prediction_date TEXT NOT NULL,
+                    label_matured_date TEXT
+                );
+                CREATE INDEX IF NOT EXISTS global_viewed_ranges_event_idx
+                    ON global_viewed_ranges(evaluation_scope_sha256, event_group_id);
+                CREATE INDEX IF NOT EXISTS global_viewed_ranges_dates_idx
+                    ON global_viewed_ranges(evaluation_scope_sha256, prediction_date, label_matured_date);
                 CREATE TABLE IF NOT EXISTS evidence_artifacts (
                     evidence_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL UNIQUE REFERENCES evaluation_attempts(run_id),
@@ -174,8 +221,8 @@ class HarnessReleaseStore:
             relative = path.relative_to(self.project_root)
         except ValueError as exc:
             raise ValueError("evidence artifacts must stay inside the configured project root") from exc
-        if not path.is_file() or path.name.lower() == "test.csv":
-            raise ValueError("evidence path must be an existing non-test.csv file")
+        if not path.is_file() or path.suffix.lower() == ".csv" or path.name.lower() == "test.csv":
+            raise ValueError("evidence path must be an existing non-CSV file")
         if not self.test_mode and any(
             part.lower() in {"test", "tests", "fixture", "fixtures", "synthetic", "testdata"}
             or part.lower().startswith("pytest-")
@@ -186,8 +233,18 @@ class HarnessReleaseStore:
 
     @staticmethod
     def _validate_protocol(protocol: Mapping[str, object]) -> dict[str, object]:
-        if protocol.get("schema_version") != "adaptive-mas.release-evaluation-protocol.v1":
+        if protocol.get("schema_version") != "adaptive-mas.release-evaluation-protocol.v2":
             raise ValueError("unsupported release evaluation protocol schema")
+        scope_sha256 = protocol.get("evaluation_scope_sha256")
+        if not isinstance(scope_sha256, str) or not _HEX64.fullmatch(scope_sha256):
+            raise ValueError("protocol must bind one frozen evaluation_scope_sha256")
+        baseline = protocol.get("baseline_candidate")
+        if not isinstance(baseline, Mapping):
+            raise ValueError("protocol must freeze a baseline candidate identity")
+        baseline_version = str(baseline.get("candidate_version_id", ""))
+        baseline_sha256 = baseline.get("candidate_sha256")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", baseline_version) or not isinstance(baseline_sha256, str) or not _HEX64.fullmatch(baseline_sha256):
+            raise ValueError("protocol baseline candidate identity is invalid")
         raw_calendar = protocol.get("trading_dates")
         if not isinstance(raw_calendar, list) or not raw_calendar:
             raise ValueError("protocol must declare the frozen trading calendar")
@@ -236,6 +293,11 @@ class HarnessReleaseStore:
             raise ValueError("current evaluator supports a predeclared one-sided 95% confidence bound")
         return {
             "schema_version": protocol["schema_version"],
+            "evaluation_scope_sha256": scope_sha256,
+            "baseline_candidate": {
+                "candidate_version_id": baseline_version,
+                "candidate_sha256": baseline_sha256,
+            },
             "trading_dates": [day.isoformat() for day in calendar],
             "horizon_sessions": horizon,
             "embargo_sessions": embargo,
@@ -339,6 +401,16 @@ class HarnessReleaseStore:
             connection.commit()
         return {"package_id": package_id, "package_sha256": digest, "candidate_sha256": normalized["candidate_sha256"]}
 
+    def register_package_file(self, artifact_path: str | Path) -> dict[str, object]:
+        path, _relative = self._resolve_project_file(str(artifact_path))
+        try:
+            package = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("package artifact must be a readable JSON object") from exc
+        if not isinstance(package, Mapping):
+            raise ValueError("package artifact must be a JSON object")
+        return self.register_package(package)
+
     def _load_package(self, package_id: str) -> dict[str, object]:
         with closing(self._connect()) as connection:
             row = connection.execute(
@@ -377,11 +449,18 @@ class HarnessReleaseStore:
             raise ValueError("predeclared protocol failed its content hash")
         return protocol, str(row["protocol_sha256"]), str(row["declared_at"])
 
-    def _verified_source_artifacts(self, manifest: Mapping[str, object]) -> list[dict[str, str]]:
+    def _verified_source_artifacts(
+        self, manifest: Mapping[str, object], *, require_descriptors: bool = False
+    ) -> list[dict[str, str]]:
         raw = manifest.get("source_artifacts")
         if not isinstance(raw, list) or not raw:
             raise ValueError("source manifest must reference at least one source artifact")
         result = []
+        artifact_ids: set[str] = set()
+        allowed_roles = {
+            "frozen_scope_manifest", "research_market_snapshot", "market_data", "research_result",
+            "execution_rules", "execution_request", "execution_result", "decision",
+        }
         for item in raw:
             if not isinstance(item, Mapping):
                 raise ValueError("source artifact records must be objects")
@@ -389,8 +468,359 @@ class HarnessReleaseStore:
             actual = _sha256_bytes(path.read_bytes())
             if item.get("sha256") != actual:
                 raise ValueError(f"source artifact hash mismatch: {Path(relative).name}")
-            result.append({"path": relative, "sha256": actual})
+            artifact_id = str(item.get("artifact_id", Path(relative).name))
+            role = str(item.get("role", "legacy_summary"))
+            if not artifact_id or artifact_id in artifact_ids:
+                raise ValueError("source artifact IDs must be unique and nonempty")
+            artifact_ids.add(artifact_id)
+            if require_descriptors and ("artifact_id" not in item or "role" not in item):
+                raise ValueError("production artifacts must declare an artifact_id and semantic role")
+            if require_descriptors and role not in allowed_roles:
+                raise ValueError(f"unsupported production evidence artifact role: {role}")
+            result.append({
+                "artifact_id": artifact_id,
+                "role": role,
+                "path": relative,
+                "sha256": actual,
+            })
         return sorted(result, key=lambda row: row["path"])
+
+    def _artifact_json(self, artifact: Mapping[str, str]) -> dict[str, object]:
+        path = self.project_root / artifact["path"]
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"evidence artifact is not readable JSON: {path.name}") from exc
+        if not isinstance(value, Mapping):
+            raise ValueError(f"evidence artifact must contain a JSON object: {path.name}")
+        return dict(value)
+
+    def _derive_production_rows(
+        self,
+        *,
+        protocol: Mapping[str, object],
+        package: Mapping[str, object],
+        partition: str,
+        rows: Sequence[object],
+        source_artifacts: Sequence[Mapping[str, str]],
+    ) -> list[dict[str, object]]:
+        """Rebuild quality and finance metrics from hashed, role-bound source artifacts."""
+        from adaptive_mas.execution_ledger import simulate_execution_ledger
+        from adaptive_mas.harness_evolution import score_research_result
+        from adaptive_mas.research_provenance import validate_research_package_provenance
+
+        by_id = {item["artifact_id"]: item for item in source_artifacts}
+        role_counts: dict[str, int] = {}
+        for item in source_artifacts:
+            role_counts[item["role"]] = role_counts.get(item["role"], 0) + 1
+        if role_counts.get("frozen_scope_manifest", 0) != 1:
+            raise ValueError("production input must reference one frozen scope manifest")
+        scope_artifact = next(item for item in source_artifacts if item["role"] == "frozen_scope_manifest")
+        if stable_hash(self._artifact_json(scope_artifact)) != protocol["evaluation_scope_sha256"]:
+            raise ValueError("frozen scope manifest does not match the predeclared evaluation scope")
+        research_market_artifacts = [item for item in source_artifacts if item["role"] == "research_market_snapshot"]
+        if not research_market_artifacts:
+            raise ValueError("production input must bind research_market_snapshot artifacts")
+        market_identities = []
+        for artifact in research_market_artifacts:
+            snapshot = self._artifact_json(artifact)
+            payload = snapshot.get("snapshot_payload")
+            identity = snapshot.get("market_snapshot_identity")
+            if snapshot.get("schema_version") != "adaptive-mas.research-market-snapshot.v1" or not isinstance(payload, Mapping) or not isinstance(identity, Mapping):
+                raise ValueError("research market snapshot artifact has an unsupported shape")
+            expected_counts = {
+                "trading_dates": len(payload.get("trading_dates", [])),
+                "members": len(payload.get("members", [])),
+                "adjusted_bars": len(payload.get("adjusted_bars", [])),
+                "execution_bars": len(payload.get("execution_bars", [])),
+                "index_bars": len(payload.get("index_bars", [])),
+            }
+            if identity.get("sha256") != stable_hash(dict(payload)) or identity.get("row_counts") != expected_counts:
+                raise ValueError("research market snapshot identity does not match its source rows")
+            market_identities.append(dict(identity))
+        market_hashes = {item["sha256"] for item in source_artifacts if item["role"] == "market_data"}
+        implementation = source_package_identity()
+        baseline = protocol["baseline_candidate"]
+        package_identity = {
+            "candidate_version_id": package["candidate_version_id"],
+            "candidate_sha256": package["candidate_sha256"],
+        }
+        expected_identities = {
+            "candidate": package_identity,
+            "baseline": dict(baseline),
+        }
+        derived: list[dict[str, object]] = []
+        for raw_row in rows:
+            if not isinstance(raw_row, Mapping):
+                raise ValueError("production evaluation records must be objects")
+            row = dict(raw_row)
+            prediction_date = _iso_day(row.get("prediction_date"), "prediction_date")
+            output: dict[str, object] = dict(row)
+            paired_execution_calendars: dict[str, list[str]] = {}
+            for arm in ("candidate", "baseline"):
+                research_id = row.get(f"{arm}_research_artifact_id")
+                if not isinstance(research_id, str) or research_id not in by_id:
+                    raise ValueError(f"{arm} evaluation row must reference a hashed research artifact")
+                research_artifact = by_id[str(research_id)]
+                if research_artifact["role"] != "research_result":
+                    raise ValueError(f"{arm} evaluation artifact role is not research_result")
+                research_result = self._artifact_json(research_artifact)
+                if (
+                    research_result.get("schema_version") != "adaptive-mas.harness-research.v1"
+                    or research_result.get("status") != "completed"
+                    or research_result.get("as_of") != prediction_date.isoformat()
+                    or research_result.get("public_evidence_mode") != "captured_public_cache_cutoff"
+                ):
+                    raise ValueError(f"{arm} research artifact is incomplete or has a mismatched date/mode")
+                provenance = research_result.get("package_provenance")
+                if not isinstance(provenance, Mapping):
+                    raise ValueError(f"{arm} research artifact is missing package provenance")
+                source_manifest = provenance.get("source_manifest")
+                source_identity = source_manifest.get("source_package_identity") if isinstance(source_manifest, Mapping) else None
+                if not isinstance(source_identity, Mapping):
+                    raise ValueError(f"{arm} research artifact is missing source package identity")
+                identity = expected_identities[arm]
+                if (
+                    source_identity.get("candidate_version_id") != identity["candidate_version_id"]
+                    or source_identity.get("candidate_sha256") != identity["candidate_sha256"]
+                ):
+                    raise ValueError(f"{arm} research artifact does not match the frozen candidate identity")
+                market_identity = source_identity.get("market_snapshot_identity")
+                if not isinstance(market_identity, Mapping) or dict(market_identity) not in market_identities:
+                    raise ValueError(f"{arm} research artifact is missing its market snapshot identity")
+                matching_snapshots = [
+                    self._artifact_json(artifact)
+                    for artifact in research_market_artifacts
+                    if self._artifact_json(artifact).get("market_snapshot_identity") == dict(market_identity)
+                ]
+                if not matching_snapshots or matching_snapshots[0]["snapshot_payload"].get("decision_date") != prediction_date.isoformat():
+                    raise ValueError(f"{arm} research market snapshot date does not match its task")
+                validate_research_package_provenance(
+                    research_result,
+                    provenance,
+                    as_of=prediction_date,
+                    public_evidence_mode="captured_public_cache_cutoff",
+                    horizon=int(protocol["horizon_sessions"]),
+                    candidate_version_id=str(identity["candidate_version_id"]),
+                    candidate_sha256=str(identity["candidate_sha256"]),
+                    implementation_identity=implementation,
+                    market_identity=market_identity,
+                    client=None,
+                )
+                metrics = score_research_result(research_result)
+                output[f"{arm}_research_score"] = _finite(metrics.get("score"), f"{arm} recomputed research score", minimum=0)
+                output[f"{arm}_fact_accuracy"] = _finite(metrics.get("fact_accuracy"), f"{arm} recomputed fact accuracy", minimum=0)
+                output[f"{arm}_strict_pit_verified"] = metrics.get("strict_historical_pit_verified") is True
+
+                if partition != "independent_acceptance":
+                    continue
+                execution_id = row.get(f"{arm}_execution_request_artifact_id")
+                result_id = row.get(f"{arm}_execution_result_artifact_id")
+                if not all(isinstance(value, str) and value in by_id for value in (execution_id, result_id)):
+                    raise ValueError(f"{arm} acceptance row must reference hashed execution request and result artifacts")
+                request_artifact = by_id[str(execution_id)]
+                result_artifact = by_id[str(result_id)]
+                if request_artifact["role"] != "execution_request" or result_artifact["role"] != "execution_result":
+                    raise ValueError(f"{arm} acceptance artifact roles do not match their declared references")
+
+                execution_wrapper = self._artifact_json(request_artifact)
+                if execution_wrapper.get("schema_version") != "adaptive-mas.execution-ledger-request.v1":
+                    raise ValueError(f"{arm} execution request artifact has an unsupported schema")
+                market_request_identity = execution_wrapper.get("market_snapshot_identity")
+                if market_request_identity != dict(market_identity):
+                    raise ValueError(f"{arm} execution request is not linked to its research market snapshot")
+                request = execution_wrapper.get("request")
+                if not isinstance(request, Mapping):
+                    raise ValueError(f"{arm} execution request artifact has no request object")
+                request = dict(request)
+                source_hashes = request.get("source_artifact_hashes")
+                if not isinstance(source_hashes, Mapping) or not source_hashes:
+                    raise ValueError(f"{arm} execution request is not linked to market data artifact hashes")
+                referenced_hashes = {str(value) for value in source_hashes.values()}
+                rule_hashes = {item["sha256"] for item in source_artifacts if item["role"] == "execution_rules"}
+                if not referenced_hashes.issubset(market_hashes | rule_hashes):
+                    raise ValueError(f"{arm} execution request references an unregistered source artifact")
+                if not (referenced_hashes & market_hashes) or not (referenced_hashes & rule_hashes):
+                    raise ValueError(f"{arm} execution request must bind both settlement data and its rule pack")
+                referenced_market_hashes = referenced_hashes & market_hashes
+                referenced_market_data_by_hash = {
+                    artifact["sha256"]: self._artifact_json(artifact)
+                    for artifact in source_artifacts
+                    if artifact["role"] == "market_data" and artifact["sha256"] in referenced_market_hashes
+                }
+                referenced_market_data = list(referenced_market_data_by_hash.values())
+                if set(referenced_market_data_by_hash) != referenced_market_hashes or any(
+                    item.get("schema_version") != "adaptive-mas.settlement-market-data.v1"
+                    or not isinstance(item.get("market_bars"), list)
+                    for item in referenced_market_data
+                ):
+                    raise ValueError(
+                        f"{arm} market_data artifacts do not contain versioned settlement bars "
+                        f"(matched={len(referenced_market_data)}, expected={len(referenced_market_hashes)}, "
+                        f"schemas={[item.get('schema_version') for item in referenced_market_data]})"
+                    )
+                rule_artifacts = [
+                    self._artifact_json(artifact)
+                    for artifact in source_artifacts
+                    if artifact["role"] == "execution_rules" and artifact["sha256"] in (referenced_hashes & rule_hashes)
+                ]
+                if not rule_artifacts or not any(
+                    asset.get("schema_version") == "adaptive-mas.execution-rule-pack.v1"
+                    and asset.get("rule_pack") == request.get("rule_pack")
+                    for asset in rule_artifacts
+                ):
+                    raise ValueError(f"{arm} execution rule pack does not match its hashed source artifact")
+                available_bars = {
+                    stable_hash(dict(bar))
+                    for asset in referenced_market_data
+                    for bar in asset["market_bars"]
+                    if isinstance(bar, Mapping)
+                }
+                request_bars = request.get("market_bars")
+                if not isinstance(request_bars, list) or any(
+                    not isinstance(bar, Mapping) or stable_hash(dict(bar)) not in available_bars
+                    for bar in request_bars
+                ):
+                    raise ValueError(f"{arm} execution request market bars do not match hashed settlement data")
+                requested_actions = request.get("corporate_actions", [])
+                available_actions = {
+                    stable_hash(dict(action))
+                    for asset in referenced_market_data
+                    for action in asset.get("corporate_actions", [])
+                    if isinstance(action, Mapping)
+                }
+                if not isinstance(requested_actions, list) or any(
+                    not isinstance(action, Mapping) or stable_hash(dict(action)) not in available_actions
+                    for action in requested_actions
+                ):
+                    raise ValueError(f"{arm} execution request corporate actions do not match hashed settlement data")
+                usage = research_result.get("task_usage")
+                if not isinstance(usage, Mapping):
+                    raise ValueError(f"{arm} research artifact has no source task usage")
+                research_cost = _finite(usage.get("logical_estimated_cost_cny"), f"{arm} research logical cost", minimum=0)
+                request["research_cost_cny_by_date"] = {prediction_date.isoformat(): research_cost}
+                try:
+                    recomputed_ledger = simulate_execution_ledger(**request)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{arm} execution request could not be recomputed: {exc}") from exc
+                supplied_result = self._artifact_json(result_artifact)
+                if stable_hash(supplied_result) != stable_hash(recomputed_ledger):
+                    raise ValueError(f"{arm} settlement/NAV/fee artifact does not match recomputed execution")
+                summary = recomputed_ledger.get("summary")
+                nav_rows = recomputed_ledger.get("daily_nav")
+                reconciliation = recomputed_ledger.get("reconciliation")
+                if not isinstance(summary, Mapping) or not isinstance(nav_rows, list) or len(nav_rows) < 2:
+                    raise ValueError(f"{arm} execution result lacks a usable NAV series")
+                maturity_date = _iso_day(row.get("label_matured_date"), "label_matured_date")
+                execution_dates = [
+                    str(item.get("trade_date"))
+                    for item in nav_rows if isinstance(item, Mapping)
+                ]
+                if (
+                    not execution_dates
+                    or execution_dates[0] != prediction_date.isoformat()
+                    or execution_dates[-1] != maturity_date.isoformat()
+                ):
+                    raise ValueError(f"{arm} NAV series must cover exactly prediction through label maturity")
+                paired_execution_calendars[arm] = execution_dates
+                if (
+                    summary.get("all_cash_reconciliations_exact") is not True
+                    or summary.get("all_nav_reconciliations_exact") is not True
+                    or not isinstance(reconciliation, list)
+                ):
+                    raise ValueError(f"{arm} execution result failed exact reconciliation")
+                nav_values = [_finite(item.get("nav_cny"), f"{arm} NAV", minimum=1e-12) for item in nav_rows if isinstance(item, Mapping)]
+                daily_returns = [
+                    _finite(item.get("daily_return"), f"{arm} daily return")
+                    for item in nav_rows[1:] if isinstance(item, Mapping)
+                ]
+                mean_return = math.fsum(daily_returns) / len(daily_returns) if daily_returns else 0.0
+                variance = math.fsum((value - mean_return) ** 2 for value in daily_returns) / max(len(daily_returns) - 1, 1)
+                annualized_risk = math.sqrt(variance) * math.sqrt(252)
+                peak = nav_values[0]
+                drawdown = 0.0
+                for value in nav_values:
+                    peak = max(peak, value)
+                    drawdown = min(drawdown, value / peak - 1.0)
+                total_cost = (
+                    _finite(summary.get("total_fees_cny"), f"{arm} fees", minimum=0)
+                    + _finite(summary.get("total_slippage_cost_cny"), f"{arm} slippage", minimum=0)
+                    + _finite(summary.get("total_research_cost_cny"), f"{arm} research cost", minimum=0)
+                )
+                output[f"{arm}_net_return"] = _finite(summary.get("net_total_return"), f"{arm} net return")
+                output[f"{arm}_total_cost_cny"] = total_cost
+                output[f"{arm}_annualized_risk"] = annualized_risk
+                output[f"{arm}_maximum_drawdown"] = drawdown
+            if paired_execution_calendars.get("candidate") != paired_execution_calendars.get("baseline"):
+                raise ValueError("candidate and baseline settlement calendars must match exactly")
+            derived.append(output)
+        return derived
+
+    def _verify_persisted_shadow_decision(
+        self,
+        *,
+        row: Mapping[str, object],
+        artifacts_by_id: Mapping[str, Mapping[str, str]],
+        prediction_date: date,
+        declared_at: str,
+        package: Mapping[str, object],
+        horizon_sessions: int,
+    ) -> bool:
+        decision_id = row.get("decision_artifact_id")
+        task_id = row.get("task_id")
+        if not isinstance(decision_id, str) or decision_id not in artifacts_by_id or not isinstance(task_id, str):
+            return False
+        artifact = artifacts_by_id[decision_id]
+        if artifact["role"] != "decision" or row.get("decision_sha256") != artifact["sha256"]:
+            return False
+        try:
+            decision = self._artifact_json(artifact)
+            if (
+                decision.get("schema_version") != "adaptive-mas.decision.v1"
+                or decision.get("as_of_date") != prediction_date.isoformat()
+                or decision.get("prediction_horizon_sessions") != horizon_sessions
+            ):
+                return False
+            versions = decision.get("versions")
+            if not isinstance(versions, Mapping) or (
+                versions.get("harness_version_id") != package.get("candidate_version_id")
+                or versions.get("harness_candidate_sha256") != package.get("candidate_sha256")
+            ):
+                return False
+            with closing(sqlite3.connect(self.task_store_path, timeout=5)) as connection:
+                persisted = connection.execute(
+                    "SELECT status,result_json,created_at,updated_at,request_json FROM service_jobs WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+            if persisted is None or persisted[0] != "completed":
+                return False
+            persisted_decision = json.loads(persisted[1])
+            created_at = datetime.fromisoformat(str(persisted[2]))
+            updated_at = datetime.fromisoformat(str(persisted[3]))
+            declared = datetime.fromisoformat(declared_at)
+            if any(value.tzinfo is None for value in (created_at, updated_at, declared)):
+                return False
+            created_at = created_at.astimezone(timezone.utc)
+            updated_at = updated_at.astimezone(timezone.utc)
+            declared = declared.astimezone(timezone.utc)
+            if created_at <= declared or updated_at < created_at or updated_at > datetime.now(timezone.utc):
+                return False
+            if (
+                created_at.astimezone(ZoneInfo("Asia/Shanghai")).date() != prediction_date
+                or updated_at.astimezone(ZoneInfo("Asia/Shanghai")).date() != prediction_date
+            ):
+                return False
+            if stable_hash(persisted_decision) != stable_hash(decision):
+                return False
+            request = json.loads(persisted[4])
+            return (
+                isinstance(request, Mapping)
+                and request.get("mode") == "decision_reuse"
+                and request.get("as_of") == prediction_date.isoformat()
+                and request.get("horizon_sessions") == horizon_sessions
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+            return False
 
     def _compute_report(
         self,
@@ -408,20 +838,33 @@ class HarnessReleaseStore:
         input_bytes = path.read_bytes()
         artifact_sha256 = _sha256_bytes(input_bytes)
         source = json.loads(input_bytes.decode("utf-8"))
-        if not isinstance(source, Mapping) or source.get("schema_version") != "adaptive-mas.release-evaluation-input.v1":
+        if not isinstance(source, Mapping) or source.get("schema_version") not in {
+            "adaptive-mas.release-evaluation-input.v1",
+            "adaptive-mas.release-evaluation-input.v2",
+        }:
             raise ValueError("unsupported immutable evaluation input artifact")
+        if source.get("schema_version") == "adaptive-mas.release-evaluation-input.v1" and not self.test_mode:
+            raise ValueError("caller-supplied evaluation summaries cannot qualify for production evidence")
         if source.get("package_id") != package_id:
             raise ValueError("evaluation input package ID does not match the registered package")
         manifest = source.get("source_manifest")
         rows = source.get("records")
         if not isinstance(manifest, Mapping) or not isinstance(rows, list) or not rows:
             raise ValueError("evaluation input must include a source manifest and grouped records")
-        source_artifacts = self._verified_source_artifacts(manifest)
-        fixture_only = bool(manifest.get("fixture_only", False)) or self.test_mode
+        production_artifact_mode = source.get("schema_version") == "adaptive-mas.release-evaluation-input.v2"
+        source_artifacts = self._verified_source_artifacts(
+            manifest, require_descriptors=production_artifact_mode
+        )
+        fixture_only = bool(manifest.get("fixture_only", False))
         data_mode = str(manifest.get("data_mode", "unknown"))
         if not self.test_mode:
             if fixture_only:
                 raise ValueError("fixture evidence can never qualify for a production release")
+            if not production_artifact_mode:
+                raise ValueError("production evidence requires artifact-backed evaluation input v2")
+            scope_artifacts = [item for item in source_artifacts if item["role"] == "frozen_scope_manifest"]
+            if len(scope_artifacts) != 1 or stable_hash(self._artifact_json(scope_artifacts[0])) != protocol["evaluation_scope_sha256"]:
+                raise ValueError("frozen scope manifest does not match the predeclared evaluation scope")
             allowed_modes = {
                 "development": {"captured_public_cache_cutoff"},
                 "selection": {"captured_public_cache_cutoff"},
@@ -463,8 +906,14 @@ class HarnessReleaseStore:
                 if maturity is not None:
                     raise ValueError("forward-shadow rows must remain unlabelled until they mature")
             else:
-                if maturity is None or maturity not in calendar_index or maturity < prediction_date:
-                    raise ValueError("label maturity must be a later or same trading date on the frozen calendar")
+                horizon_sessions = int(protocol["horizon_sessions"])
+                if (
+                    maturity is None
+                    or maturity not in calendar_index
+                    or maturity < prediction_date
+                    or calendar_index[maturity] - calendar_index[prediction_date] < horizon_sessions
+                ):
+                    raise ValueError("label maturity must occur at least horizon_sessions after prediction on the frozen calendar")
                 if next_start is not None:
                     gap = calendar_index[next_start] - calendar_index[maturity] - 1
                     if gap < int(protocol["embargo_sessions"]):
@@ -476,6 +925,15 @@ class HarnessReleaseStore:
             })
             normalized_rows.append(dict(row))
 
+        if production_artifact_mode and partition != "forward_shadow":
+            normalized_rows = self._derive_production_rows(
+                protocol=protocol,
+                package=package,
+                partition=partition,
+                rows=normalized_rows,
+                source_artifacts=source_artifacts,
+            )
+
         minimum = int(protocol["minimum_event_groups"])
         quality_pass = False
         quality_metrics: dict[str, object] = {}
@@ -484,35 +942,47 @@ class HarnessReleaseStore:
         production_eligible = False
         if partition == "forward_shadow":
             required = len(normalized_rows) >= minimum
-            safe_shadow = all(
-                row.get("real_orders") == 0
-                and row.get("public_deployment") is False
-                and isinstance(row.get("decision_sha256"), str)
-                and _HEX64.fullmatch(str(row["decision_sha256"]))
-                for row in normalized_rows
-            )
+            artifacts_by_id = {item["artifact_id"]: item for item in source_artifacts}
+            declared_at = self._load_protocol(protocol_id)[2]
+            if self.test_mode:
+                safe_shadow = all(
+                    row.get("real_orders") == 0
+                    and row.get("public_deployment") is False
+                    and isinstance(row.get("decision_sha256"), str)
+                    and _HEX64.fullmatch(str(row["decision_sha256"]))
+                    for row in normalized_rows
+                )
+            else:
+                safe_shadow = (
+                    data_mode == "forward_observed"
+                    and all(
+                        self._verify_persisted_shadow_decision(
+                            row=row,
+                            artifacts_by_id=artifacts_by_id,
+                            prediction_date=_iso_day(row["prediction_date"], "prediction_date"),
+                            declared_at=declared_at,
+                        package=package,
+                        horizon_sessions=int(protocol["horizon_sessions"]),
+                        )
+                        for row in normalized_rows
+                    )
+                )
             acceptance_end = _iso_day(protocol["partitions"]["independent_acceptance"]["end"], "acceptance.end")
             forward_after_acceptance = start > acceptance_end
-            observed_after_predeclare = self.test_mode
-            if not self.test_mode:
-                try:
-                    observed_at = datetime.fromisoformat(str(manifest["observed_at"]))
-                    declared_at = datetime.fromisoformat(self._load_protocol(protocol_id)[2])
-                    observed_after_predeclare = (
-                        observed_at.tzinfo is not None
-                        and declared_at.tzinfo is not None
-                        and observed_at > declared_at
-                        and observed_at <= datetime.now(timezone.utc)
-                    )
-                except (KeyError, TypeError, ValueError):
-                    observed_after_predeclare = False
-            evidence_status = (
-                "fixture_only" if fixture_only else
-                "passed" if required and safe_shadow and forward_after_acceptance and observed_after_predeclare and data_mode == "forward_observed"
-                else "pending_forward"
-            )
+            observed_after_predeclare = self.test_mode or safe_shadow
             shadow_checks_passed = required and safe_shadow and forward_after_acceptance and observed_after_predeclare and data_mode == "forward_observed"
-            production_eligible = evidence_status == "passed" and not fixture_only
+            if not fixture_only and not observed_after_predeclare:
+                evidence_status = "pending_forward"
+                production_eligible = False
+            else:
+                evidence_status, production_eligible = _qualify_evidence(
+                    partition,
+                    fixture_only=fixture_only,
+                    quality_pass=False,
+                    shadow_pass=shadow_checks_passed,
+                )
+                if evidence_status == "rejected" and data_mode != "forward_observed":
+                    evidence_status = "pending_forward"
         else:
             quality_values = []
             diff_returns = []
@@ -543,6 +1013,12 @@ class HarnessReleaseStore:
                 candidate_quality >= baseline_quality and candidate_fact >= baseline_fact
                 for candidate_quality, baseline_quality, candidate_fact, baseline_fact in quality_values
             )
+            if production_artifact_mode:
+                quality_pass = quality_pass and all(
+                    row.get("candidate_strict_pit_verified") is True
+                    and row.get("baseline_strict_pit_verified") is True
+                    for row in normalized_rows
+                )
             quality_metrics = {
                 "event_group_count": len(quality_values),
                 "candidate_research_score_mean": math.fsum(row[0] for row in quality_values) / len(quality_values),
@@ -551,6 +1027,13 @@ class HarnessReleaseStore:
                 "baseline_fact_accuracy_mean": math.fsum(row[3] for row in quality_values) / len(quality_values),
                 "passed": quality_pass,
             }
+            if production_artifact_mode:
+                quality_metrics["strict_point_in_time_verified_group_count"] = sum(
+                    row.get("candidate_strict_pit_verified") is True
+                    and row.get("baseline_strict_pit_verified") is True
+                    for row in normalized_rows
+                )
+                quality_metrics["strict_point_in_time_required"] = True
             if partition == "independent_acceptance":
                 if len(diff_returns) >= 2:
                     mean_diff = math.fsum(diff_returns) / len(diff_returns)
@@ -584,19 +1067,26 @@ class HarnessReleaseStore:
                     "predeclared_maximum_drawdown_worsening": float(gate["maximum_drawdown_worsening"]),
                     "passed": economic_pass,
                 }
-                evidence_status = "fixture_only" if fixture_only else (
-                    "passed" if quality_pass and economic_pass else "rejected"
+                evidence_status, production_eligible = _qualify_evidence(
+                    partition,
+                    fixture_only=fixture_only,
+                    quality_pass=quality_pass,
+                    economic_pass=economic_pass,
                 )
-                production_eligible = evidence_status == "passed" and not fixture_only
             else:
-                evidence_status = "fixture_only" if fixture_only else "recorded"
+                evidence_status, production_eligible = _qualify_evidence(
+                    partition,
+                    fixture_only=fixture_only,
+                    quality_pass=quality_pass,
+                )
 
         package_runtime = package["runtime_context"]
         report = {
-            "schema_version": "adaptive-mas.release-evidence.v1",
+            "schema_version": "adaptive-mas.release-evidence.v2",
             "run_id": run_id,
             "protocol_id": protocol_id,
             "protocol_sha256": protocol_sha256,
+            "evaluation_scope_sha256": protocol["evaluation_scope_sha256"],
             "partition": partition,
             "package_id": package_id,
             "package_sha256": stable_hash(package),
@@ -605,6 +1095,8 @@ class HarnessReleaseStore:
             "input_artifact_path": relative_path,
             "input_artifact_sha256": artifact_sha256,
             "source_artifacts": source_artifacts,
+            "artifact_binding_sha256": stable_hash(source_artifacts),
+            "metric_source_mode": "artifact_recomputed" if production_artifact_mode else "test_fixture_summary",
             "source_manifest_sha256": stable_hash(dict(manifest)),
             "data_mode": data_mode,
             "fixture_only": fixture_only,
@@ -668,6 +1160,7 @@ class HarnessReleaseStore:
                     "prediction_date": prediction.isoformat(),
                     "label_matured_date": maturity.isoformat() if maturity else None,
                 })
+        scope_sha256 = str(protocol["evaluation_scope_sha256"])
         now = self._now()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -675,22 +1168,36 @@ class HarnessReleaseStore:
                 connection.rollback()
                 raise ValueError("run_id is immutable and has already been attempted")
             prior_claim = connection.execute(
-                "SELECT 1 FROM partition_claims WHERE protocol_id=? AND partition_name=?",
-                (protocol_id, partition),
-            ).fetchone() if partition in {"independent_acceptance", "forward_shadow"} else None
+                "SELECT 1 FROM global_partition_claims WHERE evaluation_scope_sha256=? AND partition_name=?",
+                (scope_sha256, partition),
+            ).fetchone()
+            prior_scope_views = connection.execute(
+                "SELECT event_group_id,partition_name,prediction_date,label_matured_date FROM global_viewed_ranges "
+                "WHERE evaluation_scope_sha256=?",
+                (scope_sha256,),
+            ).fetchall()
             connection.execute(
                 "INSERT INTO evaluation_attempts(run_id,protocol_id,partition_name,package_id,input_path,input_sha256,status,created_at,report_json) "
                 "VALUES(?,?,?,?,?,?,?,?,NULL)",
                 (run_id, protocol_id, partition, package_id, relative, input_sha, "started", now),
             )
-            if partition in {"independent_acceptance", "forward_shadow"} and prior_claim is None:
+            if prior_claim is None:
                 connection.execute(
-                    "INSERT INTO partition_claims VALUES(?,?,?)", (protocol_id, partition, run_id)
+                    "INSERT OR IGNORE INTO global_partition_claims VALUES(?,?,?,?)",
+                    (scope_sha256, partition, protocol_id, run_id),
+                )
+            if partition in {"independent_acceptance", "forward_shadow"}:
+                connection.execute(
+                    "INSERT OR IGNORE INTO partition_claims VALUES(?,?,?)", (protocol_id, partition, run_id)
                 )
             for view in preliminary_views:
                 connection.execute(
                     "INSERT OR IGNORE INTO viewed_ranges VALUES(?,?,?,?,?,?)",
                     (protocol_id, run_id, partition, view["event_group_id"], view["prediction_date"], view["label_matured_date"]),
+                )
+                connection.execute(
+                    "INSERT INTO global_viewed_ranges VALUES(?,?,?,?,?,?,?)",
+                    (scope_sha256, protocol_id, run_id, partition, view["event_group_id"], view["prediction_date"], view["label_matured_date"]),
                 )
             connection.commit()
 
@@ -701,22 +1208,15 @@ class HarnessReleaseStore:
             raise ValueError(message)
 
         if prior_claim is not None:
-            reject_attempt(f"{partition} has already been viewed/claimed for this protocol")
-        with closing(self._connect()) as connection:
-            older_views = connection.execute(
-                "SELECT event_group_id,partition_name,prediction_date,label_matured_date FROM viewed_ranges "
-                "WHERE protocol_id=? AND run_id!=?", (protocol_id, run_id)
-            ).fetchall()
+            reject_attempt(f"{partition} has already been viewed/claimed for this frozen data scope")
         for view in preliminary_views:
             this_start = _iso_day(view["prediction_date"], "prediction_date")
             this_end = _iso_day(view["label_matured_date"], "label_matured_date") if view["label_matured_date"] else this_start
-            for old in older_views:
-                if old["partition_name"] == partition:
-                    continue
+            for old in prior_scope_views:
                 old_start = _iso_day(old["prediction_date"], "previous prediction date")
                 old_end = _iso_day(old["label_matured_date"], "previous label maturity") if old["label_matured_date"] else old_start
                 if old["event_group_id"] == view["event_group_id"] or max(this_start, old_start) <= min(this_end, old_end):
-                    reject_attempt("an event group or prediction/label interval has already been viewed in another partition")
+                    reject_attempt("an event group or prediction/label interval has already been viewed in this frozen data scope")
         try:
             report, views = self._compute_report(
                 protocol_id=protocol_id,
@@ -1037,3 +1537,42 @@ class HarnessReleaseStore:
             }
             for row in rows
         ]
+
+    def evaluation_status(self) -> dict[str, object]:
+        """Return compact registry status for the local workbench."""
+        with closing(self._connect()) as connection:
+            protocols = connection.execute(
+                "SELECT protocol_id,protocol_sha256,declared_at FROM evaluation_protocols ORDER BY declared_at"
+            ).fetchall()
+            evidence = connection.execute(
+                "SELECT evidence_id,run_id,protocol_id,partition_name,package_id,report_json,created_at "
+                "FROM evidence_artifacts ORDER BY created_at"
+            ).fetchall()
+            packages = connection.execute(
+                "SELECT package_id,package_sha256,created_at FROM package_artifacts ORDER BY created_at"
+            ).fetchall()
+        return {
+            "protocols": [
+                {"protocol_id": row["protocol_id"], "protocol_sha256": row["protocol_sha256"], "declared_at": row["declared_at"]}
+                for row in protocols
+            ],
+            "packages": [
+                {"package_id": row["package_id"], "package_sha256": row["package_sha256"], "created_at": row["created_at"]}
+                for row in packages
+            ],
+            "evidence": [
+                {
+                    "evidence_id": row["evidence_id"],
+                    "run_id": row["run_id"],
+                    "protocol_id": row["protocol_id"],
+                    "partition": row["partition_name"],
+                    "package_id": row["package_id"],
+                    "created_at": row["created_at"],
+                    "evidence_status": json.loads(row["report_json"]).get("evidence_status"),
+                    "research_quality_passed": json.loads(row["report_json"]).get("research_quality_passed"),
+                    "economic_gate": json.loads(row["report_json"]).get("economic_gate"),
+                    "forward_shadow_checks_passed": json.loads(row["report_json"]).get("forward_shadow_checks_passed"),
+                }
+                for row in evidence
+            ],
+        }

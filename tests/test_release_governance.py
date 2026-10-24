@@ -1,13 +1,16 @@
 import hashlib
 import json
-from datetime import date, timedelta
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from adaptive_mas.agents.harness_prompts import seed_candidate
 from adaptive_mas.harness_evolution import HarnessVersionStore
 from adaptive_mas.package_identity import source_package_identity
-from adaptive_mas.release_governance import HarnessReleaseStore
+from adaptive_mas.research_provenance import build_research_package_provenance, stable_hash
+from adaptive_mas.release_governance import HarnessReleaseStore, _qualify_evidence
 
 
 def _package():
@@ -39,7 +42,12 @@ def _package():
 def _protocol():
     days = [date(2025, 1, 1) + timedelta(days=index) for index in range(40)]
     return {
-        "schema_version": "adaptive-mas.release-evaluation-protocol.v1",
+        "schema_version": "adaptive-mas.release-evaluation-protocol.v2",
+        "evaluation_scope_sha256": "e" * 64,
+        "baseline_candidate": {
+            "candidate_version_id": "seed",
+            "candidate_sha256": stable_hash(seed_candidate()),
+        },
         "trading_dates": [day.isoformat() for day in days],
         "horizon_sessions": 3,
         "embargo_sessions": 3,
@@ -68,13 +76,13 @@ def _write_input(root, *, package_id, partition, name, bad_economics=False, fixt
     starts = {"development": 0, "selection": 9, "independent_acceptance": 18, "forward_shadow": 27}
     rows = []
     for offset in range(3):
-        position = starts[partition] + offset + 1
+        position = starts[partition] + offset
         row = {
             "event_group_id": f"{partition}-event-{offset}",
             "prediction_date": days[position].isoformat(),
         }
         if partition != "forward_shadow":
-            row["label_matured_date"] = days[position + 1].isoformat()
+            row["label_matured_date"] = days[position + 3].isoformat()
             row.update({
                 "candidate_research_score": 0.8,
                 "baseline_research_score": 0.7,
@@ -137,6 +145,360 @@ def _registry(tmp_path, *, test_mode=True):
     return store, package, evidence
 
 
+def _write_artifact(root, artifact_id, role, value):
+    relative = f"fixtures/{artifact_id}.json"
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    return {
+        "artifact_id": artifact_id,
+        "role": role,
+        "path": relative,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _research_artifact(*, as_of, candidate_version_id, candidate_sha256, complete=True, research_cost=0.01):
+    final_tools = {
+        "market": "submit_report",
+        "fundamental": "submit_report",
+        "research_manager": "finalize_research",
+    }
+    agents = {}
+    for role, final_tool in final_tools.items():
+        findings = []
+        if role == "fundamental":
+            findings = [{
+                "symbol": "600000",
+                "evidence_ids": ["ev-1"],
+                "observations": [{
+                    "evidence_id": "ev-1",
+                    "field": "revenue",
+                    "report_period": "2024Q3",
+                    "value": 10.0,
+                }],
+                "conclusion": "Captured source supports the reported value.",
+            }]
+        tool_trace = [{"tool": "read_cached_evidence", "result": {"evidence_id": "ev-1"}}]
+        if complete:
+            tool_trace.append({"tool": final_tool, "result": {}})
+        agents[role] = {
+            "report": {"summary": "Captured source findings were checked.", "findings": findings},
+            "tool_trace": tool_trace,
+        }
+    result = {
+        "schema_version": "adaptive-mas.harness-research.v1",
+        "status": "completed",
+        "public_evidence_mode": "captured_public_cache_cutoff",
+        "as_of": as_of.isoformat(),
+        "agents": agents,
+        "evidence_catalog": {
+            "ev-1": {
+                "symbol": "600000",
+                "metric": "revenue",
+                "value": 10.0,
+                "report_period": "2024Q3",
+                "title": "Captured fixture source",
+                "source_type": "fixture_public_source",
+                "published_at": f"{(as_of - timedelta(days=1)).isoformat()}T09:00:00+08:00",
+                "available_at": f"{(as_of - timedelta(days=1)).isoformat()}T09:00:00+08:00",
+                "fetched_at": f"{(as_of - timedelta(days=1)).isoformat()}T10:00:00+08:00",
+            },
+        },
+        "task_usage": {
+            "provider_call_count": 1,
+            "attempt_count": 1,
+            "response_cache_reuse_count": 0,
+            "model_turn_count": 1,
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "logical_estimated_cost_cny": research_cost,
+            "api_incremental_cost_cny": research_cost,
+        },
+        "cost": {
+            "call_count": 1,
+            "logical_inference_count": 1,
+            "logical_inference_estimated_cost_cny": research_cost,
+            "incremental_api_cost_cny": research_cost,
+        },
+        "required_observations": [],
+    }
+    market_identity = _research_market_snapshot(as_of)["market_snapshot_identity"]
+    result["package_provenance"] = build_research_package_provenance(
+        result,
+        as_of=as_of,
+        public_evidence_mode="captured_public_cache_cutoff",
+        horizon=3,
+        config={"prediction_horizon_sessions": 3},
+        candidate_version_id=candidate_version_id,
+        candidate_sha256=candidate_sha256,
+        implementation_identity=source_package_identity(),
+        market_identity=market_identity,
+        model="fixture-model",
+        endpoint="https://fixture.invalid",
+        source_snapshot={
+            "schema_version": "public-expert-snapshot.v1",
+            "data_mode": "captured_public_cache_cutoff",
+            "requested_decision_time": f"{as_of.isoformat()}T16:00:00+08:00",
+            "evaluation_horizon_sessions": 3,
+        },
+    )
+    return result
+
+
+def _research_market_snapshot(as_of):
+    payload = {
+        "decision_date": as_of.isoformat(),
+        "trading_dates": [as_of.isoformat()],
+        "members": [],
+        "adjusted_bars": [],
+        "execution_bars": [],
+        "index_bars": [],
+        "membership_snapshots": [],
+    }
+    return {
+        "schema_version": "adaptive-mas.research-market-snapshot.v1",
+        "snapshot_payload": payload,
+        "market_snapshot_identity": {
+            "sha256": stable_hash(payload),
+            "row_counts": {
+                "trading_dates": 1,
+                "members": 0,
+                "adjusted_bars": 0,
+                "execution_bars": 0,
+                "index_bars": 0,
+            },
+        },
+    }
+
+
+def _artifact_backed_development_input(root, package, *, candidate_complete=True):
+    scope = {"schema_version": "fixture-evaluation-scope.v1", "scope": "explicit-test-fixture"}
+    scope_hash = stable_hash(scope)
+    protocol = _protocol()
+    protocol["evaluation_scope_sha256"] = scope_hash
+    store = HarnessReleaseStore(root / "release_store", project_root=root, test_mode=True)
+    store.predeclare_protocol("artifact-protocol", protocol)
+    registered = store.register_package(package)
+    descriptors = [_write_artifact(root, "scope", "frozen_scope_manifest", scope)]
+    records = []
+    days = [date(2025, 1, 1) + timedelta(days=index) for index in range(40)]
+    for offset in range(3):
+        as_of = days[offset]
+        descriptors.append(_write_artifact(
+            root, f"research-market-{offset}", "research_market_snapshot", _research_market_snapshot(as_of)
+        ))
+        candidate_id = f"candidate-research-{offset}"
+        baseline_id = f"baseline-research-{offset}"
+        descriptors.append(_write_artifact(
+            root, candidate_id, "research_result",
+            _research_artifact(
+                as_of=as_of,
+                candidate_version_id=package["candidate_version_id"],
+                candidate_sha256=stable_hash(package["candidate"]),
+                complete=candidate_complete,
+            ),
+        ))
+        descriptors.append(_write_artifact(
+            root, baseline_id, "research_result",
+            _research_artifact(
+                as_of=as_of,
+                candidate_version_id="seed",
+                candidate_sha256=stable_hash(seed_candidate()),
+                complete=True,
+            ),
+        ))
+        records.append({
+            "event_group_id": f"artifact-event-{offset}",
+            "prediction_date": as_of.isoformat(),
+            "label_matured_date": days[offset + 3].isoformat(),
+            "candidate_research_artifact_id": candidate_id,
+            "baseline_research_artifact_id": baseline_id,
+            "candidate_research_score": 999.0,
+            "baseline_research_score": -999.0,
+            "candidate_fact_accuracy": 1.0,
+            "baseline_fact_accuracy": 0.0,
+        })
+    input_path = root / "fixtures" / "artifact-development.json"
+    input_path.write_text(json.dumps({
+        "schema_version": "adaptive-mas.release-evaluation-input.v2",
+        "package_id": registered["package_id"],
+        "source_manifest": {
+            "fixture_only": True,
+            "data_mode": "captured_public_cache_cutoff",
+            "source_artifacts": descriptors,
+        },
+        "records": records,
+    }, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    report = store.evaluate_partition(
+        protocol_id="artifact-protocol",
+        partition="development",
+        run_id="artifact-development-run",
+        package_id=registered["package_id"],
+        input_artifact_path=input_path,
+    )
+    return store, registered, report
+
+
+def _fixture_rule_pack(trading_dates):
+    days = [date.fromisoformat(value) for value in trading_dates]
+    return {
+        "ruleset_id": "fixture-rules-v1",
+        "effective_date": days[0].isoformat(),
+        "source_title": "Explicit test-only market rules",
+        "source_url": "https://example.invalid/fixture-rules",
+        "symbols": {
+            "600000": {
+                "board": "fixture-board",
+                "order_unit": 100,
+                "minimum_buy_quantity": 100,
+                "odd_lot_sell": True,
+                "t_plus_one": True,
+                "tick_size": 0.01,
+                "price_limit_pct": 0.1,
+                "maximum_daily_participation": 1.0,
+                "liquidity_lookback_sessions": 1,
+            },
+        },
+        "fees": {
+            "commission_per_side_bps": 5,
+            "minimum_commission_cny": 5,
+            "transfer_fee_per_side_bps": 0.1,
+            "stamp_duty_sell_bps": 5,
+            "slippage_per_side_bps": 5,
+        },
+    }
+
+
+def _fixture_execution_request(trading_dates, market_hash, rule_hash):
+    days = [date.fromisoformat(value) for value in trading_dates]
+    market_bars = [{
+        "symbol": "600000",
+        "trade_date": day.isoformat(),
+        "tradestatus": "1",
+        "open": 10.0,
+        "high": 10.0,
+        "low": 10.0,
+        "close": 10.0,
+        "preclose": 10.0,
+        "amount": 1_000_000.0,
+        "volume": 100_000,
+    } for day in days]
+    return {
+        "execution_mode": "nominal_research",
+        "trading_dates": trading_dates,
+        "market_bars": market_bars,
+        "orders": [],
+        "rule_pack": _fixture_rule_pack(trading_dates),
+        "initial_cash_cny": 10_000,
+        "source_artifact_hashes": {"market-bars": market_hash, "execution-rules": rule_hash},
+    }
+
+
+def _artifact_backed_acceptance_input(root, package, *, tamper_result=False):
+    scope = {"schema_version": "fixture-evaluation-scope.v1", "scope": "explicit-test-fixture"}
+    protocol = _protocol()
+    protocol["evaluation_scope_sha256"] = stable_hash(scope)
+    store = HarnessReleaseStore(root / "release_store", project_root=root, test_mode=True)
+    store.predeclare_protocol("artifact-acceptance-protocol", protocol)
+    registered = store.register_package(package)
+    descriptors = [_write_artifact(root, "scope", "frozen_scope_manifest", scope)]
+    days = [date(2025, 1, 1) + timedelta(days=index) for index in range(40)]
+    records = []
+    from adaptive_mas.execution_ledger import simulate_execution_ledger
+
+    for offset in range(3):
+        as_of = days[18 + offset]
+        descriptors.append(_write_artifact(
+            root, f"research-market-{offset}", "research_market_snapshot", _research_market_snapshot(as_of)
+        ))
+        identities = {}
+        for arm, version_id, candidate_sha, logical_cost in (
+            ("candidate", package["candidate_version_id"], stable_hash(package["candidate"]), 0.01),
+            ("baseline", "seed", stable_hash(seed_candidate()), 0.02),
+        ):
+            research_id = f"{arm}-research-{offset}"
+            research = _research_artifact(
+                as_of=as_of,
+                candidate_version_id=version_id,
+                candidate_sha256=candidate_sha,
+                research_cost=logical_cost,
+            )
+            descriptors.append(_write_artifact(root, research_id, "research_result", research))
+            market_identity = research["package_provenance"]["source_manifest"]["source_package_identity"]["market_snapshot_identity"]
+            execution_dates = [day.isoformat() for day in days[18 + offset:22 + offset]]
+            rule_artifact = _write_artifact(
+                root,
+                f"execution-rules-{arm}-{offset}",
+                "execution_rules",
+                {
+                    "schema_version": "adaptive-mas.execution-rule-pack.v1",
+                    "rule_pack": _fixture_rule_pack(execution_dates),
+                },
+            )
+            descriptors.append(rule_artifact)
+            request = _fixture_execution_request(execution_dates, "0" * 64, rule_artifact["sha256"])
+            settlement_market = {
+                "schema_version": "adaptive-mas.settlement-market-data.v1",
+                "market_bars": request["market_bars"],
+                "corporate_actions": [],
+            }
+            market_descriptor = _write_artifact(
+                root, f"settlement-market-{arm}-{offset}", "market_data", settlement_market
+            )
+            descriptors.append(market_descriptor)
+            request["source_artifact_hashes"]["market-bars"] = market_descriptor["sha256"]
+            request_id = f"{arm}-execution-request-{offset}"
+            wrapper = {
+                "schema_version": "adaptive-mas.execution-ledger-request.v1",
+                "market_snapshot_identity": market_identity,
+                "request": request,
+            }
+            descriptors.append(_write_artifact(root, request_id, "execution_request", wrapper))
+            ledger_request = {
+                **request,
+                "research_cost_cny_by_date": {as_of.isoformat(): logical_cost},
+            }
+            execution_result = simulate_execution_ledger(**ledger_request)
+            if tamper_result and arm == "candidate" and offset == 0:
+                execution_result["summary"]["net_total_return"] = 0.75
+            result_id = f"{arm}-execution-result-{offset}"
+            descriptors.append(_write_artifact(root, result_id, "execution_result", execution_result))
+            identities[f"{arm}_research_artifact_id"] = research_id
+            identities[f"{arm}_execution_request_artifact_id"] = request_id
+            identities[f"{arm}_execution_result_artifact_id"] = result_id
+        records.append({
+            "event_group_id": f"economic-event-{offset}",
+            "prediction_date": as_of.isoformat(),
+            "label_matured_date": days[21 + offset].isoformat(),
+            **identities,
+            "candidate_net_return": 999.0,
+            "baseline_net_return": -999.0,
+            "candidate_total_cost_cny": 0.0,
+            "baseline_total_cost_cny": 999.0,
+            "candidate_annualized_risk": 999.0,
+        })
+    input_path = root / "fixtures" / "artifact-acceptance.json"
+    input_path.write_text(json.dumps({
+        "schema_version": "adaptive-mas.release-evaluation-input.v2",
+        "package_id": registered["package_id"],
+        "source_manifest": {
+            "fixture_only": True,
+            "data_mode": "captured_public_cache_cutoff",
+            "source_artifacts": descriptors,
+        },
+        "records": records,
+    }, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    report = store.evaluate_partition(
+        protocol_id="artifact-acceptance-protocol",
+        partition="independent_acceptance",
+        run_id="artifact-acceptance-run",
+        package_id=registered["package_id"],
+        input_artifact_path=input_path,
+    )
+    return report
+
+
 def test_research_pointer_isolated_and_production_stays_seed_without_verified_release(tmp_path):
     store, package, evidence = _registry(tmp_path)
     active, version_id, metadata = store.load_active(config=_package()["config"])
@@ -161,7 +523,7 @@ def test_research_pointer_isolated_and_production_stays_seed_without_verified_re
     assert research_versions.load_active()[1] == "research-only-candidate"
 
     production_store = HarnessReleaseStore(tmp_path / "release_store", project_root=tmp_path)
-    with pytest.raises(ValueError, match="fixture evidence can never qualify for a production release"):
+    with pytest.raises(ValueError, match="caller-supplied evaluation summaries cannot qualify for production evidence"):
         production_store.publish_release(
             package_id=package["package_id"],
             evidence_ids={name: report["evidence_id"] for name, report in evidence.items()},
@@ -263,6 +625,148 @@ def test_protocol_purge_embargo_and_acceptance_view_are_enforced(tmp_path):
             protocol_id="protocol-fixture-1", partition="independent_acceptance", run_id="acceptance-view-run",
             package_id=package["package_id"], input_artifact_path=acceptance_input,
         )
+    store.predeclare_protocol("protocol-renamed", _protocol())
+    renamed_input = _write_input(
+        tmp_path, package_id=package["package_id"], partition="independent_acceptance", name="acceptance-renamed"
+    )
+    with pytest.raises(ValueError, match="already been viewed/claimed for this frozen data scope"):
+        store.evaluate_partition(
+            protocol_id="protocol-renamed", partition="independent_acceptance", run_id="acceptance-renamed-run",
+            package_id=package["package_id"], input_artifact_path=renamed_input,
+        )
+
+
+def test_horizon_maturity_is_measured_in_frozen_trading_sessions(tmp_path):
+    store = HarnessReleaseStore(tmp_path, project_root=tmp_path, test_mode=True)
+    store.predeclare_protocol("horizon-protocol", _protocol())
+    package = store.register_package(_package())
+    path = _write_input(tmp_path, package_id=package["package_id"], partition="development", name="short-label")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["records"][0]["label_matured_date"] = "2025-01-03"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="at least horizon_sessions"):
+        store.evaluate_partition(
+            protocol_id="horizon-protocol", partition="development", run_id="short-label-run",
+            package_id=package["package_id"], input_artifact_path=path,
+        )
+
+
+def test_production_rejects_caller_supplied_summary_and_normal_gate_paths_are_distinct(tmp_path):
+    assert _qualify_evidence(
+        "development", fixture_only=False, quality_pass=True
+    ) == ("passed", True)
+    assert _qualify_evidence(
+        "development", fixture_only=False, quality_pass=False
+    ) == ("rejected", False)
+    assert _qualify_evidence(
+        "selection", fixture_only=False, quality_pass=True
+    ) == ("passed", True)
+    assert _qualify_evidence(
+        "selection", fixture_only=False, quality_pass=False
+    ) == ("rejected", False)
+    assert _qualify_evidence(
+        "independent_acceptance", fixture_only=False, quality_pass=True, economic_pass=False
+    ) == ("rejected", False)
+    assert _qualify_evidence(
+        "independent_acceptance", fixture_only=False, quality_pass=True, economic_pass=True
+    ) == ("passed", True)
+
+    store = HarnessReleaseStore(tmp_path / "production-registry", project_root=tmp_path)
+    store.predeclare_protocol("production-protocol", _protocol())
+    package = store.register_package(_package())
+    manual_summary = _write_input(
+        tmp_path, package_id=package["package_id"], partition="development", name="manual-summary", fixture=False
+    )
+    with pytest.raises(ValueError, match="caller-supplied evaluation summaries cannot qualify"):
+        store.evaluate_partition(
+            protocol_id="production-protocol", partition="development", run_id="manual-summary-run",
+            package_id=package["package_id"], input_artifact_path=manual_summary,
+        )
+    assert store.status_summary()["status"] == "seed"
+
+
+def test_artifact_backed_fixture_recomputes_research_scores_and_ignores_input_metrics(tmp_path):
+    store, package, report = _artifact_backed_development_input(tmp_path, _package())
+    assert report["test_only"] is True
+    assert report["fixture_only"] is True
+    assert report["research_quality_passed"] is True
+    assert report["evidence_status"] == "fixture_only"
+    assert report["quality_metrics"]["candidate_research_score_mean"] < 999.0
+    assert report["quality_metrics"]["baseline_research_score_mean"] > -999.0
+    production_view = HarnessReleaseStore(tmp_path / "release_store", project_root=tmp_path)
+    with pytest.raises(ValueError, match="test and fixture paths cannot be registered"):
+        production_view._verified_evidence(report["evidence_id"])
+
+
+def test_artifact_backed_quality_gate_rejects_recomputed_candidate_regression(tmp_path):
+    _store, _package_record, report = _artifact_backed_development_input(
+        tmp_path, _package(), candidate_complete=False
+    )
+    assert report["quality_metrics"]["candidate_research_score_mean"] < report["quality_metrics"]["baseline_research_score_mean"]
+    assert report["research_quality_passed"] is False
+    assert report["evidence_status"] == "fixture_only"
+
+
+def test_acceptance_economics_are_recomputed_from_reconciled_nav_and_cost_artifacts(tmp_path):
+    report = _artifact_backed_acceptance_input(tmp_path, _package())
+    assert report["fixture_only"] is True
+    assert report["quality_metrics"]["passed"] is True
+    assert report["economic_gate"]["passed"] is True
+    assert report["economic_gate"]["mean_cost_savings_cny"] == pytest.approx(0.01)
+    assert report["economic_gate"]["mean_candidate_minus_baseline_net_return"] > 0
+    assert report["evidence_status"] == "fixture_only"
+
+
+def test_acceptance_rejects_hashed_but_nonreproducible_nav_claim(tmp_path):
+    with pytest.raises(ValueError, match="does not match recomputed execution"):
+        _artifact_backed_acceptance_input(tmp_path, _package(), tamper_result=True)
+
+
+def test_shadow_hash_must_match_a_same_day_persisted_completed_task(tmp_path):
+    task_db = tmp_path / "service.sqlite3"
+    store = HarnessReleaseStore(tmp_path / "registry", project_root=tmp_path, task_store_path=task_db)
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    created = datetime.combine(today, datetime.min.time(), ZoneInfo("Asia/Shanghai")).replace(hour=9).astimezone(timezone.utc)
+    updated = created + timedelta(minutes=1)
+    package_identity = {"candidate_version_id": "candidate-x", "candidate_sha256": "a" * 64}
+    decision = {
+        "schema_version": "adaptive-mas.decision.v1",
+        "as_of_date": today.isoformat(),
+        "prediction_horizon_sessions": 3,
+        "versions": {
+            "harness_version_id": package_identity["candidate_version_id"],
+            "harness_candidate_sha256": package_identity["candidate_sha256"],
+        },
+        "orders": [],
+    }
+    decision_path = tmp_path / "decision.json"
+    decision_path.write_text(json.dumps(decision, sort_keys=True), encoding="utf-8")
+    digest = hashlib.sha256(decision_path.read_bytes()).hexdigest()
+    request = {"mode": "decision_reuse", "as_of": today.isoformat(), "horizon_sessions": 3}
+    with sqlite3.connect(task_db) as connection:
+        connection.execute(
+            "CREATE TABLE service_jobs(task_id TEXT PRIMARY KEY,status TEXT,result_json TEXT,created_at TEXT,updated_at TEXT,request_json TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO service_jobs VALUES(?,?,?,?,?,?)",
+            ("forward-task-1", "completed", json.dumps(decision, sort_keys=True), created.isoformat(), updated.isoformat(), json.dumps(request)),
+        )
+    artifact = {"artifact_id": "decision-1", "role": "decision", "path": "decision.json", "sha256": digest}
+    evidence_row = {
+        "task_id": "forward-task-1", "decision_artifact_id": "decision-1", "decision_sha256": digest,
+    }
+    declared_at = (created - timedelta(hours=1)).isoformat()
+    assert store._verify_persisted_shadow_decision(
+        row=evidence_row, artifacts_by_id={"decision-1": artifact}, prediction_date=today, declared_at=declared_at,
+        package=package_identity, horizon_sessions=3,
+    ) is True
+    with sqlite3.connect(task_db) as connection:
+        tampered = {**decision, "as_of_date": (today - timedelta(days=1)).isoformat()}
+        connection.execute("UPDATE service_jobs SET result_json=? WHERE task_id=?", (json.dumps(tampered), "forward-task-1"))
+    assert store._verify_persisted_shadow_decision(
+        row=evidence_row, artifacts_by_id={"decision-1": artifact}, prediction_date=today, declared_at=declared_at,
+        package=package_identity, horizon_sessions=3,
+    ) is False
 
 
 def test_failed_computed_economic_gate_cannot_be_published(tmp_path):
