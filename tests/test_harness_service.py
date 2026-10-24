@@ -87,7 +87,7 @@ def _ledger_request():
         "trading_dates": ["2026-01-05", "2026-01-06"],
         "market_bars": [
             {"symbol": "600000", "trade_date": "2026-01-05", "tradestatus": "1", "open": 10, "high": 10, "low": 10, "close": 10, "preclose": 10, "amount": 1000000, "volume": 100000},
-            {"symbol": "600000", "trade_date": "2026-01-06", "tradestatus": "1", "open": 10, "high": 10, "low": 10, "close": 10, "preclose": 10, "amount": 1000000, "volume": 100000},
+            {"symbol": "600000", "trade_date": "2026-01-06", "tradestatus": "1", "open": 10.1, "high": 10.1, "low": 10.1, "close": 10.1, "preclose": 10, "amount": 1000000, "volume": 100000},
         ],
         "orders": [{
             "trade_date": "2026-01-06", "symbol": "600000", "side": "buy", "quantity": 100,
@@ -102,6 +102,7 @@ def _ledger_request():
             "available_at": "2026-01-05T15:00:00+08:00", "horizon_sessions": 3,
             "expected_return": 0.01, "label_status": "pending", "realized_return": None,
         }],
+        "research_cost_cny_by_date": {"2026-01-06": 2.5},
     }
 
 
@@ -203,6 +204,10 @@ def test_execution_ledger_api_persists_immutable_simulation(tmp_path):
         assert saved["result"]["broker_orders_enabled"] is False
         assert saved["result"]["summary"]["all_cash_reconciliations_exact"] is True
         assert saved["result"]["summary"]["all_quantity_reconciliations_exact"] is True
+        day = saved["result"]["daily_nav"][1]
+        assert day["fees_cny"] > 0
+        assert day["slippage_cost_cny"] > 0
+        assert day["research_cost_cny"] == 2.5
         status, repeated = _http(server, "POST", "/api/execution-ledgers", {"ledger_id": "ledger-1", "request": _ledger_request()})
         assert status == 200 and repeated["reused"] is True
         changed = _ledger_request() | {"initial_cash_cny": 9000}

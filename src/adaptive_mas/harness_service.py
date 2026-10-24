@@ -569,6 +569,7 @@ def validate_execution_ledger_request(request: Mapping[str, object]) -> dict[str
         "execution_mode", "trading_dates", "market_bars", "orders", "rule_pack",
         "initial_cash_cny", "initial_lots", "initial_holdings_cny", "corporate_actions",
         "source_artifact_hashes", "prediction_records", "prediction_linkage_mode", "risk_limits",
+        "research_cost_cny_by_date",
     }
     extra = set(request) - allowed
     required = {
@@ -582,7 +583,10 @@ def validate_execution_ledger_request(request: Mapping[str, object]) -> dict[str
         raise ValueError("prediction_linkage_mode must be linked or independent")
     if not isinstance(request.get("trading_dates"), list) or not isinstance(request.get("market_bars"), list) or not isinstance(request.get("orders"), list):
         raise ValueError("trading_dates, market_bars, and orders must be arrays")
-    for key in ("initial_lots", "initial_holdings_cny", "rule_pack", "source_artifact_hashes", "risk_limits"):
+    for key in (
+        "initial_lots", "initial_holdings_cny", "rule_pack", "source_artifact_hashes",
+        "risk_limits", "research_cost_cny_by_date",
+    ):
         value = request.get(key)
         if value is not None and not isinstance(value, Mapping):
             raise ValueError(f"{key} must be an object")
