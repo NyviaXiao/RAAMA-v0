@@ -606,6 +606,7 @@ def create_daily_decision(
         if harness_trace is not None and "research_cost_accounting" in harness_trace:
             harness_trace["decision_cost_accounting"] = {
                 **harness_trace["research_cost_accounting"],
+                "new_api_cost_cny": harness_trace["research_cost_accounting"]["actual_incremental_api_cost_cny"],
                 "estimated_transaction_cost_cny": 0.0,
                 "estimated_total_decision_cost_cny": harness_trace["research_cost_accounting"]["logical_research_cost_cny"],
             }
@@ -873,6 +874,28 @@ def create_daily_decision(
         investment_feedback["research_priority_symbols"] = [
             row["symbol"] for row in manager_report["priority_symbols"]
         ]
+        investment_feedback["risk_research"] = [
+            {
+                "dimension": item.get("dimension"),
+                "status": item.get("status"),
+                "symbol": item.get("symbol"),
+                "question": item.get("question"),
+                "summary": item.get("report", {}).get("summary") if isinstance(item.get("report"), Mapping) else None,
+                "source_evidence_ids": list(item.get("source_evidence_ids", [])),
+                "source_record_ids": list(item.get("report", {}).get("source_record_ids", [])) if isinstance(item.get("report"), Mapping) else [],
+                "findings": [
+                    {
+                        "conclusion": finding.get("conclusion"),
+                        "evidence_ids": list(finding.get("evidence_ids", [])),
+                        "observations": list(finding.get("observations", [])),
+                    }
+                    for finding in item.get("report", {}).get("findings", [])
+                    if isinstance(finding, Mapping)
+                ] if isinstance(item.get("report"), Mapping) else [],
+            }
+            for item in manager_report.get("risk_research", [])
+            if isinstance(item, Mapping)
+        ]
         investment_feedback["risk_review_status"] = hard_risk_outcome["status"]
         investment_feedback["risk_failed_checks"] = hard_risk_outcome["failed_checks"]
         investment_feedback["risk_orders_blocked"] = hard_risk_outcome["orders_blocked"]
@@ -905,6 +928,7 @@ def create_daily_decision(
     if harness_trace is not None and "research_cost_accounting" in harness_trace:
         harness_trace["decision_cost_accounting"] = {
             **harness_trace["research_cost_accounting"],
+            "new_api_cost_cny": harness_trace["research_cost_accounting"]["actual_incremental_api_cost_cny"],
             "estimated_transaction_cost_cny": decision.expected_transaction_cost_cny,
             "estimated_total_decision_cost_cny": (
                 decision.expected_transaction_cost_cny

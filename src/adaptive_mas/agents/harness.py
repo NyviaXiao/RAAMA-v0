@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from typing import Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -2097,6 +2098,294 @@ def _run_local_optional_role(
     }
 
 
+def _run_local_risk_role(
+    dimension: str,
+    symbol: str,
+    question: str,
+    *,
+    research: ResearchData,
+    config: Mapping[str, object],
+    decision_time: datetime,
+    model_risk_context: Mapping[str, object] | None,
+    news_handlers: Mapping[str, object],
+    news_catalog: Mapping[str, dict[str, object]],
+) -> dict[str, object]:
+    """Run bounded, on-host risk evidence research; hard checks remain separate."""
+    rows: list[dict[str, object]] = []
+    tool_trace: list[dict[str, object]] = []
+    scope_note = "Risk research is descriptive evidence only; deterministic hard-risk checks remain authoritative."
+    if dimension == "model":
+        if not isinstance(model_risk_context, Mapping) or model_risk_context.get("status") != "available":
+            return {
+                "status": "unavailable",
+                "reason": "current calibrated model-risk diagnostics are unavailable",
+                "report": None,
+                "tool_trace": [],
+                "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        source_time = str(model_risk_context.get("available_at", ""))
+        period_start = str(model_risk_context.get("period_start", ""))
+        period_end = str(model_risk_context.get("period_end", ""))
+        source_refs = list(model_risk_context.get("source_refs", []))
+        for metric_row in model_risk_context.get("metrics", []):
+            if not isinstance(metric_row, Mapping):
+                continue
+            value = metric_row.get("value")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                continue
+            metric = str(metric_row.get("metric", ""))
+            unit = str(metric_row.get("unit", ""))
+            if not metric or not unit:
+                continue
+            identity = json.dumps(
+                {"context": model_risk_context.get("context_sha256"), "symbol": symbol, "metric": metric},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            evidence_id = "risk-model-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+            rows.append({
+                "evidence_id": evidence_id,
+                "source_record_id": f"model-risk:{model_risk_context.get('context_sha256')}:{symbol}:{metric}",
+                "symbol": symbol,
+                "source_type": "calibrated_model_diagnostic",
+                "dataset": "current_seed_calibration_and_forecast_diagnostic",
+                "published_at": source_time,
+                "available_at": source_time,
+                "fetched_at": source_time,
+                "period_start": period_start,
+                "period_end": period_end,
+                "metric": metric,
+                "value": float(value),
+                "unit": unit,
+                "source_refs_local_only": source_refs,
+                "vintage_verified": True,
+                "reopen_ref": {
+                    "tool": "read_model_risk_context",
+                    "arguments": {"symbol": symbol, "metric": metric},
+                },
+            })
+        if not rows:
+            return {
+                "status": "unavailable",
+                "reason": "model-risk diagnostics contain no finite matured calibration observations",
+                "report": None,
+                "tool_trace": [],
+                "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        evidence_catalog = {str(row["evidence_id"]): row for row in rows}
+        summary = (
+            "Current calibrated forecast error, matured-window coverage, and expert weights were checked "
+            "against this task's frozen model and market inputs. These diagnostics are not a separate hard-risk gate."
+        )
+        tool_trace.append({
+            "tool": "read_model_risk_context",
+            "arguments": {"symbol": symbol, "question": question},
+            "result": {"status": "available", "findings": rows, "context_sha256": model_risk_context.get("context_sha256")},
+        })
+    elif dimension == "event":
+        handler = news_handlers.get("search_public_news_evidence")
+        if not callable(handler):
+            return {
+                "status": "unavailable", "reason": "no local event/news search is configured",
+                "report": None, "tool_trace": [], "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        search_args = {"question": question, "symbol": symbol, "limit": 3}
+        search_result = handler(search_args)
+        tool_trace.append({"tool": "search_public_news_evidence", "arguments": search_args, "result": search_result})
+        if not isinstance(search_result, Mapping) or search_result.get("status") != "available":
+            return {
+                "status": "unavailable",
+                "reason": str(search_result.get("reason", "no eligible local event evidence")) if isinstance(search_result, Mapping) else "invalid event-source result",
+                "report": None,
+                "tool_trace": tool_trace,
+                "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        rows = [
+            dict(news_catalog[str(item["evidence_id"])])
+            for item in search_result.get("findings", [])
+            if isinstance(item, Mapping)
+            and str(item.get("evidence_id", "")) in news_catalog
+            and str(news_catalog[str(item["evidence_id"])].get("symbol")) == symbol
+        ]
+        if not rows:
+            return {
+                "status": "unavailable", "reason": "event search returned no source-bound evidence for this symbol",
+                "report": None, "tool_trace": tool_trace, "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        evidence_catalog = {str(row["evidence_id"]): row for row in rows}
+        summary = "Locally captured event headlines were checked with the fixed on-host text rule; this is not a calibrated event-loss estimate."
+    elif dimension == "industry":
+        raw_sources = config.get("risk_industry_sources", [])
+        if not isinstance(raw_sources, list):
+            raw_sources = []
+        source = next((
+            row for row in raw_sources
+            if isinstance(row, Mapping) and str(row.get("symbol", "")) == symbol
+        ), None)
+        required = ("industry", "member_symbols", "source_title", "source_url", "published_at", "available_at", "fetched_at")
+        if not isinstance(source, Mapping) or any(not source.get(key) for key in required):
+            return {
+                "status": "unavailable",
+                "reason": "no timestamped, sourced industry classification is configured for this symbol",
+                "report": None, "tool_trace": [], "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        try:
+            for key in ("published_at", "available_at", "fetched_at"):
+                if _source_datetime(source[key]) > decision_time:
+                    raise ValueError("industry mapping source is not available at the decision cutoff")
+        except (TypeError, ValueError) as exc:
+            return {
+                "status": "unavailable", "reason": str(exc), "report": None,
+                "tool_trace": [], "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        members = source.get("member_symbols")
+        member_codes = {
+            str(value).split(".")[-1]
+            for value in members
+        } if isinstance(members, list) else set()
+        if not isinstance(members, list) or symbol not in member_codes or len(member_codes) < 2:
+            return {
+                "status": "unavailable", "reason": "industry group requires at least two explicitly classified symbols including the target",
+                "report": None, "tool_trace": [], "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        member_symbols = sorted(member_codes)
+        available_bars = [
+            row for row in research.adjusted_bars
+            if row.get("available_at", row.get("trade_date")) <= decision_time.date()
+            and str(row.get("symbol", "")).split(".")[-1] in member_symbols
+            and row.get("close") is not None
+        ]
+        closes_by_symbol: dict[str, dict[date, float]] = {}
+        for bar in available_bars:
+            closes_by_symbol.setdefault(str(bar["symbol"]).split(".")[-1], {})[bar["trade_date"]] = float(bar["close"])
+        dates = sorted(set.intersection(*(
+            set(closes_by_symbol.get(member, {})) for member in member_symbols
+        ))) if member_symbols and all(member in closes_by_symbol for member in member_symbols) else []
+        lookback = max(20, min(int(config.get("risk_lookback_sessions", 60)), 120))
+        dates = dates[-(lookback + 1):]
+        if len(dates) < 21:
+            return {
+                "status": "unavailable", "reason": "industry group lacks 20 common source market observations",
+                "report": None, "tool_trace": [], "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+        daily_returns = []
+        wealth = 1.0
+        peak = 1.0
+        max_drawdown = 0.0
+        for previous, current_day in zip(dates, dates[1:]):
+            group_return = math.fsum(
+                closes_by_symbol[member][current_day] / closes_by_symbol[member][previous] - 1.0
+                for member in member_symbols
+            ) / len(member_symbols)
+            daily_returns.append(group_return)
+            wealth *= 1.0 + group_return
+            peak = max(peak, wealth)
+            max_drawdown = min(max_drawdown, wealth / peak - 1.0)
+        mean_return = math.fsum(daily_returns) / len(daily_returns)
+        variance = math.fsum((value - mean_return) ** 2 for value in daily_returns) / len(daily_returns)
+        annualized_volatility = math.sqrt(max(variance, 0.0) * 250.0)
+        source_time = str(source["fetched_at"])
+        source_hash = hashlib.sha256(json.dumps(dict(source), sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+        source_refs = [
+            {"title": str(source["source_title"]), "url": str(source["source_url"]), "type": "industry_classification"},
+            *sorted({str(row.get("source_ref", "")) for row in available_bars if row.get("source_ref")}),
+        ]
+        for metric, value, unit in (
+            ("industry_annualized_volatility", annualized_volatility, "annualized_volatility_fraction"),
+            ("industry_max_drawdown", max_drawdown, "drawdown_fraction"),
+        ):
+            identity = f"{source_hash}:{symbol}:{metric}:{dates[0].isoformat()}:{dates[-1].isoformat()}"
+            evidence_id = "risk-industry-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+            rows.append({
+                "evidence_id": evidence_id,
+                "source_record_id": f"industry-risk:{source_hash}:{symbol}:{metric}",
+                "symbol": symbol,
+                "source_type": "industry_market_risk_diagnostic",
+                "dataset": str(source["industry"]),
+                "published_at": str(source["published_at"]),
+                "available_at": str(source["available_at"]),
+                "fetched_at": source_time,
+                "period_start": dates[0].isoformat(),
+                "period_end": dates[-1].isoformat(),
+                "metric": metric,
+                "value": float(value),
+                "unit": unit,
+                "industry": str(source["industry"]),
+                "source_refs_local_only": source_refs,
+                "vintage_verified": True,
+                "reopen_ref": {"tool": "read_industry_risk_context", "arguments": {"symbol": symbol, "industry": str(source["industry"])}},
+            })
+        evidence_catalog = {str(row["evidence_id"]): row for row in rows}
+        summary = f"按来源标注的 {source['industry']} 成分映射计算近 {len(daily_returns)} 个交易日行业等权波动与回撤；不将其视为风险硬门槛。"
+        tool_trace.append({"tool": "read_industry_risk_context", "arguments": {"symbol": symbol, "members": member_symbols}, "result": {"status": "available", "findings": rows, "source_title": source["source_title"], "source_url": source["source_url"]}})
+    else:
+        return {
+            "status": "unavailable", "reason": "risk_dimension must be event, industry, or model",
+            "report": None, "tool_trace": [], "execution_mode": "on_host_deterministic",
+            "raw_source_text_sent_to_model": False,
+        }
+
+    visible_ids = {str(row["evidence_id"]) for row in rows}
+    for row in rows:
+        if str(row.get("symbol")) != symbol:
+            return {
+                "status": "unavailable", "reason": "risk evidence source belongs to a different symbol",
+                "report": None, "tool_trace": tool_trace, "execution_mode": "on_host_deterministic",
+                "raw_source_text_sent_to_model": False,
+            }
+    observation_rows = [
+        {
+            "evidence_id": str(row["evidence_id"]),
+            "field": str(row["metric"]),
+            "value": float(row["value"]),
+            "unit": str(row["unit"]),
+            "report_period": None,
+            "period_start": row.get("period_start"),
+            "period_end": row.get("period_end"),
+        }
+        for row in rows
+        if isinstance(row.get("value"), (int, float)) and isinstance(row.get("metric"), str)
+    ]
+    report_arguments = {
+        "summary": summary,
+        "findings": [{
+            "symbol": symbol,
+            "conclusion": summary,
+            "evidence_ids": sorted(visible_ids),
+            "observations": observation_rows,
+            "uncertainties": [scope_note],
+        }],
+        "unresolved_items": [],
+    }
+    accepted = _accept_report(
+        report_arguments,
+        evidence_catalog,
+        "risk",
+        visible_evidence_ids=visible_ids,
+        decision_time=decision_time,
+    )
+    report = accepted["accepted_report"]
+    report["risk_dimension"] = dimension
+    tool_trace.append({"tool": "submit_report", "arguments": report_arguments, "result": accepted})
+    return {
+        "status": "completed",
+        "report": report,
+        "tool_trace": tool_trace,
+        "evidence_catalog": evidence_catalog,
+        "execution_mode": "on_host_deterministic",
+        "raw_source_text_sent_to_model": False,
+    }
+
+
 def run_research_harness(
     research: ResearchData,
     as_of: date,
@@ -2108,6 +2397,7 @@ def run_research_harness(
     candidate_version_id: str = "seed",
     required_observations: list[dict[str, object]] | None = None,
     procedural_memory: dict[str, object] | None = None,
+    model_risk_context: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Run market and fundamental specialists, then a planning/query/finalize manager."""
     decision_time = datetime.combine(as_of, datetime.min.time()).replace(hour=16, tzinfo=SHANGHAI)
@@ -2246,6 +2536,11 @@ def run_research_harness(
             "source_count": len(attention_catalog),
             "text_sentiment_available": False,
         },
+        "risk": {
+            "status": "on_demand",
+            "available_dimensions": ["event", "industry", "model"],
+            "hard_checks_separate": True,
+        },
     }
 
     def query_specialist_adaptive(arguments: dict[str, object]) -> dict[str, object]:
@@ -2257,12 +2552,15 @@ def run_research_harness(
             manager_state["stop_reason"] = "bounded_query_limit_reached"
             return {"status": "stopped", "reason": manager_state["stop_reason"]}
         role = arguments.get("role")
+        risk_dimension = arguments.get("risk_dimension")
         symbol = arguments.get("symbol")
         question = arguments.get("question")
         target_evidence_id = arguments.get("target_evidence_id")
         target_claim = arguments.get("target_claim")
-        if role not in {"market", "fundamental", "news", "market_attention"}:
-            raise InvalidToolInput("directed role must be market, fundamental, news, or market_attention")
+        if role not in {"market", "fundamental", "news", "market_attention", "risk"}:
+            raise InvalidToolInput("directed role must be market, fundamental, news, market_attention, or risk")
+        if role == "risk" and risk_dimension not in {"event", "industry", "model"}:
+            raise InvalidToolInput("risk actions must select event, industry, or model")
         if not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit():
             raise InvalidToolInput("directed query symbol must be six digits")
         if not isinstance(question, str) or not question.strip() or len(question) > 240:
@@ -2275,6 +2573,7 @@ def run_research_harness(
             raise InvalidToolInput("target evidence must belong to the selected symbol")
         action_identity = _json({
             "role": role,
+            "risk_dimension": risk_dimension if role == "risk" else None,
             "symbol": symbol,
             "question": question.strip().casefold(),
             "target_evidence_id": target_evidence_id,
@@ -2296,7 +2595,21 @@ def run_research_harness(
         role_id = f"{role}_directed_query_{query_number}"
 
         local_result = None
-        if role == "news":
+        if role == "risk":
+            local_result = _run_local_risk_role(
+                str(risk_dimension),
+                symbol,
+                question,
+                research=research,
+                config=settings,
+                decision_time=decision_time,
+                model_risk_context=model_risk_context,
+                news_handlers=news_handlers,
+                news_catalog=news_catalog,
+            )
+            if isinstance(local_result.get("evidence_catalog"), Mapping):
+                evidence_catalog.update(local_result["evidence_catalog"])
+        elif role == "news":
             role_catalog = news_catalog
             local_result = _run_local_optional_role(
                 role, symbol, question, news_handlers, role_catalog, decision_time
@@ -2440,6 +2753,7 @@ def run_research_harness(
                 "question": question,
                 "target_claim": target_claim,
                 "target_evidence_id": target_evidence_id,
+                "risk_dimension": risk_dimension if role == "risk" else None,
                 "execution_mode": query_result.get("execution_mode", "model_assisted"),
                 "raw_source_text_sent_to_model": query_result.get("raw_source_text_sent_to_model", False),
                 "tool_trace": query_result.get("tool_trace", []),
@@ -2474,7 +2788,9 @@ def run_research_harness(
             "question": question,
             "target_claim": target_claim,
             "target_evidence_id": target_evidence_id,
+            "risk_dimension": risk_dimension if role == "risk" else None,
             "newly_cited_evidence_ids": sorted(new_evidence_ids),
+            "report": report,
             "execution_mode": query_result.get("execution_mode", "model_assisted"),
             "raw_source_text_sent_to_model": query_result.get("raw_source_text_sent_to_model", False),
             "tool_trace": [
@@ -2491,6 +2807,13 @@ def run_research_harness(
                 "execution_mode": directed["execution_mode"],
                 "raw_source_text_sent_to_model": directed["raw_source_text_sent_to_model"],
                 "report": report,
+            }
+        if role == "risk":
+            optional_expert_runs["risk"] = {
+                **optional_expert_runs["risk"],
+                "status": "completed",
+                "last_dimension": risk_dimension,
+                "last_report": report,
             }
         return {
             "role": role,
@@ -2574,6 +2897,24 @@ def run_research_harness(
             "manager_stop_code": manager_state.get("stop_reason") or "manager_chose_to_stop",
             "action_count": int(manager_state["query_count"]),
             "research_plan": manager_state["plan"],
+            "risk_research": [
+                {
+                    "dimension": row.get("risk_dimension"),
+                    "status": row.get("status"),
+                    "symbol": row.get("symbol"),
+                    "question": row.get("question"),
+                    "target_claim": row.get("target_claim"),
+                    "target_evidence_id": row.get("target_evidence_id"),
+                    "report": all_reports.get(str(row.get("role_id"))),
+                    "source_evidence_ids": sorted({
+                        str(evidence_id)
+                        for finding in all_reports.get(str(row.get("role_id")), {}).get("findings", [])
+                        for evidence_id in finding.get("evidence_ids", [])
+                    }),
+                }
+                for row in manager_state["directed_queries"]
+                if row.get("role_id", "").startswith("risk_directed_query_")
+            ],
         }
         return {"accepted_report": manager_state["final"], "accepted": True}
 
@@ -2590,7 +2931,8 @@ def run_research_harness(
             "query_specialist",
             "Challenge one cited claim using a selected specialist, then choose another bounded action from its result or finalize.",
             {
-                "role": {"type": "string", "enum": ["market", "fundamental", "news", "market_attention"]},
+                "role": {"type": "string", "enum": ["market", "fundamental", "news", "market_attention", "risk"]},
+                "risk_dimension": {"type": "string", "enum": ["event", "industry", "model"]},
                 "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
                 "question": {"type": "string", "maxLength": 240},
                 "target_evidence_id": {"type": "string"},
@@ -2631,6 +2973,12 @@ def run_research_harness(
         "decision_time": decision_time.isoformat(),
         "public_evidence_mode": (public_snapshot or {}).get("data_mode", "unknown"),
         "available_optional_experts": optional_expert_runs,
+        "risk_research_policy": {
+            "dimensions": ["event", "industry", "model"],
+            "max_actions_shared_with_other_followups": 2,
+            "research_is_advisory": True,
+            "deterministic_hard_checks_remain_authoritative": True,
+        },
         "specialist_handoffs": {
             role: {
                 "summary": report["summary"],

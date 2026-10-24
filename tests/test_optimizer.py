@@ -17,6 +17,7 @@ def _optimize(
     buy_cost=0.001,
     sell_cost=0.001,
     max_changes=None,
+    max_targets=None,
 ):
     symbols = set(expected_returns) | set(current_weights)
     return optimize_portfolio(
@@ -33,6 +34,7 @@ def _optimize(
         buy_cost_rate=buy_cost,
         sell_cost_rate=sell_cost,
         max_change_weights=max_changes,
+        maximum_target_weights=max_targets,
         iterations=600,
     )
 
@@ -158,3 +160,42 @@ def test_smallest_risk_repair_is_used_instead_of_costing_a_full_liquidation():
     assert result.target_weights["000001"] == pytest.approx(0.75, abs=1e-6)
     assert result.annualized_risk == pytest.approx(0.15, abs=1e-6)
     assert result.maximum_one_way_turnover == pytest.approx(0.025, abs=1e-6)
+
+
+def test_current_holding_above_target_cap_is_repaired_before_utility_fallback():
+    result = _optimize(
+        {"600000": 0.16},
+        {"600000": 0.5},
+        volatilities={"600000": 0.1},
+        risk_budget=1.0,
+        turnover=1.0,
+        maximum_symbol_weight=0.8,
+        max_targets={"600000": 0.1},
+    )
+
+    assert result.target_weights["600000"] <= 0.1 + 1e-7
+    assert result.maximum_one_way_turnover == pytest.approx(0.2, abs=1e-6)
+
+
+def test_target_cap_incompatible_with_single_symbol_capacity_fails_closed():
+    with pytest.raises(PortfolioInfeasibleError, match="目标权重上限与单票成交容量"):
+        _optimize(
+            {"600000": 0.16},
+            {"600000": 0.5},
+            risk_budget=1.0,
+            turnover=1.0,
+            max_changes={"600000": 0.1},
+            max_targets={"600000": 0.1},
+        )
+
+
+def test_target_cap_incompatible_with_one_way_turnover_fails_closed():
+    with pytest.raises(PortfolioInfeasibleError, match="最小换手超过本次预算"):
+        _optimize(
+            {"600000": 0.16},
+            {"600000": 0.5},
+            risk_budget=1.0,
+            turnover=0.19,
+            max_changes={"600000": 0.5},
+            max_targets={"600000": 0.1},
+        )

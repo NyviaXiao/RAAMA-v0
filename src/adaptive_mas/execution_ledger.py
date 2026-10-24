@@ -436,6 +436,7 @@ def simulate_execution_ledger(
         day_sell_proceeds = _ZERO
         day_buy_gross = _ZERO
         day_fees = _ZERO
+        day_slippage = _ZERO
         day_dividend_payments = _ZERO
         day_turnover = _ZERO
         day_blocked = 0
@@ -730,6 +731,7 @@ def simulate_execution_ledger(
             capacity_remaining[symbol] = max(_ZERO, capacity_remaining[symbol] - fill_notional)
             day_turnover += fill_notional
             day_fees += fee_total
+            day_slippage += slippage_cost
             total_fees += fee_total
             total_slippage += slippage_cost
             total_traded += fill_notional
@@ -817,6 +819,9 @@ def simulate_execution_ledger(
             "market_value_cny": float(sum(end_values.values(), _ZERO)),
             "nav_cny": float(nav),
             "daily_return": float(nav / (Decimal(str(daily_nav[-1]["nav_cny"])) if daily_nav else initial_value) - 1),
+            "fees_cny": float(day_fees),
+            "slippage_cost_cny": float(day_slippage),
+            "research_cost_cny": float(day_research_cost),
             "risk_checks_failed": day_blocked,
             "position_quantities": {symbol: float(quantity(symbol)) for symbol in sorted(symbols) if quantity(symbol) > 0},
             "position_sellable_quantities": {

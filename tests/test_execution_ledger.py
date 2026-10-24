@@ -116,12 +116,40 @@ def test_research_cost_is_debited_once_into_cash_nav_and_reconciliation():
     )
     assert result["daily_nav"][0]["nav_cny"] == 10_000
     assert result["daily_nav"][1]["nav_cny"] == 9_987.66
+    assert result["daily_nav"][1]["fees_cny"] == 0.0
+    assert result["daily_nav"][1]["slippage_cost_cny"] == 0.0
+    assert result["daily_nav"][1]["research_cost_cny"] == 12.34
     assert result["reconciliation"][1]["research_cost_cny"] == 12.34
     assert result["reconciliation"][1]["cash_expected_close_cny"] == 9_987.66
     assert result["reconciliation"][1]["cash_residual_cny"] == 0
     assert result["summary"]["total_research_cost_cny"] == 12.34
     assert result["summary"]["all_cash_reconciliations_exact"] is True
     assert result["summary"]["all_nav_reconciliations_exact"] is True
+
+
+def test_daily_nav_reports_transaction_fees_slippage_and_research_cost_separately():
+    result = simulate_execution_ledger(
+        execution_mode="quantity",
+        trading_dates=DAYS[:2],
+        market_bars=[
+            _bar(DAYS[0]),
+            _bar(DAYS[1], open_price=10.1, close_price=10.1, preclose=10),
+        ],
+        orders=[{
+            "trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100,
+            **_linked_fields(),
+        }],
+        rule_pack=_rules(),
+        initial_cash_cny=10_000,
+        prediction_records=[_prediction()],
+        research_cost_cny_by_date={DAYS[1].isoformat(): 2.5},
+    )
+    day = result["daily_nav"][1]
+    reconciliation = result["reconciliation"][1]
+    assert day["fees_cny"] == reconciliation["fees_cny"] > 0
+    assert day["slippage_cost_cny"] > 0
+    assert day["research_cost_cny"] == reconciliation["research_cost_cny"] == 2.5
+    assert day["nav_cny"] == reconciliation["nav_cny"]
 
 
 def test_research_cost_must_fit_the_calendar_and_available_cash():

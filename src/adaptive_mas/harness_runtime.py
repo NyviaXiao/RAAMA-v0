@@ -122,6 +122,28 @@ def create_harness_daily_decision(
     calibrated_forecast = research_diagnostic["prediction_decisions"][-1]
     if calibrated_forecast.get("prediction_date") != as_of.isoformat():
         raise ValueError(f"no calibrated forecast was produced for {as_of.isoformat()}")
+    forecast_errors = calibrated_forecast.get("forecast_errors_by_method", {})
+    model_risk_metrics = [
+        {"metric": f"matured_forecast_error_{method}", "value": float(value), "unit": "return_fraction"}
+        for method, value in forecast_errors.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+    ] if isinstance(forecast_errors, Mapping) else []
+    model_risk_core: dict[str, object] = {
+        "status": "available" if model_risk_metrics else "unavailable",
+        "available_at": datetime.combine(as_of, datetime.min.time()).replace(hour=16, tzinfo=SHANGHAI).isoformat(),
+        "period_start": training_seed_trained_through.isoformat(),
+        "period_end": as_of.isoformat(),
+        "metrics": model_risk_metrics,
+        "source_refs": [
+            f"training-seed-cutoff:{training_seed_trained_through.isoformat()}",
+            f"calibrated-forecast:{as_of.isoformat()}",
+            f"market-snapshot:{_market_snapshot_identity(research, as_of)['sha256']}",
+        ],
+    }
+    model_risk_context: dict[str, object] = {
+        **model_risk_core,
+        "context_sha256": _stable_hash(model_risk_core),
+    }
     decision_versions = {
         **dict(versions or {}),
         "training_seed_trained_through": training_seed_trained_through.isoformat(),
@@ -292,6 +314,7 @@ def create_harness_daily_decision(
         "training_seed_provenance": training_seed_provenance,
         "versions": dict(versions or {}),
         "market_snapshot_sha256": market_snapshot_identity["sha256"],
+        "model_risk_context_sha256": model_risk_context["context_sha256"],
         "public_snapshot_sha256": public_snapshot_sha256,
         "precomputed_research_artifact_sha256": precomputed_research_artifact_sha256,
         "source_manifest_sha256": source_manifest_sha256,
@@ -321,6 +344,7 @@ def create_harness_daily_decision(
         "precomputed_research_artifact_sha256": precomputed_research_artifact_sha256,
         "source_manifest_sha256": source_manifest_sha256,
         "market_snapshot": market_snapshot_identity,
+        "model_risk_context_sha256": model_risk_context["context_sha256"],
         "provider_identity": provider_identity,
         "implementation_identity": implementation_identity,
         "runtime_package_identity": package_identity,
@@ -386,6 +410,8 @@ def create_harness_daily_decision(
             implementation_identity=implementation_identity,
             market_identity=market_snapshot_identity,
             client=active_client,
+            config=config,
+            model_risk_context_sha256=str(model_risk_context["context_sha256"]),
         )
         if (
             precomputed_research_result is not None
@@ -489,6 +515,7 @@ def create_harness_daily_decision(
                 config,
                 candidate_version_id=version_id,
                 procedural_memory=version.get("procedural_memory"),
+                model_risk_context=model_risk_context,
             )
             if state_store is not None:
                 task_calls = [row for row in budget.calls if row.get("task_id") == task_identifier]
@@ -537,6 +564,7 @@ def create_harness_daily_decision(
                 model=active_client.model,
                 endpoint=active_client.endpoint,
                 source_snapshot=public_snapshot,
+                model_risk_context_sha256=str(model_risk_context["context_sha256"]),
             )
         except Exception as exc:
             if state_store is not None:

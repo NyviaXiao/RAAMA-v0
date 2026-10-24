@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 raama-harness = "adaptive_mas.harness_service:main"
+raama-optimizer-verify = "adaptive_mas.optimizer_reference:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -25,6 +26,7 @@ observability = [
     "opentelemetry-sdk>=1.25",
     "opentelemetry-exporter-otlp-proto-http>=1.25",
 ]
+verification = ["scipy>=1.14,<2"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

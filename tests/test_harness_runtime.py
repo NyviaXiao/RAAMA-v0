@@ -24,6 +24,27 @@ def _runtime_inputs(as_of: date):
     )
 
 
+def test_market_snapshot_identity_is_stable_across_relative_and_absolute_data_paths():
+    as_of = date(2026, 3, 6)
+    day = date(2026, 3, 5)
+    absolute = ResearchData(
+        [day, as_of],
+        [{"symbol": "sh.600000", "trade_date": day, "available_at": day, "close": 10.0, "source_ref": "C:\\workspace\\market\\daily-adjusted\\sh.600000.csv"}],
+        [{"symbol": "sh.600000", "trade_date": day, "available_at": day, "close": 10.0, "source_ref": "C:\\workspace\\market\\daily-unadjusted\\sh.600000.csv"}],
+        [{"symbol": "sh.000300", "trade_date": day, "available_at": day, "close": 4000.0, "source_ref": "C:\\workspace\\market\\index\\sh.000300.csv"}],
+        [MembershipSnapshot(day, day, frozenset({"sh.600000"}), "C:\\workspace\\market\\membership\\asof-2026-03-05.csv")],
+    )
+    relative = ResearchData(
+        [day, as_of],
+        [{"symbol": "sh.600000", "trade_date": day, "available_at": day, "close": 10.0, "source_ref": "market/daily-adjusted/sh.600000.csv"}],
+        [{"symbol": "sh.600000", "trade_date": day, "available_at": day, "close": 10.0, "source_ref": "market/daily-unadjusted/sh.600000.csv"}],
+        [{"symbol": "sh.000300", "trade_date": day, "available_at": day, "close": 4000.0, "source_ref": "market/index/sh.000300.csv"}],
+        [MembershipSnapshot(day, day, frozenset({"sh.600000"}), "market/membership/asof-2026-03-05.csv")],
+    )
+
+    assert harness_runtime._market_snapshot_identity(absolute, as_of) == harness_runtime._market_snapshot_identity(relative, as_of)
+
+
 class _MockProvider:
     model = "fixture-model"
     endpoint = "https://fixture.invalid"

@@ -27,9 +27,11 @@ def seed_candidate() -> dict[str, str]:
         "manager_prompt": (
             "You are the research manager. First state a concise goal with plan_research. You may "
             "make at most two query_specialist actions, each targeting one cited claim, symbol, and "
-            "question. After each result, choose the next action from the new evidence or stop and "
+            "question. A risk action must select event, industry, or model risk; use only locally "
+            "available, cited evidence and report unavailable dimensions explicitly. Its findings "
+            "are research context and never replace deterministic hard-risk checks. After each result, choose the next action from the new evidence or stop and "
             "finalize; never repeat an action and stop when no new cited evidence is found. "
-            "Choose only among market, fundamental, news, and market_attention roles. News uses "
+            "Choose only among market, fundamental, news, market_attention, and risk roles. News uses "
             "on-host fixed text-rule output without sending raw news text to a model; attention is a "
             "source-reported index only and is not discussion-text sentiment. If a channel is unavailable, "
             "report that honestly. Include an evidence-based stopping reason in no_query_reason. Finish "

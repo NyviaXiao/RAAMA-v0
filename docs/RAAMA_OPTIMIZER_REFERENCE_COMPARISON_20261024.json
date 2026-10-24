@@ -1,0 +1,372 @@
+{
+  "boundary_cases": {
+    "current_holding_above_target_cap": {
+      "case_id": "synthetic-current-holding-above-target-cap-v1",
+      "fixture_label": "SYNTHETIC VERIFICATION FIXTURE ONLY",
+      "production": {
+        "feasibility": {
+          "annualized_risk": 0.010000000000000002,
+          "cash_weight_after_costs": 0.8996,
+          "constraint_violations": {
+            "annualized_risk": 0.0,
+            "cash": 0.0,
+            "lower_bounds": 0.0,
+            "one_way_turnover": 0.0,
+            "upper_bounds": 0.0
+          },
+          "feasible": true,
+          "maximum_violation": 0.0,
+          "one_way_turnover": 0.2,
+          "transaction_cost_weight": 0.0004
+        },
+        "status": "feasible",
+        "target_weights": {
+          "600000": 0.1
+        }
+      },
+      "reference": {
+        "feasibility": {
+          "annualized_risk": 0.009999999999999998,
+          "cash_weight_after_costs": 0.8996000000000001,
+          "constraint_violations": {
+            "annualized_risk": 0.0,
+            "cash": 0.0,
+            "lower_bounds": 0.0,
+            "one_way_turnover": 0.0,
+            "upper_bounds": 0.0
+          },
+          "feasible": true,
+          "maximum_violation": 0.0,
+          "one_way_turnover": 0.2,
+          "transaction_cost_weight": 0.0004
+        },
+        "formulation": "concave quadratic utility maximization with convex risk, turnover, cash, target and capacity constraints; buy/sell auxiliaries linearize asymmetric costs",
+        "function_evaluations": 2,
+        "iterations": 2,
+        "message": "Optimization terminated successfully",
+        "objective_value": 0.015599999999999998,
+        "optimality_note": "Numeric reference from a mature general-purpose solver; not a formal certificate of global optimality.",
+        "solver": "scipy.optimize.minimize(method='SLSQP')",
+        "solver_version": "1.18.1",
+        "status": "optimal_numeric_reference",
+        "success": true,
+        "target_weights": {
+          "600000": 0.09999999999999998
+        }
+      }
+    },
+    "target_cap_incompatible_with_capacity": {
+      "case_id": "synthetic-target-cap-capacity-conflict-v1",
+      "fixture_label": "SYNTHETIC VERIFICATION FIXTURE ONLY",
+      "production": {
+        "reason": "目标权重上限与单票成交容量无法同时满足",
+        "status": "fail_closed"
+      },
+      "reference": {
+        "feasibility": {
+          "feasible": false,
+          "reason": "target cap cannot be reached within the declared per-name capacity"
+        },
+        "message": "target cap cannot be reached within the declared per-name capacity",
+        "optimality_note": "The declared per-name target and capacity intervals do not intersect.",
+        "solver": "independent target/capacity bound check",
+        "status": "infeasible_case",
+        "success": false
+      }
+    },
+    "target_cap_incompatible_with_turnover": {
+      "case_id": "synthetic-target-cap-turnover-conflict-v1",
+      "fixture_label": "SYNTHETIC VERIFICATION FIXTURE ONLY",
+      "production": {
+        "reason": "恢复风险或目标权重所需的最小换手超过本次预算",
+        "status": "fail_closed"
+      },
+      "reference": {
+        "feasibility": {
+          "feasible": false,
+          "reason": "turnover budget is below the box-distance lower bound"
+        },
+        "maximum_one_way_turnover": 0.19,
+        "message": "minimum one-way turnover to reach the target/capacity box exceeds the declared budget",
+        "minimum_required_one_way_turnover": 0.2,
+        "optimality_note": "A stricter risk or cash constraint cannot make this box-distance lower bound smaller.",
+        "solver": "independent minimum-turnover bound check",
+        "status": "infeasible_case",
+        "success": false
+      }
+    }
+  },
+  "case": {
+    "annualized_volatilities": {
+      "000001": 0.23,
+      "000002": 0.19,
+      "600000": 0.28,
+      "600001": 0.14
+    },
+    "buy_cost_rate": 0.0011,
+    "case_id": "synthetic-constrained-allocation-v1",
+    "current_weights": {
+      "000001": 0.15,
+      "000002": 0.1,
+      "600000": 0.2,
+      "600001": 0.05
+    },
+    "expected_returns": {
+      "000001": 0.12,
+      "000002": 0.075,
+      "600000": 0.16,
+      "600001": 0.035
+    },
+    "factor_betas": {
+      "000001": 1.0,
+      "000002": 0.72,
+      "600000": 1.25,
+      "600001": 0.35
+    },
+    "fixture_label": "SYNTHETIC VERIFICATION FIXTURE ONLY",
+    "forecast_error_multiplier": 0.5,
+    "forecast_errors": {
+      "000001": 0.02,
+      "000002": 0.018,
+      "600000": 0.025,
+      "600001": 0.015
+    },
+    "horizon_sessions": 5,
+    "market_annualized_volatility": 0.17,
+    "max_change_weights": {
+      "000001": 0.1,
+      "000002": 0.08,
+      "600000": 0.09,
+      "600001": 0.06
+    },
+    "maximum_one_way_turnover": 0.12,
+    "maximum_symbol_weight": 0.32,
+    "maximum_target_weights": {
+      "000001": 0.26,
+      "000002": 0.22,
+      "600000": 0.28,
+      "600001": 0.12
+    },
+    "nav_cny": 1000000.0,
+    "risk_aversion": 8.0,
+    "risk_budget_annualized": 0.115,
+    "sell_cost_rate": 0.0016
+  },
+  "case_id": "synthetic-constrained-allocation-v1",
+  "convergence": [
+    {
+      "feasibility": {
+        "annualized_risk": 0.11500000000000002,
+        "cash_weight_after_costs": 0.38239795619368333,
+        "constraint_violations": {
+          "annualized_risk": 1.3877787807814457e-17,
+          "cash": 0.0,
+          "lower_bounds": 0.0,
+          "one_way_turnover": 0.0,
+          "upper_bounds": 0.0
+        },
+        "feasible": true,
+        "maximum_violation": 1.3877787807814457e-17,
+        "one_way_turnover": 0.05873641185012321,
+        "transaction_cost_weight": 0.0001292201060702711
+      },
+      "iteration_budget": 1,
+      "objective_gap_cny_at_case_nav": 612.0194872650669,
+      "objective_gap_to_reference": 0.0006120194872650669,
+      "objective_value": 0.06392514204298816,
+      "target_l1_distance_to_reference": 0.1789257351923042,
+      "target_weights": {
+        "000001": 0.18777763734974517,
+        "000002": 0.13022210987979613,
+        "600000": 0.23022210987979613,
+        "600001": 0.069250966590909
+      }
+    },
+    {
+      "feasibility": {
+        "annualized_risk": 0.11500000000000002,
+        "cash_weight_after_costs": 0.3802535284193812,
+        "constraint_violations": {
+          "annualized_risk": 1.3877787807814457e-17,
+          "cash": 0.0,
+          "lower_bounds": 0.0,
+          "one_way_turnover": 0.0,
+          "upper_bounds": 0.0
+        },
+        "feasible": true,
+        "maximum_violation": 1.3877787807814457e-17,
+        "one_way_turnover": 0.05980744759795165,
+        "transaction_cost_weight": 0.00013157638471549362
+      },
+      "iteration_budget": 5,
+      "objective_gap_cny_at_case_nav": 638.7665581743252,
+      "objective_gap_to_reference": 0.0006387665581743251,
+      "objective_value": 0.0638983949720789,
+      "target_l1_distance_to_reference": 0.18250054405165245,
+      "target_weights": {
+        "000001": 0.1873796547487198,
+        "000002": 0.12990372379897583,
+        "600000": 0.22990372379897583,
+        "600001": 0.07242779284923187
+      }
+    },
+    {
+      "feasibility": {
+        "annualized_risk": 0.11500000000000002,
+        "cash_weight_after_costs": 0.3802535284193812,
+        "constraint_violations": {
+          "annualized_risk": 1.3877787807814457e-17,
+          "cash": 0.0,
+          "lower_bounds": 0.0,
+          "one_way_turnover": 0.0,
+          "upper_bounds": 0.0
+        },
+        "feasible": true,
+        "maximum_violation": 1.3877787807814457e-17,
+        "one_way_turnover": 0.05980744759795165,
+        "transaction_cost_weight": 0.00013157638471549362
+      },
+      "iteration_budget": 20,
+      "objective_gap_cny_at_case_nav": 638.7665581743252,
+      "objective_gap_to_reference": 0.0006387665581743251,
+      "objective_value": 0.0638983949720789,
+      "target_l1_distance_to_reference": 0.18250054405165245,
+      "target_weights": {
+        "000001": 0.1873796547487198,
+        "000002": 0.12990372379897583,
+        "600000": 0.22990372379897583,
+        "600001": 0.07242779284923187
+      }
+    },
+    {
+      "feasibility": {
+        "annualized_risk": 0.11500000000000002,
+        "cash_weight_after_costs": 0.3802535284193812,
+        "constraint_violations": {
+          "annualized_risk": 1.3877787807814457e-17,
+          "cash": 0.0,
+          "lower_bounds": 0.0,
+          "one_way_turnover": 0.0,
+          "upper_bounds": 0.0
+        },
+        "feasible": true,
+        "maximum_violation": 1.3877787807814457e-17,
+        "one_way_turnover": 0.05980744759795165,
+        "transaction_cost_weight": 0.00013157638471549362
+      },
+      "iteration_budget": 100,
+      "objective_gap_cny_at_case_nav": 638.7665581743252,
+      "objective_gap_to_reference": 0.0006387665581743251,
+      "objective_value": 0.0638983949720789,
+      "target_l1_distance_to_reference": 0.18250054405165245,
+      "target_weights": {
+        "000001": 0.1873796547487198,
+        "000002": 0.12990372379897583,
+        "600000": 0.22990372379897583,
+        "600001": 0.07242779284923187
+      }
+    },
+    {
+      "feasibility": {
+        "annualized_risk": 0.11500000000000002,
+        "cash_weight_after_costs": 0.3802535284193812,
+        "constraint_violations": {
+          "annualized_risk": 1.3877787807814457e-17,
+          "cash": 0.0,
+          "lower_bounds": 0.0,
+          "one_way_turnover": 0.0,
+          "upper_bounds": 0.0
+        },
+        "feasible": true,
+        "maximum_violation": 1.3877787807814457e-17,
+        "one_way_turnover": 0.05980744759795165,
+        "transaction_cost_weight": 0.00013157638471549362
+      },
+      "iteration_budget": 400,
+      "objective_gap_cny_at_case_nav": 638.7665581743252,
+      "objective_gap_to_reference": 0.0006387665581743251,
+      "objective_value": 0.0638983949720789,
+      "target_l1_distance_to_reference": 0.18250054405165245,
+      "target_weights": {
+        "000001": 0.1873796547487198,
+        "000002": 0.12990372379897583,
+        "600000": 0.22990372379897583,
+        "600001": 0.07242779284923187
+      }
+    },
+    {
+      "feasibility": {
+        "annualized_risk": 0.11500000000000002,
+        "cash_weight_after_costs": 0.3802535284193812,
+        "constraint_violations": {
+          "annualized_risk": 1.3877787807814457e-17,
+          "cash": 0.0,
+          "lower_bounds": 0.0,
+          "one_way_turnover": 0.0,
+          "upper_bounds": 0.0
+        },
+        "feasible": true,
+        "maximum_violation": 1.3877787807814457e-17,
+        "one_way_turnover": 0.05980744759795165,
+        "transaction_cost_weight": 0.00013157638471549362
+      },
+      "iteration_budget": 1200,
+      "objective_gap_cny_at_case_nav": 638.7665581743252,
+      "objective_gap_to_reference": 0.0006387665581743251,
+      "objective_value": 0.0638983949720789,
+      "target_l1_distance_to_reference": 0.18250054405165245,
+      "target_weights": {
+        "000001": 0.1873796547487198,
+        "000002": 0.12990372379897583,
+        "600000": 0.22990372379897583,
+        "600001": 0.07242779284923187
+      }
+    }
+  ],
+  "final_comparison": {
+    "iteration_budget": 1200,
+    "objective_gap_cny_at_case_nav": 638.7665581743252,
+    "objective_gap_to_reference": 0.0006387665581743251,
+    "production_feasible": true,
+    "reference_feasible": true,
+    "target_l1_distance_to_reference": 0.18250054405165245
+  },
+  "fixture_label": "SYNTHETIC VERIFICATION FIXTURE ONLY",
+  "generated_at_utc": "2026-10-24T08:23:31+00:00",
+  "interpretation": "This synthetic case measures numerical objective gap and feasibility only. A feasible production result is not represented as optimal; real market outcomes and strategy value are outside this comparison.",
+  "production_solver": "adaptive_mas.portfolio.optimizer.optimize_portfolio (proximal-gradient with constraint repair)",
+  "reference": {
+    "feasibility": {
+      "annualized_risk": 0.11500000000000478,
+      "cash_weight_after_costs": 0.4595493991022971,
+      "constraint_violations": {
+        "annualized_risk": 4.773959005888173e-15,
+        "cash": 0.0,
+        "lower_bounds": 0.0,
+        "one_way_turnover": 0.0,
+        "upper_bounds": 0.0
+      },
+      "feasible": true,
+      "maximum_violation": 4.773959005888173e-15,
+      "one_way_turnover": 0.0987262029755702,
+      "transaction_cost_weight": 0.00025651222586608026
+    },
+    "formulation": "concave quadratic utility maximization with convex risk, turnover, cash, target and capacity constraints; buy/sell auxiliaries linearize asymmetric costs",
+    "function_evaluations": 19,
+    "iterations": 18,
+    "message": "Optimization terminated successfully",
+    "objective_value": 0.06453716153025323,
+    "optimality_note": "Numeric reference from a mature general-purpose solver; not a formal certificate of global optimality.",
+    "solver": "scipy.optimize.minimize(method='SLSQP')",
+    "solver_version": "1.18.1",
+    "status": "optimal_numeric_reference",
+    "success": true,
+    "target_weights": {
+      "000001": 0.2136061533895509,
+      "000002": 0.0713708413603481,
+      "600000": 0.2552170939219377,
+      "600001": 1.3995870484196429e-16
+    }
+  },
+  "schema_version": "adaptive-mas.optimizer-reference-comparison.v1"
+}

@@ -107,6 +107,9 @@ def optimize_portfolio(
         maximum_target = float((maximum_target_weights or {}).get(symbol, maximum_symbol_weight))
         if not math.isfinite(maximum_target) or maximum_target < 0:
             raise ValueError(f"单票目标权重上限无效：{symbol} {maximum_target}")
+        maximum_change = float((max_change_weights or {}).get(symbol, 1.0))
+        if not math.isfinite(maximum_change) or maximum_change < 0:
+            raise ValueError(f"单票成交容量无效：{symbol} {maximum_change}")
 
     current = {symbol: float(current_weights.get(symbol, 0.0)) for symbol in symbols}
     if math.fsum(current.values()) > 1 + 1e-8:
@@ -142,7 +145,8 @@ def optimize_portfolio(
         )
         for symbol in symbols
     }
-    lower = {symbol: min(lower[symbol], upper[symbol]) for symbol in symbols}
+    if any(lower[symbol] > upper[symbol] + 1e-10 for symbol in symbols):
+        raise PortfolioInfeasibleError("目标权重上限与单票成交容量无法同时满足")
     if math.fsum(lower.values()) > 1 + 1e-10:
         raise PortfolioInfeasibleError("最低持仓约束下现金将为负")
 
@@ -203,20 +207,27 @@ def optimize_portfolio(
         return gross_less_error - transaction_cost_of(weights) - risk_cost
 
     current_risk = risk_of(current)
-    current_feasible = (
-        current_risk <= risk_budget_annualized + 1e-10
-        and all(current[symbol] <= maximum_symbol_weight + 1e-10 for symbol in symbols)
-    )
+    def within_position_bounds(weights: dict[str, float]) -> bool:
+        return all(
+            lower[symbol] - 1e-10 <= weights[symbol] <= upper[symbol] + 1e-10
+            for symbol in symbols
+        )
+
+    def base_feasible(weights: dict[str, float]) -> bool:
+        return (
+            within_position_bounds(weights)
+            and cash_used(weights) <= 1.0 + 1e-10
+            and risk_of(weights) <= risk_budget_annualized + 1e-10
+        )
+
+    current_feasible = base_feasible(current)
 
     de_risk_start = dict(current)
     if not current_feasible:
         maximum_sale = dict(lower)
-        if risk_of(maximum_sale) > risk_budget_annualized + 1e-10 or any(
-            maximum_sale[symbol] > maximum_symbol_weight + 1e-10
-            for symbol in symbols
-        ):
+        if not base_feasible(maximum_sale):
             raise PortfolioInfeasibleError(
-                "可成交减仓上限不足以恢复风险或单票约束"
+                "可成交减仓上限不足以恢复风险、目标权重或现金约束"
             )
         previous_scale = 0.0
         feasible_scale = None
@@ -227,10 +238,7 @@ def optimize_portfolio(
                 + scale * (maximum_sale[symbol] - current[symbol])
                 for symbol in symbols
             }
-            if risk_of(trial) <= risk_budget_annualized and all(
-                trial[symbol] <= maximum_symbol_weight + 1e-10
-                for symbol in symbols
-            ):
+            if base_feasible(trial):
                 feasible_scale = scale
                 break
             previous_scale = scale
@@ -244,10 +252,7 @@ def optimize_portfolio(
                 + scale * (maximum_sale[symbol] - current[symbol])
                 for symbol in symbols
             }
-            if risk_of(trial) <= risk_budget_annualized and all(
-                trial[symbol] <= maximum_symbol_weight + 1e-10
-                for symbol in symbols
-            ):
+            if base_feasible(trial):
                 right = scale
             else:
                 left = scale
@@ -261,28 +266,45 @@ def optimize_portfolio(
         ) / 2
         if required_turnover > maximum_one_way_turnover + 1e-8:
             raise PortfolioInfeasibleError(
-                "恢复风险或单票上限所需的最小换手超过本次预算"
+                "恢复风险或目标权重所需的最小换手超过本次预算"
             )
 
     def constrain(weights: dict[str, float]) -> dict[str, float]:
         constrained = project_capped_simplex(weights)
         traded = math.fsum(abs(constrained[symbol] - current[symbol]) for symbol in symbols) / 2
         if traded > maximum_one_way_turnover:
-            scale = maximum_one_way_turnover / traded if traded else 1.0
+            anchor = current if current_feasible else de_risk_start
+            anchor_turnover = math.fsum(abs(anchor[symbol] - current[symbol]) for symbol in symbols) / 2
+            if anchor_turnover > maximum_one_way_turnover + 1e-10:
+                raise PortfolioInfeasibleError("目标权重或风险修复所需的最小换手超过本次预算")
+            left, right = 0.0, 1.0
+            for _ in range(60):
+                scale = (left + right) / 2
+                trial = {
+                    symbol: anchor[symbol]
+                    + scale * (constrained[symbol] - anchor[symbol])
+                    for symbol in symbols
+                }
+                trial_turnover = math.fsum(abs(trial[symbol] - current[symbol]) for symbol in symbols) / 2
+                if trial_turnover <= maximum_one_way_turnover:
+                    left = scale
+                else:
+                    right = scale
             constrained = {
-                symbol: current[symbol]
-                + scale * (constrained[symbol] - current[symbol])
+                symbol: anchor[symbol]
+                + left * (constrained[symbol] - anchor[symbol])
                 for symbol in symbols
             }
         risk = risk_of(constrained)
         if risk > risk_budget_annualized:
+            anchor = current if current_feasible else de_risk_start
             if current_feasible:
                 left, right = 0.0, 1.0
                 for _ in range(60):
                     scale = (left + right) / 2
                     trial = {
-                        symbol: current[symbol]
-                        + scale * (constrained[symbol] - current[symbol])
+                        symbol: anchor[symbol]
+                        + scale * (constrained[symbol] - anchor[symbol])
                         for symbol in symbols
                     }
                     if risk_of(trial) <= risk_budget_annualized:
@@ -290,8 +312,8 @@ def optimize_portfolio(
                     else:
                         right = scale
                 constrained = {
-                    symbol: current[symbol]
-                    + left * (constrained[symbol] - current[symbol])
+                    symbol: anchor[symbol]
+                    + left * (constrained[symbol] - anchor[symbol])
                     for symbol in symbols
                 }
             else:
@@ -378,10 +400,12 @@ def optimize_portfolio(
         raise PortfolioInfeasibleError("目标权重超过本次单向换手预算")
     if annualized_risk > risk_budget_annualized + 1e-7:
         raise PortfolioInfeasibleError("风险预算与现金/交易约束无法同时满足")
-    if math.fsum(weights.values()) > 1 + 1e-7:
-        raise PortfolioInfeasibleError("组合求解结果违反现金非负约束")
-    if any(weight > maximum_symbol_weight + 1e-7 for weight in weights.values()):
-        raise PortfolioInfeasibleError("组合求解结果违反单票集中度约束")
+    if cash_used(weights) > 1 + 1e-7:
+        raise PortfolioInfeasibleError("组合求解结果违反含交易成本的现金非负约束")
+    if any(weight < lower[symbol] - 1e-7 for symbol, weight in weights.items()):
+        raise PortfolioInfeasibleError("组合求解结果违反单票成交容量下限")
+    if any(weight > upper[symbol] + 1e-7 for symbol, weight in weights.items()):
+        raise PortfolioInfeasibleError("组合求解结果违反单票目标或集中度上限")
     if any(
         abs(weights[symbol] - current[symbol])
         > float(max_changes.get(symbol, 1.0)) + 1e-7
@@ -393,6 +417,9 @@ def optimize_portfolio(
         weights = dict(current)
         turnover = 0.0
         annualized_risk = current_risk
+
+    if not base_feasible(weights):
+        raise PortfolioInfeasibleError("组合求解结果违反完整的风险、持仓或现金约束")
 
     gross = math.fsum(
         weights[symbol] * float(expected_returns.get(symbol, 0.0))

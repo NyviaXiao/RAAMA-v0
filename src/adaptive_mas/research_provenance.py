@@ -111,10 +111,23 @@ def research_cost_summary(task_usage: Mapping[str, object]) -> dict[str, object]
 
 
 def market_snapshot_identity(research: object, as_of: date) -> dict[str, object]:
+    def path_stable_row(row: Mapping[str, object]) -> dict[str, object]:
+        normalized = dict(row)
+        source_ref = normalized.get("source_ref")
+        if isinstance(source_ref, str):
+            normalized["source_ref"] = source_ref.replace("\\", "/").rsplit("/", 1)[-1]
+        return normalized
+
     trading_dates = tuple(day for day in research.trading_dates if day <= as_of)
-    adjusted_bars = tuple(row for row in research.adjusted_bars if row["available_at"] <= as_of)
-    execution_bars = tuple(row for row in research.execution_bars if row["available_at"] <= as_of)
-    index_bars = tuple(row for row in research.index_bars if row["available_at"] <= as_of)
+    adjusted_bars = tuple(
+        path_stable_row(row) for row in research.adjusted_bars if row["available_at"] <= as_of
+    )
+    execution_bars = tuple(
+        path_stable_row(row) for row in research.execution_bars if row["available_at"] <= as_of
+    )
+    index_bars = tuple(
+        path_stable_row(row) for row in research.index_bars if row["available_at"] <= as_of
+    )
     memberships = research.membership_snapshots
     members = research.membership_at(as_of) if memberships else frozenset()
     applicable_memberships = [
@@ -122,7 +135,7 @@ def market_snapshot_identity(research: object, as_of: date) -> dict[str, object]
             "event_time": item.event_time.isoformat(),
             "available_at": item.available_at.isoformat(),
             "members": sorted(item.members),
-            "source_ref": item.source_ref,
+            "source_ref": path_stable_row({"source_ref": item.source_ref})["source_ref"],
         }
         for item in memberships
         if item.available_at <= as_of
@@ -159,6 +172,7 @@ def _source_package_identity(
     endpoint: str,
     source_snapshot_sha256: str,
     upstream_experiment: Mapping[str, object] | None,
+    model_risk_context_sha256: str | None = None,
 ) -> dict[str, object]:
     endpoint_hash = endpoint_sha256(endpoint)
     return {
@@ -177,6 +191,7 @@ def _source_package_identity(
             "endpoint_sha256": endpoint_hash,
         },
         "public_snapshot_sha256": source_snapshot_sha256,
+        "model_risk_context_sha256": model_risk_context_sha256,
         "upstream_experiment": copy.deepcopy(dict(upstream_experiment)) if upstream_experiment else None,
     }
 
@@ -196,6 +211,7 @@ def build_research_package_provenance(
     endpoint: str,
     source_snapshot: Mapping[str, object],
     upstream_experiment: Mapping[str, object] | None = None,
+    model_risk_context_sha256: str | None = None,
 ) -> dict[str, object]:
     _validate_source_usage_cost(research_result)
     snapshot = copy.deepcopy(dict(source_snapshot))
@@ -213,6 +229,7 @@ def build_research_package_provenance(
         endpoint=endpoint,
         source_snapshot_sha256=snapshot_sha256,
         upstream_experiment=upstream_experiment,
+        model_risk_context_sha256=model_risk_context_sha256,
     )
     source_package_identity_sha256 = stable_hash(source_package_identity)
     endpoint_hash = endpoint_sha256(endpoint)
@@ -305,6 +322,8 @@ def validate_research_package_provenance(
     implementation_identity: Mapping[str, object],
     market_identity: Mapping[str, object],
     client: object | None,
+    config: Mapping[str, object] | None = None,
+    model_risk_context_sha256: str | None = None,
 ) -> str:
     if provenance.get("schema_version") != "adaptive-mas.research-package-provenance.v4":
         raise ValueError("precomputed research provenance format is unsupported")
@@ -330,9 +349,9 @@ def validate_research_package_provenance(
         or source_identity.get("prediction_horizon_sessions") != horizon
     ):
         raise ValueError("source manifest date, evidence mode, or forecast horizon does not match this task")
-    config = source_identity.get("research_config")
+    source_config = source_identity.get("research_config")
     config_sha256 = source_identity.get("research_config_sha256")
-    if not isinstance(config, Mapping) or config_sha256 != stable_hash(config):
+    if not isinstance(source_config, Mapping) or config_sha256 != stable_hash(source_config):
         raise ValueError("source research configuration hash does not match its content")
     if (
         source_identity.get("candidate_version_id") != candidate_version_id
@@ -345,6 +364,33 @@ def validate_research_package_provenance(
         raise ValueError("source manifest implementation identity does not match the current package")
     if source_identity.get("market_snapshot_identity") != dict(market_identity):
         raise ValueError("source manifest market snapshot does not match the current as-of data")
+    manager = research_result.get("agents", {}).get("research_manager", {}) if isinstance(research_result.get("agents"), Mapping) else {}
+    manager_report = manager.get("report", {}) if isinstance(manager, Mapping) else {}
+    directed_queries = manager.get("directed_queries", []) if isinstance(manager, Mapping) else []
+    has_model_risk_action = (
+        isinstance(manager_report, Mapping)
+        and any(isinstance(item, Mapping) and item.get("dimension") == "model" for item in manager_report.get("risk_research", []))
+    ) or (
+        isinstance(directed_queries, list)
+        and any(isinstance(item, Mapping) and item.get("risk_dimension") == "model" for item in directed_queries)
+    )
+    has_industry_risk_action = (
+        isinstance(manager_report, Mapping)
+        and any(isinstance(item, Mapping) and item.get("dimension") == "industry" for item in manager_report.get("risk_research", []))
+    ) or (
+        isinstance(directed_queries, list)
+        and any(isinstance(item, Mapping) and item.get("risk_dimension") == "industry" for item in directed_queries)
+    )
+    if has_industry_risk_action and config is not None and any(
+        config.get(key) != source_config.get(key)
+        for key in ("risk_industry_sources", "risk_lookback_sessions")
+    ):
+        raise ValueError("precomputed industry-risk research does not match the current sourced industry configuration")
+    if has_model_risk_action and (
+        not model_risk_context_sha256
+        or source_identity.get("model_risk_context_sha256") != model_risk_context_sha256
+    ):
+        raise ValueError("precomputed model-risk research does not match the current calibrated model context")
     source_snapshot = source_manifest.get("source_snapshot")
     if not isinstance(source_snapshot, Mapping):
         raise ValueError("source manifest does not contain the raw public source snapshot")
