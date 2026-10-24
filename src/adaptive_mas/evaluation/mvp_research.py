@@ -5,7 +5,7 @@ import hashlib
 import statistics
 from collections import defaultdict
 from datetime import date
-from typing import Callable
+from typing import Callable, Mapping
 
 from adaptive_mas.agents.quantitative import AGENT_IDS, quantitative_agents
 from adaptive_mas.backtest.simulator import (
@@ -24,6 +24,231 @@ from adaptive_mas.portfolio.allocation import (
 from adaptive_mas.regime.market_state import conditional_weights, market_state
 from adaptive_mas.reliability.gating import reliability_weights
 from adaptive_mas.targets.five_session import forward_returns
+
+
+STATE_FUSION_FEATURE_SCHEMA = (
+    "trend_percentile",
+    "reversal_percentile",
+    "liquidity_confirmation_percentile",
+    "market_state_signed",
+    "trend_percentile_x_market_state",
+    "reversal_percentile_x_market_state",
+    "liquidity_confirmation_percentile_x_market_state",
+)
+
+
+def _state_conditioned_features(
+    expert_percentiles: tuple[float, ...],
+    state: str,
+) -> tuple[float, ...]:
+    if len(expert_percentiles) != len(AGENT_IDS):
+        raise ValueError("状态条件融合要求每条样本具有三个专家分位数")
+    state_value = {"risk_on": 1.0, "risk_off": -1.0, "warming_up": 0.0}.get(state)
+    if state_value is None:
+        raise ValueError(f"未知的成熟市场状态：{state}")
+    values = tuple(float(value) for value in expert_percentiles)
+    if any(not math.isfinite(value) or not -0.5 <= value <= 0.5 for value in values):
+        raise ValueError("状态条件融合中心化专家分位数必须是有限的 [-0.5, 0.5] 值")
+    return (*values, state_value, *(value * state_value for value in values))
+
+
+def _state_fusion_rows(
+    pending: dict[str, object],
+    calibration_rows: list[tuple[tuple[float, ...], float]],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "prediction_date": pending["decision_date"].isoformat(),
+            "label_available_at": pending["exit_date"].isoformat(),
+            "state": pending["regime"],
+            "expert_percentiles": list(features),
+            "forward_return": float(forward_return),
+        }
+        for features, forward_return in calibration_rows
+    ]
+
+
+def _normalize_state_fusion_training_rows(rows: object) -> list[dict[str, object]]:
+    if not isinstance(rows, list):
+        raise ValueError("state_fusion_training_rows must be a list")
+    normalized = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("state fusion training rows must be objects")
+        try:
+            prediction_date = date.fromisoformat(str(row["prediction_date"]))
+            label_available_at = date.fromisoformat(str(row["label_available_at"]))
+            features = tuple(float(value) for value in row["expert_percentiles"])
+            forward_return = float(row["forward_return"])
+            state = str(row["state"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("state fusion training row is incomplete or malformed") from exc
+        if label_available_at <= prediction_date:
+            raise ValueError("state fusion labels must mature after their prediction date")
+        if not math.isfinite(forward_return):
+            raise ValueError("state fusion returns must be finite")
+        _state_conditioned_features(features, state)
+        normalized.append({
+            "prediction_date": prediction_date.isoformat(),
+            "label_available_at": label_available_at.isoformat(),
+            "state": state,
+            "expert_percentiles": list(features),
+            "forward_return": forward_return,
+        })
+    return normalized
+
+
+def _normalize_pending_windows(rows: object) -> list[dict[str, object]]:
+    if not isinstance(rows, list):
+        raise ValueError("pending_forecast_windows must be a list")
+    normalized = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("pending forecast windows must be objects")
+        try:
+            decision_date = date.fromisoformat(str(row["decision_date"]))
+            raw_exit_date = row.get("exit_date")
+            exit_date = date.fromisoformat(str(raw_exit_date)) if raw_exit_date is not None else None
+            horizon = int(row["horizon_sessions"])
+            features_by_symbol = row["features_by_symbol"]
+            percentile_features = row["percentile_features_by_symbol"]
+            scores_by_method = row["scores_by_method"]
+            expected_returns = row["expected_returns_by_method"]
+            regime = str(row["regime"])
+            adaptive_weights = row["adaptive_weights"]
+            regime_weights = row["regime_weights"]
+            regime_weight_source = str(row["regime_weight_source"])
+            regime_matured_windows = int(row["regime_matured_windows"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("pending forecast window is incomplete or malformed") from exc
+        if horizon < 1 or (exit_date is not None and exit_date <= decision_date):
+            raise ValueError("pending forecast window has an invalid label horizon")
+        if regime not in {"risk_on", "risk_off", "warming_up"}:
+            raise ValueError("pending forecast window has an unknown market state")
+        if not all(isinstance(value, Mapping) for value in (
+            features_by_symbol, percentile_features, scores_by_method, expected_returns,
+            adaptive_weights, regime_weights,
+        )):
+            raise ValueError("pending forecast window contains invalid prediction maps")
+        normalized_weights = []
+        for weights in (adaptive_weights, regime_weights):
+            normalized_weight_map = {
+                str(agent_id): float(weight) for agent_id, weight in weights.items()
+            }
+            if (
+                set(normalized_weight_map) != set(AGENT_IDS)
+                or any(not math.isfinite(value) or value < 0 for value in normalized_weight_map.values())
+                or not math.isclose(math.fsum(normalized_weight_map.values()), 1.0, abs_tol=1e-9)
+            ):
+                raise ValueError("pending forecast window contains invalid expert weights")
+            normalized_weights.append(normalized_weight_map)
+        if regime_matured_windows < 0:
+            raise ValueError("pending forecast window has an invalid matured-state count")
+        normalized_features = {}
+        normalized_percentiles = {}
+        for symbol, values in features_by_symbol.items():
+            feature_row = tuple(float(value) for value in values)
+            if len(feature_row) != len(AGENT_IDS) or any(not math.isfinite(value) for value in feature_row):
+                raise ValueError("pending forecast window contains invalid expert features")
+            normalized_features[str(symbol)] = feature_row
+        for symbol, values in percentile_features.items():
+            feature_row = tuple(float(value) for value in values)
+            _state_conditioned_features(feature_row, regime)
+            normalized_percentiles[str(symbol)] = feature_row
+        if set(normalized_features) != set(normalized_percentiles):
+            raise ValueError("pending forecast window expert-feature universes do not match")
+        normalized_scores = {}
+        for method, values in scores_by_method.items():
+            if not isinstance(values, Mapping):
+                raise ValueError("pending forecast score maps must be objects")
+            normalized_scores[str(method)] = {
+                str(symbol): float(value) for symbol, value in values.items()
+            }
+        normalized_returns = {}
+        for method, values in expected_returns.items():
+            if not isinstance(values, Mapping):
+                raise ValueError("pending expected-return maps must be objects")
+            normalized_returns[str(method)] = {
+                str(symbol): float(value) for symbol, value in values.items()
+            }
+        if any(
+            not math.isfinite(value)
+            for maps in (normalized_scores, normalized_returns)
+            for values in maps.values()
+            for value in values.values()
+        ):
+            raise ValueError("pending forecast contains non-finite scores or returns")
+        normalized.append({
+            "decision_date": decision_date,
+            "exit_date": exit_date,
+            "horizon_sessions": horizon,
+            "features_by_symbol": normalized_features,
+            "percentile_features_by_symbol": normalized_percentiles,
+            "candidate_symbols_sha256": str(row["candidate_symbols_sha256"]),
+            "scores_by_method": normalized_scores,
+            "expected_returns_by_method": normalized_returns,
+            "regime": regime,
+            "adaptive_weights": normalized_weights[0],
+            "regime_weights": normalized_weights[1],
+            "regime_weight_source": regime_weight_source,
+            "regime_matured_windows": regime_matured_windows,
+        })
+    return normalized
+
+
+def _serialize_pending_windows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            **row,
+            "decision_date": row["decision_date"].isoformat(),
+            "exit_date": row["exit_date"].isoformat() if row["exit_date"] else None,
+        }
+        for row in rows
+    ]
+
+
+def _expert_signal_diagnostics(
+    raw_scores: dict[str, dict[str, float]],
+    percentile_by_agent: dict[str, dict[str, float]],
+    common_symbols: set[str],
+    universe_size: int,
+) -> dict[str, object]:
+    coverage = {
+        agent_id: (len(raw_scores[agent_id]) / universe_size if universe_size else 0.0)
+        for agent_id in AGENT_IDS
+    }
+    overlap_by_pair = {}
+    disagreement_by_pair = {}
+    for left_index, left in enumerate(AGENT_IDS):
+        for right in AGENT_IDS[left_index + 1 :]:
+            left_symbols = set(raw_scores[left])
+            right_symbols = set(raw_scores[right])
+            shared = left_symbols & right_symbols
+            union = left_symbols | right_symbols
+            key = f"{left}:{right}"
+            overlap_by_pair[key] = {
+                "shared_symbol_count": len(shared),
+                "union_symbol_count": len(union),
+                "jaccard": len(shared) / len(union) if union else None,
+            }
+            disagreement_by_pair[key] = (
+                statistics.fmean(
+                    abs(percentile_by_agent[left][symbol] - percentile_by_agent[right][symbol])
+                    for symbol in common_symbols
+                )
+                if common_symbols else None
+            )
+    defined_disagreement = [
+        float(value) for value in disagreement_by_pair.values() if value is not None
+    ]
+    return {
+        "expert_signal_coverage_by_agent": coverage,
+        "expert_pairwise_symbol_overlap": overlap_by_pair,
+        "expert_pairwise_signal_disagreement": disagreement_by_pair,
+        "mean_pairwise_signal_disagreement": (
+            statistics.fmean(defined_disagreement) if defined_disagreement else None
+        ),
+    }
 
 
 def _evaluate_matured_window(
@@ -456,6 +681,19 @@ def run_mvp_research(
     horizon = int(config.get("prediction_horizon_sessions", 5))
     if step < 1 or horizon < 1:
         raise ValueError("决策步长和预测期限必须至少为 1 个交易日")
+    initial_state = initial_state or {}
+    raw_state_as_of = initial_state.get("state_as_of")
+    if isinstance(raw_state_as_of, date):
+        state_as_of = raw_state_as_of
+    elif raw_state_as_of is not None:
+        try:
+            state_as_of = date.fromisoformat(str(raw_state_as_of))
+        except ValueError as exc:
+            raise ValueError("training seed state_as_of must be an ISO date") from exc
+    else:
+        state_as_of = None
+    if state_as_of is not None and as_of_date is not None and state_as_of > as_of_date:
+        raise ValueError("training seed state_as_of cannot be later than the requested as-of date")
     trend_window = int(config["feature_trend_sessions"])
     reversal_window = int(config["feature_reversal_sessions"])
     liquidity_return_window = int(config["feature_liquidity_return_sessions"])
@@ -471,6 +709,23 @@ def run_mvp_research(
     regime_minimum = int(config["regime_minimum_windows"])
     ridge_alpha = float(config["ridge_alpha"])
     ridge_minimum_rows = int(config["ridge_minimum_training_rows"])
+    state_fusion_alpha = float(config.get("state_fusion_alpha", ridge_alpha))
+    state_fusion_minimum_rows = int(
+        config.get("state_fusion_minimum_training_rows", ridge_minimum_rows)
+    )
+    state_fusion_minimum_rows_per_state = int(
+        config.get(
+            "state_fusion_minimum_rows_per_state",
+            max(3, state_fusion_minimum_rows // 10),
+        )
+    )
+    if (
+        not math.isfinite(state_fusion_alpha)
+        or state_fusion_alpha < 0
+        or state_fusion_minimum_rows < 1
+        or state_fusion_minimum_rows_per_state < 1
+    ):
+        raise ValueError("状态融合正则化和成熟训练样本门槛无效")
     risk_window = int(config["risk_lookback_sessions"])
     risk_minimum_observations = int(config["risk_minimum_observations"])
     maximum_symbol_weight = float(config["maximum_symbol_weight"])
@@ -497,6 +752,8 @@ def run_mvp_research(
             else len(research.trading_dates) - horizon - 1
         )
     decision_indices = list(range(first_signal_index, end_index + 1, step))
+    if state_as_of is not None and state_as_of >= research.trading_dates[end_index]:
+        raise ValueError("training seed state_as_of must be earlier than the requested decision range")
     if comparison_start_date is not None and comparison_start_date not in research.trading_dates:
         raise ValueError(f"共同评价起始日不在研究交易日历中：{comparison_start_date}")
     if decision_start_date is not None:
@@ -504,6 +761,11 @@ def run_mvp_research(
             raise ValueError(f"预测起始日不在研究交易日历中：{decision_start_date}")
         decision_start_index = research.trading_dates.index(decision_start_date)
         decision_indices = [index for index in decision_indices if index >= decision_start_index]
+    if state_as_of is not None:
+        decision_indices = [
+            index for index in decision_indices
+            if research.trading_dates[index] > state_as_of
+        ]
     if (
         end_index >= first_signal_index
         and (ensure_as_of_decision or (as_of_date is None and step == 1))
@@ -517,7 +779,6 @@ def run_mvp_research(
         (str(row["symbol"]), row["trade_date"]): row
         for row in research.adjusted_bars
     }
-    initial_state = initial_state or {}
     matured_rank_ics = list(initial_state.get("matured_rank_ics", []))
     matured_by_state: dict[str, list[dict[str, float]]] = defaultdict(
         list, {state: list(rows) for state, rows in initial_state.get("matured_by_state", {}).items()}
@@ -556,6 +817,20 @@ def run_mvp_research(
             relative_calibration_features,
             relative_calibration_returns,
         )
+    state_fusion_training_rows = _normalize_state_fusion_training_rows(
+        initial_state.get("state_fusion_training_rows", [])
+    )
+    raw_previous_targets = initial_state.get("previous_targets", {})
+    if not isinstance(raw_previous_targets, Mapping):
+        raise ValueError("training seed previous_targets must be an object")
+    previous_target_rows = {}
+    for method, weights in raw_previous_targets.items():
+        if not isinstance(weights, Mapping):
+            raise ValueError("training seed previous target weights must be objects")
+        normalized_weights = {str(symbol): float(value) for symbol, value in weights.items()}
+        if any(not math.isfinite(value) or value < 0 for value in normalized_weights.values()):
+            raise ValueError("training seed previous target weights must be finite and nonnegative")
+        previous_target_rows[str(method)] = normalized_weights
     matured_losses: list[dict[str, float]] = [
         {str(name): float(value) for name, value in row.items()}
         for row in initial_state.get("matured_losses", [])
@@ -565,8 +840,25 @@ def run_mvp_research(
     prediction_decisions = []
     prediction_settlements = []
     decisions_by_method: dict[str, list[dict[str, object]]] = defaultdict(list)
-    previous_targets: dict[str, dict[str, float]] = defaultdict(dict)
-    pending_windows = []
+    previous_targets: dict[str, dict[str, float]] = defaultdict(dict, previous_target_rows)
+    pending_windows = _normalize_pending_windows(
+        initial_state.get("pending_forecast_windows", [])
+    )
+    trading_date_set = set(research.trading_dates)
+    for pending in pending_windows:
+        if pending["decision_date"] not in trading_date_set:
+            raise ValueError("training seed pending decision date is absent from the visible trading calendar")
+        if pending["exit_date"] is None:
+            decision_position = research.trading_dates.index(pending["decision_date"])
+            exit_position = decision_position + int(pending["horizon_sessions"])
+            if exit_position < len(research.trading_dates):
+                pending["exit_date"] = research.trading_dates[exit_position]
+    if state_as_of is not None and any(
+        row["decision_date"] > state_as_of
+        or (row["exit_date"] is not None and row["exit_date"] <= state_as_of)
+        for row in pending_windows
+    ):
+        raise ValueError("training seed pending windows do not match its state_as_of cutoff")
     static_weights = None
     comparison_started = False
 
@@ -598,6 +890,9 @@ def run_mvp_research(
                     calibration_sufficient_statistics,
                     [features for features, _ in calibration_rows],
                     [value for _, value in calibration_rows],
+                )
+                state_fusion_training_rows.extend(
+                    _state_fusion_rows(pending, calibration_rows)
                 )
                 relative_calibration_features.extend(features for features, _ in relative_calibration_rows)
                 relative_calibration_returns.extend(value for _, value in relative_calibration_rows)
@@ -647,6 +942,12 @@ def run_mvp_research(
             )
             for agent_id in AGENT_IDS
         }
+        expert_signal_diagnostics = _expert_signal_diagnostics(
+            raw_scores,
+            percentile_by_agent,
+            common_symbols,
+            len(snapshot.members),
+        )
         equal_fusion = {
             symbol: statistics.fmean(
                 percentile_by_agent[agent_id][symbol] for agent_id in AGENT_IDS
@@ -767,6 +1068,61 @@ def run_mvp_research(
         calibrated_adaptive = fuse_calibrated(current_adaptive_weights)
         calibrated_regime = fuse_calibrated(current_regime_weights)
         calibrated_loss_gated = fuse_calibrated(loss_gate_weights)
+        matured_state_rows = [
+            row for row in state_fusion_training_rows
+            if str(row["label_available_at"]) <= decision_date.isoformat()
+        ]
+        state_rows_by_regime = {
+            state: sum(str(row["state"]) == state for row in matured_state_rows)
+            for state in ("risk_on", "risk_off")
+        }
+        state_fusion_ready = (
+            current_regime in {"risk_on", "risk_off"}
+            and len(matured_state_rows) >= state_fusion_minimum_rows
+            and all(
+                count >= state_fusion_minimum_rows_per_state
+                for count in state_rows_by_regime.values()
+            )
+        )
+        state_conditioned_returns = {}
+        if state_fusion_ready:
+            state_conditioned_returns = ridge_predictions(
+                [
+                    _state_conditioned_features(
+                        tuple(float(value) for value in row["expert_percentiles"]),
+                        str(row["state"]),
+                    )
+                    for row in matured_state_rows
+                ],
+                [float(row["forward_return"]) for row in matured_state_rows],
+                {
+                    symbol: _state_conditioned_features(
+                        tuple(percentile_by_agent[agent_id][symbol] for agent_id in AGENT_IDS),
+                        current_regime,
+                    )
+                    for symbol in common_symbols
+                },
+                state_fusion_alpha,
+            )
+        state_fusion_diagnostics = {
+            "status": (
+                "matured_state_conditioned_ridge"
+                if state_fusion_ready
+                else "waiting_for_mature_state_labels"
+            ),
+            "current_state": current_regime,
+            "feature_schema": list(STATE_FUSION_FEATURE_SCHEMA),
+            "alpha": state_fusion_alpha,
+            "minimum_training_rows": state_fusion_minimum_rows,
+            "minimum_rows_per_state": state_fusion_minimum_rows_per_state,
+            "training_rows": len(matured_state_rows),
+            "training_windows": len({str(row["prediction_date"]) for row in matured_state_rows}),
+            "training_rows_by_state": state_rows_by_regime,
+            "training_label_cutoff": max(
+                (str(row["label_available_at"]) for row in matured_state_rows),
+                default=None,
+            ),
+        }
         matured_oos_errors, forecast_error_status = _matured_error_estimates(
             matured_losses, reliability_window, reliability_minimum
         )
@@ -781,6 +1137,7 @@ def run_mvp_research(
             "adaptive_fusion": calibrated_adaptive,
             "regime_fusion": calibrated_regime,
             "loss_gated_fusion": calibrated_loss_gated,
+            "state_conditioned_fusion": state_conditioned_returns,
         }
         forecast_errors_by_method = {
             method: matured_oos_errors.get(method)
@@ -798,6 +1155,7 @@ def run_mvp_research(
             "adaptive_fusion": adaptive_fusion,
             "regime_fusion": regime_fusion,
             "loss_gated_fusion": percentile_scores(calibrated_loss_gated),
+            "state_conditioned_fusion": percentile_scores(state_conditioned_returns),
             "market_plus_relative_fusion": percentile_scores(market_relative_returns),
         }
 
@@ -879,11 +1237,16 @@ def run_mvp_research(
                 "input_cutoff": decision_date.isoformat(),
                 "members": len(snapshot.members),
                 "common_signal_count": len(common_symbols),
+                "expert_coverage_rate": (
+                    len(common_symbols) / len(snapshot.members) if snapshot.members else 0.0
+                ),
+                **expert_signal_diagnostics,
                 "matured_rank_ic_windows": len(matured_rank_ics),
                 "ridge_training_rows": len(training_returns),
                 "regime": current_regime,
                 "regime_weight_source": regime_weight_source,
                 "regime_matured_windows": regime_history_count,
+                "state_conditioned_fusion": state_fusion_diagnostics,
                 "risk_allocator_status": risk_status,
                 "weights": {
                     "static": static_for_decision,
@@ -944,6 +1307,16 @@ def run_mvp_research(
                 "forecast_error_status": forecast_error_status,
                 "calibration": calibration_diagnostics,
                 "relative_calibration": relative_calibration_diagnostics,
+                "calibration_sample": {
+                    "matured_label_windows": len(matured_rank_ics),
+                    "matured_stock_label_rows": len(calibration_returns),
+                    "matured_out_of_sample_error_status": forecast_error_status,
+                },
+                "expert_coverage_rate": (
+                    len(common_symbols) / len(snapshot.members) if snapshot.members else 0.0
+                ),
+                **expert_signal_diagnostics,
+                "state_conditioned_fusion": state_fusion_diagnostics,
                 "market_expected_return": market_expected_return,
                 "loss_gate_weights": loss_gate_weights,
                 "loss_gate_source": loss_gate_source,
@@ -972,6 +1345,7 @@ def run_mvp_research(
         })
 
     label_available_by = as_of_date or research.trading_dates[-1]
+    unmatured_pending_windows = []
     for pending in pending_windows:
         if pending["exit_date"] is not None and pending["exit_date"] <= label_available_by:
             matured_row, observation, training_rows, settlements, calibration_rows, relative_calibration_rows, loss_row = _evaluate_matured_window(
@@ -997,10 +1371,14 @@ def run_mvp_research(
                     [features for features, _ in relative_calibration_rows],
                     [value for _, value in relative_calibration_rows],
                 )
+                state_fusion_training_rows.extend(
+                    _state_fusion_rows(pending, calibration_rows)
+                )
                 if loss_row:
                     matured_losses.append(loss_row)
                 observations.append(observation)
             continue
+        unmatured_pending_windows.append(pending)
         decision_position = research.trading_dates.index(pending["decision_date"])
         entry_position = decision_position + 1
         entry_date = research.trading_dates[entry_position] if entry_position < len(research.trading_dates) else None
@@ -1018,6 +1396,7 @@ def run_mvp_research(
                     f"forward_return_{pending['horizon_sessions']}s": None,
                 }
             )
+    pending_windows = unmatured_pending_windows
 
     if not comparison_started:
         raise ValueError("训练历史不足以形成可比较的多 Agent 组合实验")
@@ -1095,6 +1474,11 @@ def run_mvp_research(
             "static_weights": "first configured number of matured development windows, then frozen",
             "regime": f"risk_on when CSI 300 {regime_window}-session price return is nonnegative; otherwise risk_off",
             "regime_fallback": "global reliability until the state has enough matured windows",
+            "state_conditioned_fusion": "seven-feature ridge on three expert percentile scores, signed risk state, and three state interactions; fit only after the configured total and per-state label minima have matured by the inference close",
+            "state_conditioned_fusion_feature_schema": list(STATE_FUSION_FEATURE_SCHEMA),
+            "state_conditioned_fusion_alpha": state_fusion_alpha,
+            "state_conditioned_fusion_minimum_training_rows": state_fusion_minimum_rows,
+            "state_conditioned_fusion_minimum_rows_per_state": state_fusion_minimum_rows_per_state,
             "ridge": "three existing Agent scores, standardized using matured training rows only",
             "risk_allocator": "top-decile eligibility, inverse trailing volatility, weight and turnover caps",
             "return_calibration": "shrinkage linear score-to-return maps trained only on matured labels; prediction quality includes five equal-count forecast buckets averaged equally by decision date",
@@ -1138,6 +1522,11 @@ def run_mvp_research(
         "training_rows_at_end": len(training_returns),
         "matured_rank_ic_windows_at_end": len(matured_rank_ics),
         "training_seed": {
+            "state_as_of": label_available_by.isoformat(),
+            "pending_forecast_windows": _serialize_pending_windows(pending_windows),
+            "previous_targets": {
+                method: dict(weights) for method, weights in previous_targets.items()
+            },
             "training_features": training_features,
             "training_returns": training_returns,
             "calibration_features": calibration_features,
@@ -1146,6 +1535,7 @@ def run_mvp_research(
             "relative_calibration_features": relative_calibration_features,
             "relative_calibration_returns": relative_calibration_returns,
             "relative_calibration_sufficient_statistics": relative_calibration_sufficient_statistics,
+            "state_fusion_training_rows": state_fusion_training_rows,
             "matured_losses": matured_losses,
             "matured_rank_ics": matured_rank_ics,
             "matured_by_state": dict(matured_by_state),

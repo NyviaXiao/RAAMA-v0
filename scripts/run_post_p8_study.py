@@ -42,6 +42,7 @@ ALPHA_METHODS = {
     "equal_fusion",
     "adaptive_fusion",
     "loss_gated_fusion",
+    "state_conditioned_fusion",
     "market_plus_relative_fusion",
 }
 SOURCE_FILES = (

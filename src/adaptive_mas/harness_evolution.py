@@ -22,11 +22,19 @@ from adaptive_mas.agents.harness import (
     MAX_OUTPUT_TOKENS_PER_CALL,
     OUTPUT_PRICE_CNY_PER_MILLION,
     QwenClient,
+    provider_request_sha256,
     run_research_harness,
 )
-from adaptive_mas.agents.harness_prompts import seed_candidate
+from adaptive_mas.agents.harness_prompts import seed_candidate, validate_candidate
 from adaptive_mas.agents.public_experts import build_public_expert_snapshot
 from adaptive_mas.data.research import ResearchData
+from adaptive_mas.package_identity import source_package_identity
+from adaptive_mas.research_provenance import (
+    build_research_package_provenance,
+    market_snapshot_identity,
+    research_cost_summary,
+    stable_hash,
+)
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -65,6 +73,12 @@ SCORE_WEIGHTS = {
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _stable_hash(value: object) -> str:
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")).hexdigest()
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -115,7 +129,7 @@ class HarnessVersionStore:
             }
         version_path = self.root / active["version_file"]
         version = json.loads(version_path.read_text(encoding="utf-8"))
-        candidate = dict(version["candidate"])
+        candidate = validate_candidate(version["candidate"])
         memory_file = version.get("procedural_memory_file")
         if memory_file:
             memory_path = self.root / str(memory_file)
@@ -156,6 +170,7 @@ class HarnessVersionStore:
         procedural_memory_source: str = "GEPA reflective mutation accepted by independent selection",
         version_id: str | None = None,
     ) -> tuple[str, str]:
+        candidate = validate_candidate(candidate)
         current, current_id, _ = self.load_active()
         if candidate == current:
             raise ValueError("cannot adopt a candidate identical to the active version")
@@ -226,9 +241,10 @@ class HarnessVersionStore:
         if not version_path.is_file():
             raise FileNotFoundError(f"unknown harness version {version_id!r}")
         version = json.loads(version_path.read_text(encoding="utf-8"))
-        candidate = dict(version["candidate"])
-        if set(candidate) != set(seed_candidate()) or any(not isinstance(value, str) for value in candidate.values()):
-            raise ValueError(f"harness version {version_id!r} has an invalid component schema")
+        try:
+            candidate = validate_candidate(version["candidate"])
+        except ValueError as exc:
+            raise ValueError(f"harness version {version_id!r} has an invalid component schema") from exc
         expected_hash = hashlib.sha256(_json(candidate).encode("utf-8")).hexdigest()
         if expected_hash != version.get("candidate_sha256"):
             raise ValueError(f"harness version {version_id!r} failed its candidate hash check")
@@ -286,9 +302,7 @@ class HarnessVersionStore:
     def export_active(self, output_path: str | Path) -> dict[str, object]:
         """Export active prompt text and integrity hashes without task or account artifacts."""
         candidate, version_id, version = self.load_active()
-        expected_components = set(seed_candidate())
-        if set(candidate) != expected_components or any(not isinstance(value, str) for value in candidate.values()):
-            raise ValueError("active harness version does not match the fixed prompt component schema")
+        candidate = validate_candidate(candidate)
         experience_sha256 = hashlib.sha256(candidate["procedural_experience"].encode("utf-8")).hexdigest()
         version_experience_sha256 = version.get("procedural_experience_sha256", experience_sha256)
         if version_experience_sha256 != experience_sha256:
@@ -1249,7 +1263,31 @@ def evaluate_candidate(
         return 0.0, side_info
     trace["required_observations"] = case.required_observations
     trace["task_usage"] = task_usage
-    trace["cost"] = task_usage
+    trace["cost"] = research_cost_summary(task_usage)
+    source_identity = source_package_identity()
+    upstream_experiment = None
+    if budget.package_identity_manifest is not None:
+        if budget.package_identity_sha256 != stable_hash(budget.package_identity_manifest):
+            raise ValueError("GEPA source package manifest does not match its identity hash")
+        upstream_experiment = {
+            "identity": budget.package_identity_manifest,
+            "identity_sha256": budget.package_identity_sha256,
+        }
+    trace["package_provenance"] = build_research_package_provenance(
+        trace,
+        as_of=case.as_of,
+        public_evidence_mode=str(case.public_snapshot.get("data_mode", "unknown")),
+        horizon=int(case.public_snapshot.get("evaluation_horizon_sessions", config.get("prediction_horizon_sessions", 0))),
+        config=config,
+        candidate_version_id=candidate_version_id,
+        candidate_sha256=hashlib.sha256(_json(validate_candidate(candidate)).encode("utf-8")).hexdigest(),
+        implementation_identity=source_identity,
+        market_identity=market_snapshot_identity(research, case.as_of),
+        model=client.model,
+        endpoint=client.endpoint,
+        source_snapshot=case.public_snapshot,
+        upstream_experiment=upstream_experiment,
+    )
     metrics = score_research_result(trace)
     if trace_sink is not None:
         trace_sink.append(trace)
@@ -1404,6 +1442,7 @@ def run_gepa_evolution(
     )
     run_logical_start = len(budget.logical_calls)
     active_candidate, active_version_id, active_version = version_store.load_active()
+    active_candidate = validate_candidate(active_candidate)
     if len(active_candidate) != GEPA_REFLECTION_COMPONENTS:
         raise ValueError("the GEPA call budget is fixed for exactly six evolvable text components")
     exploration_case_count = len(cases["exploration"])
@@ -1439,8 +1478,92 @@ def run_gepa_evolution(
     # Exact cached responses from the interrupted first task may satisfy some
     # planned model requests; CallBudget.begin_call remains the hard provider ceiling.
     run_dir = version_store.root / "runs" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if run_dir.exists():
+        raise ValueError(
+            "run_id already owns immutable or partial experiment history; choose a new run_id instead of overwriting it"
+        )
+    run_dir.mkdir(parents=True, exist_ok=False)
+    source_identity = source_package_identity()
+    active_candidate_sha256 = hashlib.sha256(_json(active_candidate).encode("utf-8")).hexdigest()
+    case_rows = [
+        {
+            "as_of": case.as_of.isoformat(),
+            "split": case.split,
+            "snapshot_sha256": _stable_hash(case.public_snapshot),
+            "required_observations_sha256": _stable_hash(case.required_observations),
+            "public_evidence_mode": str(case.public_snapshot.get("data_mode", "unknown")),
+        }
+        for name in ("exploration", "selection", "frozen_evaluation", "reuse_demo")
+        for case in cases.get(name, [])
+    ]
+    case_inputs = {
+        "schema_version": "adaptive-mas.gepa-case-inputs.v1",
+        "cases": [
+            {
+                "as_of": case.as_of.isoformat(),
+                "split": case.split,
+                "public_snapshot": case.public_snapshot,
+                "required_observations": case.required_observations,
+                "retrospective": case.retrospective,
+            }
+            for name in ("exploration", "selection", "frozen_evaluation", "reuse_demo")
+            for case in cases.get(name, [])
+        ],
+    }
+    case_inputs_sha256 = _stable_hash(case_inputs)
+    case_inputs_path = run_dir / "case_inputs.json"
+    if case_inputs_path.is_file():
+        existing_inputs = json.loads(case_inputs_path.read_text(encoding="utf-8"))
+        if _json(existing_inputs) != _json(case_inputs):
+            raise ValueError("run_id is already bound to different frozen case inputs")
+    else:
+        _write_json(case_inputs_path, case_inputs)
+    experiment_package_identity = {
+        "schema_version": "adaptive-mas.gepa-package-identity.v1",
+        "source_identity": source_identity,
+        "active_version_id": active_version_id,
+        "active_candidate_sha256": active_candidate_sha256,
+        "model": client.model,
+        "endpoint_sha256": hashlib.sha256(client.endpoint.rstrip("/").encode("utf-8")).hexdigest(),
+        "config_sha256": _stable_hash(config),
+        "case_inputs_sha256": case_inputs_sha256,
+        "case_rows": case_rows,
+        "evaluator_version": EVALUATOR_VERSION,
+        "metric_call_limit": GEPA_METRIC_CALL_LIMIT,
+        "proposal_limit": GEPA_PROPOSAL_LIMIT,
+        "max_research_calls_per_case": MAX_RESEARCH_CALLS_PER_CASE,
+    }
+    experiment_package_identity_sha256 = _stable_hash(experiment_package_identity)
+    budget.package_identity_sha256 = experiment_package_identity_sha256
+    budget.package_identity_manifest = experiment_package_identity
+    case_manifest = {
+        "schema_version": "adaptive-mas.gepa-case-manifest.v1",
+        "run_id": run_id,
+        "experiment_package_identity_sha256": experiment_package_identity_sha256,
+        "case_inputs_sha256": case_inputs_sha256,
+        "case_inputs_file": "case_inputs.json",
+        "fixed_baseline": {
+            "version_id": active_version_id,
+            "candidate_sha256": active_candidate_sha256,
+            "selection_role": "held_fixed_for_all_paired_candidate_comparisons_in_this_run",
+        },
+        "split_counts": {
+            name: len(cases.get(name, []))
+            for name in ("exploration", "selection", "frozen_evaluation", "reuse_demo")
+        },
+        "cases": case_rows,
+        "case_coverage_summary": case_summary,
+    }
+    case_manifest_sha256 = _stable_hash(case_manifest)
+    case_manifest_path = run_dir / "case_manifest.json"
+    if case_manifest_path.is_file():
+        existing_manifest = json.loads(case_manifest_path.read_text(encoding="utf-8"))
+        if _json(existing_manifest) != _json(case_manifest):
+            raise ValueError("run_id is already bound to a different frozen case/package manifest")
+    else:
+        _write_json(case_manifest_path, case_manifest)
     reflection_payloads: list[dict[str, object]] = []
+    evaluation_action_traces: list[dict[str, object]] = []
 
     def reflection_lm(prompt, **kwargs):
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else list(prompt)
@@ -1464,11 +1587,14 @@ def run_gepa_evolution(
         )
         matching_components = [key for key, value in active_candidate.items() if value in prompt_text]
         component = matching_components[0] if len(matching_components) == 1 else "component_identity_unresolved"
-        request_sha256 = hashlib.sha256(client.endpoint.encode("utf-8") + b"\0" + serialized).hexdigest()
+        request_sha256 = provider_request_sha256(
+            client.endpoint, serialized, budget.package_identity_sha256
+        )
         reflection_payloads.append({
             "component": component,
             "bytes": len(serialized),
             "request_sha256": request_sha256,
+            "package_identity_sha256": budget.package_identity_sha256,
             "request_payload": payload,
         })
         _write_json(run_dir / "reflection_payload_review.json", {
@@ -1494,6 +1620,15 @@ def run_gepa_evolution(
 
     def evaluator(candidate, example):
         case = case_by_date[date.fromisoformat(str(example["as_of"]))]
+        try:
+            candidate = validate_candidate(dict(candidate))
+        except (TypeError, ValueError) as exc:
+            return 0.0, {
+                "as_of": case.as_of.isoformat(),
+                "evaluation_status": "candidate_schema_rejected",
+                "candidate_schema_error": str(exc),
+                "scope": "candidate rejected before task execution",
+            }
         key = hashlib.sha256(
             (_json(candidate) + case.as_of.isoformat()).encode("utf-8")
         ).hexdigest()
@@ -1503,6 +1638,7 @@ def run_gepa_evolution(
             active_version.get("procedural_memory")
             if dict(candidate) == active_candidate else None
         )
+        trace_sink: list[dict[str, object]] = []
         score, side_info = evaluate_candidate(
             dict(candidate), case,
             research=research,
@@ -1511,7 +1647,17 @@ def run_gepa_evolution(
             config=config,
             candidate_version_id=active_version_id if candidate_memory is not None else "gepa-proposal",
             procedural_memory=candidate_memory if isinstance(candidate_memory, dict) else None,
+            trace_sink=trace_sink,
         )
+        evaluation_action_traces.append({
+            "phase": "exploration",
+            "as_of": case.as_of.isoformat(),
+            "candidate_sha256": hashlib.sha256(_json(candidate).encode("utf-8")).hexdigest(),
+            "score": score,
+            "quality_metrics": side_info.get("quality_metrics"),
+            "task_model_usage": side_info.get("task_model_usage"),
+            "actions": trace_sink,
+        })
         evaluation_cache[key] = (score, side_info)
         return score, side_info
 
@@ -1555,23 +1701,36 @@ def run_gepa_evolution(
         accepted_proposal_count,
         int(gepa_result.total_metric_calls > len(cases["exploration"])),
     )
-    proposed_candidate = dict(gepa_result.candidates[gepa_result.best_idx])
+    proposed_candidate_raw = dict(gepa_result.candidates[gepa_result.best_idx])
+    try:
+        proposed_candidate = validate_candidate(proposed_candidate_raw)
+        proposed_candidate_schema_error = None
+    except (TypeError, ValueError) as exc:
+        proposed_candidate = active_candidate
+        proposed_candidate_schema_error = str(exc)
     seed_gepa_score = float(gepa_result.val_aggregate_scores[0])
     proposed_gepa_score = float(gepa_result.val_aggregate_scores[gepa_result.best_idx])
     has_gepa_improvement = (
         gepa_result.best_idx != 0
+        and proposed_candidate_schema_error is None
         and proposed_candidate != active_candidate
         and proposed_gepa_score > seed_gepa_score
     )
     candidate_audit = []
     for index, candidate in enumerate(gepa_result.candidates):
-        candidate = dict(candidate)
+        raw_candidate = dict(candidate)
+        try:
+            candidate = validate_candidate(raw_candidate)
+            schema_error = None
+        except (TypeError, ValueError) as exc:
+            candidate = raw_candidate
+            schema_error = str(exc)
         candidate_sha256 = hashlib.sha256(_json(candidate).encode("utf-8")).hexdigest()
-        changed_components = [
-            key for key in active_candidate
-            if candidate.get(key) != active_candidate.get(key)
-        ]
-        candidate_diff_text = "".join(
+        changed_components = (
+            [key for key in active_candidate if candidate.get(key) != active_candidate.get(key)]
+            if schema_error is None else []
+        )
+        candidate_diff_text = "" if schema_error is not None else "".join(
             line
             for key in sorted(active_candidate)
             if candidate.get(key) != active_candidate.get(key)
@@ -1597,6 +1756,8 @@ def run_gepa_evolution(
             },
             "discovery_metric_calls": gepa_result.discovery_eval_counts[index],
             "changed_components": changed_components,
+            "candidate_schema_valid": schema_error is None,
+            "candidate_schema_error": schema_error,
             "is_gepa_best": index == gepa_result.best_idx,
             "selection_reason": (
                 "best GEPA candidate; eligible for independent selection"
@@ -1621,6 +1782,7 @@ def run_gepa_evolution(
         "best_index": gepa_result.best_idx,
         "seed_score": seed_gepa_score,
         "best_score": proposed_gepa_score,
+        "best_candidate_schema_error": proposed_candidate_schema_error,
         "total_metric_calls": gepa_result.total_metric_calls,
         "candidates": candidate_audit,
     })
@@ -1632,15 +1794,29 @@ def run_gepa_evolution(
                 ("active", active_candidate, active_version_id, active_version.get("procedural_memory")),
                 ("candidate", proposed_candidate, "gepa-proposal", None),
             ):
+                trace_sink: list[dict[str, object]] = []
                 score, info = evaluate_candidate(
                     candidate, case, research=research, client=client, budget=budget, config=config,
                     candidate_version_id=candidate_version,
                     procedural_memory=memory if isinstance(memory, dict) else None,
+                    trace_sink=trace_sink,
                 )
+                evaluation_action_traces.append({
+                    "phase": "selection",
+                    "version_label": name,
+                    "version_id": candidate_version,
+                    "as_of": case.as_of.isoformat(),
+                    "candidate_sha256": hashlib.sha256(_json(candidate).encode("utf-8")).hexdigest(),
+                    "score": score,
+                    "quality_metrics": info["quality_metrics"],
+                    "task_model_usage": info["task_model_usage"],
+                    "actions": trace_sink,
+                })
                 selection_rows[name].append({
                     "as_of": case.as_of.isoformat(),
                     "score": score,
                     "metrics": info["quality_metrics"],
+                    "task_model_usage": info["task_model_usage"],
                 })
         baseline_selection = _selection_summary(selection_rows["active"])
         candidate_selection = _selection_summary(selection_rows["candidate"])
@@ -1689,11 +1865,24 @@ def run_gepa_evolution(
             ("active_baseline", active_candidate, active_version_id, active_version.get("procedural_memory")),
             ("selected_version", selected_candidate, selected_version_id, selected_memory),
         ):
+            trace_sink: list[dict[str, object]] = []
             score, info = evaluate_candidate(
                 candidate, case, research=research, client=client, budget=budget, config=config,
                 candidate_version_id=candidate_version,
                 procedural_memory=memory if isinstance(memory, dict) else None,
+                trace_sink=trace_sink,
             )
+            evaluation_action_traces.append({
+                "phase": "frozen_evaluation",
+                "version_label": label,
+                "version_id": candidate_version,
+                "as_of": case.as_of.isoformat(),
+                "candidate_sha256": hashlib.sha256(_json(candidate).encode("utf-8")).hexdigest(),
+                "score": score,
+                "quality_metrics": info["quality_metrics"],
+                "task_model_usage": info["task_model_usage"],
+                "actions": trace_sink,
+            })
             frozen_rows[label].append({
                 "as_of": case.as_of.isoformat(),
                 "score": score,
@@ -1724,6 +1913,16 @@ def run_gepa_evolution(
             procedural_memory=reloaded_memory if isinstance(reloaded_memory, dict) else None,
             trace_sink=reuse_trace,
         )
+        evaluation_action_traces.append({
+            "phase": "reuse_demo",
+            "version_id": reloaded_version_id,
+            "as_of": fresh_case.as_of.isoformat(),
+            "candidate_sha256": hashlib.sha256(_json(reloaded_candidate).encode("utf-8")).hexdigest(),
+            "score": score,
+            "quality_metrics": info["quality_metrics"],
+            "task_model_usage": info["task_model_usage"],
+            "actions": reuse_trace,
+        })
         reuse_result_file = "reuse_demo_research.json"
         _write_json(run_dir / reuse_result_file, reuse_trace[0])
         reuse_demo_result = {
@@ -1742,13 +1941,29 @@ def run_gepa_evolution(
 
     run_calls = budget.calls[run_call_start:]
     run_logical_calls = budget.logical_calls[run_logical_start:]
+    action_trace_file = "evaluation_action_traces.json"
+    _write_json(run_dir / action_trace_file, {
+        "schema_version": "adaptive-mas.gepa-action-traces.v1",
+        "case_manifest_sha256": case_manifest_sha256,
+        "evaluations": evaluation_action_traces,
+    })
     output = {
         "schema_version": "adaptive-mas.gepa-evolution.v1",
         "evaluator_version": EVALUATOR_VERSION,
         "run_id": run_id,
+        "experiment_package_identity_sha256": experiment_package_identity_sha256,
+        "case_manifest_sha256": case_manifest_sha256,
+        "case_manifest_file": "case_manifest.json",
+        "case_inputs_file": "case_inputs.json",
+        "evaluation_action_trace_file": action_trace_file,
         "status": "accepted" if accepted else "rejected",
         "optimizer": "gepa.optimize_anything",
         "active_version_before": active_version_id,
+        "fixed_run_baseline": {
+            "version_id": active_version_id,
+            "candidate_sha256": active_candidate_sha256,
+            "selection_role": "held_fixed_for_all_paired_candidate_comparisons_in_this_run",
+        },
         "active_version_after": selected_version_id,
         "candidate_proposals_configured": GEPA_PROPOSAL_LIMIT,
         "candidate_proposals_generated": generated_proposal_count,

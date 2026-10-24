@@ -577,6 +577,88 @@ def test_qwen_citations_reach_debate_and_final_manager_view_without_changing_ran
     assert candidate["ranking_score"] == pytest.approx(0.045)
     assert candidate["qwen_evidence_changes_numeric_priority"] is False
     assert final_view["research_context_by_symbol"]["600000"]["qwen_review_evidence"]
+def test_hard_risk_review_blocks_optimizer_orders_and_feedback_reports_actual_hold_state():
+    decision = decision_module.DailyDecision(
+        schema_version="adaptive-mas.decision.v1",
+        as_of_date="2026-09-27",
+        execution_date="2026-09-28",
+        status="pending_execution",
+        prediction_status="pending",
+        prediction_horizon_sessions=3,
+        predictions_by_symbol={"600000": {"expected_return": 0.1}},
+        current_nav_cny=1_000_000.0,
+        current_cash_cny=500_000.0,
+        current_holdings_cny={"600000": 500_000.0},
+        target_cash_cny=399_900.0,
+        target_holdings_cny={"600000": 600_000.0},
+        target_weights={"600000": 0.6},
+        estimated_cash_after_costs_cny=399_900.0,
+        buy_notional_cny=100_000.0,
+        sell_notional_cny=0.0,
+        orders=(decision_module.DecisionOrder(
+            symbol="600000", side="buy", notional_cny=100_000.0,
+            current_value_cny=500_000.0, target_value_cny=600_000.0,
+            expected_return=0.1, forecast_error=0.01,
+            expected_incremental_value_cny=8_000.0, estimated_cost_cny=100.0,
+            estimated_liquidity_capacity_cny=200_000.0,
+            decision_date_tradestatus="1", next_session_execution_uncertain=True,
+            execution_note="fixture", status="pending_next_session",
+        ),),
+        expected_gross_return=0.06,
+        forecast_error_allowance=0.01,
+        expected_transaction_cost_cny=100.0,
+        current_holding_objective_value_cny=0.02,
+        optimized_objective_value_cny=0.05,
+        risk_adjusted_net_incremental_value_cny=30_000.0,
+        risk_penalty_cny=1_000.0,
+        annualized_risk=0.24,
+        annualized_risk_budget=0.20,
+        one_way_turnover=0.05,
+        evidence={"risk_model": {
+            "market_annualized_volatility": 0.1,
+            "annualized_volatility_by_symbol": {"600000": 0.2},
+            "factor_beta_by_symbol": {"600000": 1.0},
+        }},
+        versions={},
+    )
+
+    blocked, reviews, outcome = decision_module._hard_risk_review(
+        decision,
+        {"maximum_symbol_weight": 0.5, "maximum_one_way_turnover": 0.5},
+    )
+    feedback = investment_manager_explanation(blocked.to_dict())
+
+    assert blocked.status == "risk_blocked"
+    assert blocked.orders == ()
+    assert blocked.target_holdings_cny == decision.current_holdings_cny
+    assert outcome["failed_checks"] == [
+        "annualized_risk_within_user_budget", "single_name_weight_within_limit",
+    ]
+    assert reviews["conservative"]["status"] == "constraint_needs_attention"
+    assert outcome["actual_hold_state"]["annualized_risk"] == pytest.approx(0.1)
+    assert "所有新增订单已阻断" in feedback["summary"]
+
+    unresolved_input = decision_module.replace(
+        decision,
+        current_cash_cny=0.0,
+        current_holdings_cny={"600000": 1_000_000.0},
+        evidence={"risk_model": {
+            "market_annualized_volatility": 0.1,
+            "annualized_volatility_by_symbol": {"600000": 0.4},
+            "factor_beta_by_symbol": {"600000": 1.0},
+        }},
+    )
+    unresolved, _, unresolved_outcome = decision_module._hard_risk_review(
+        unresolved_input,
+        {"maximum_symbol_weight": 0.5, "maximum_one_way_turnover": 0.5},
+    )
+    unresolved_feedback = investment_manager_explanation(unresolved.to_dict())
+    assert unresolved.status == "risk_blocked"
+    assert unresolved_outcome["status"] == "blocked_risk_unresolved"
+    assert unresolved_outcome["actual_hold_state"]["risk_within_budget"] is False
+    assert unresolved_feedback["status"] == "risk_blocked"
+
+
 def test_replay_builds_net_account_feedback_and_excludes_holdout_before_update():
     dates = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(32))
     nav_rows = []

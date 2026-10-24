@@ -61,6 +61,10 @@ def main() -> None:
         type=Path,
         help="Shared experiment root; defaults to experiments/gepa_harness and shares the 160-call ledger/cache with GEPA evolution.",
     )
+    parser.add_argument(
+        "--task-id",
+        help="Stable task and idempotency key for resuming the same exact request after interruption.",
+    )
     parser.add_argument("--announcement-text-limit", type=int, default=0)
     parser.add_argument("--announcement-document-dir", type=Path)
     parser.add_argument(
@@ -120,7 +124,9 @@ def main() -> None:
         )
     research = load_oos_research_data(args.baostock_run_dir)
     run_root = args.run_dir or project_dir / "experiments" / "gepa_harness"
-    run_id = datetime.now(SHANGHAI).strftime("%Y%m%dT%H%M%S")
+    run_id = args.task_id or datetime.now(SHANGHAI).strftime("%Y%m%dT%H%M%S")
+    if not run_id or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in run_id):
+        raise ValueError("--task-id may contain only letters, digits, dot, underscore and hyphen")
     run_dir = run_root / "daily" / args.as_of.isoformat() / run_id
     manifest_path = args.baostock_run_dir / "manifest.jsonl"
     decision = create_harness_daily_decision(
@@ -152,6 +158,9 @@ def main() -> None:
             json.loads(args.reuse_research_json.read_text(encoding="utf-8"))
             if args.reuse_research_json else None
         ),
+        state_store_path=run_root / "harness_state.sqlite3",
+        task_id=run_id,
+        idempotency_key=run_id,
     )
     payload = json.dumps(decision.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:

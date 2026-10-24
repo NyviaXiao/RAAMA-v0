@@ -116,7 +116,9 @@ def expert_prediction_diagnostics(
 
     candidate_checks = []
     method_metrics: dict[str, list[dict[str, object]]] = defaultdict(list)
+    method_metrics_by_date: dict[str, dict[str, dict[str, float | None]]] = defaultdict(dict)
     signal_correlations: dict[str, list[float]] = defaultdict(list)
+    signal_universe_overlap: dict[str, list[float]] = defaultdict(list)
     residual_correlations: dict[str, list[float]] = defaultdict(list)
     loo_metrics: dict[str, list[dict[str, float | None]]] = defaultdict(list)
     portfolio_uncertainty_rows: dict[str, list[dict[str, float | None]]] = defaultdict(list)
@@ -149,15 +151,22 @@ def expert_prediction_diagnostics(
         if not actual:
             continue
 
+        for pair, overlap in prediction.get("expert_pairwise_symbol_overlap", {}).items():
+            jaccard = overlap.get("jaccard")
+            if jaccard is not None:
+                signal_universe_overlap[str(pair)].append(float(jaccard))
         scores_by_method = prediction["scores_by_method"]
         expected_by_method = prediction["expected_returns_by_method"]
         for method, predicted in expected_by_method.items():
+            if not predicted:
+                continue
             metrics = _date_forecast_metrics(
                 {str(key): float(value) for key, value in predicted.items()},
                 actual,
                 0.10,
             )
             method_metrics[str(method)].append(metrics)
+            method_metrics_by_date[prediction_date][str(method)] = metrics
 
         for method, weights_raw in prediction.get("target_weights_by_method", {}).items():
             weights = {str(symbol): float(value) for symbol, value in weights_raw.items()}
@@ -301,6 +310,42 @@ def expert_prediction_diagnostics(
             )
         loo_ablation[name] = comparison
 
+    paired_forecast_comparisons = {}
+    baseline_method = "loss_gated_fusion"
+    comparison_methods = sorted({
+        method
+        for rows in method_metrics_by_date.values()
+        for method in rows
+        if method != baseline_method
+    })
+    for method in comparison_methods:
+        common_dates = sorted(
+            day
+            for day, rows in method_metrics_by_date.items()
+            if method in rows and baseline_method in rows
+        )
+        by_metric = {}
+        for metric in ("rank_ic", "mae", "rmse", "top_decile_gross_return"):
+            paired = [
+                (method_metrics_by_date[day][method][metric], method_metrics_by_date[day][baseline_method][metric])
+                for day in common_dates
+                if method_metrics_by_date[day][method][metric] is not None
+                and method_metrics_by_date[day][baseline_method][metric] is not None
+            ]
+            by_metric[metric] = (
+                paired_block_mean_difference(
+                    [float(candidate) for candidate, _ in paired],
+                    [float(baseline) for _, baseline in paired],
+                    seed=20261100 + len(paired_forecast_comparisons),
+                )
+                if paired else None
+            )
+        paired_forecast_comparisons[method] = {
+            "baseline_method": baseline_method,
+            "common_dates": len(common_dates),
+            "by_metric_candidate_minus_baseline": by_metric,
+        }
+
     def mean_ci_by_key(values_by_key: dict[str, list[float]]) -> dict[str, object]:
         output = {}
         for index, (key, values) in enumerate(sorted(values_by_key.items())):
@@ -375,7 +420,9 @@ def expert_prediction_diagnostics(
             method: summarize_metrics(rows)
             for method, rows in sorted(method_metrics.items())
         },
+        "paired_date_level_forecast_comparisons_vs_loss_gated_fusion": paired_forecast_comparisons,
         "expert_signal_rank_correlations": mean_ci_by_key(signal_correlations),
+        "expert_pairwise_signal_universe_overlap": mean_ci_by_key(signal_universe_overlap),
         "expert_forecast_error_correlations": mean_ci_by_key(residual_correlations),
         "portfolio_uncertainty_vs_risk_diagnostic": {
             "interpretation": "Forecast RMSE allowance is reported alongside historical factor-plus-idiosyncratic horizon sigma. The RMSE multiplier remains frozen; this comparison diagnoses overlap and does not tune the trading gate.",

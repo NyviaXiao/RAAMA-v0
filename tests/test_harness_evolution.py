@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
 from adaptive_mas.agents.harness import (
     CallBudget,
+    FIXED_RESEARCH_POLICY,
     SUBMIT_REPORT,
     _accept_report,
     _compact_tool_message,
@@ -18,7 +20,7 @@ from adaptive_mas.agents.harness import (
     _validate_report,
     compact_agent_messages,
 )
-from adaptive_mas.agents.harness_prompts import seed_candidate
+from adaptive_mas.agents.harness_prompts import seed_candidate, validate_candidate
 from adaptive_mas.harness_evolution import (
     HarnessCase,
     HarnessVersionStore,
@@ -29,6 +31,7 @@ from adaptive_mas.harness_evolution import (
     score_research_result,
     split_retrospective_cases,
     summarize_retrospective_cases,
+    run_gepa_evolution,
 )
 from adaptive_mas.data.research import MembershipSnapshot, ResearchData
 
@@ -112,6 +115,197 @@ def test_reflection_examples_expose_only_the_public_date() -> None:
     )
 
     assert case.evaluator_input() == {"as_of": "2026-09-01"}
+
+
+def test_evolvable_candidate_schema_is_exact_and_bounded(tmp_path) -> None:
+    store = HarnessVersionStore(tmp_path)
+    candidate = seed_candidate()
+    assert set(validate_candidate(candidate)) == set(seed_candidate())
+
+    with pytest.raises(ValueError, match="exactly the six declared"):
+        validate_candidate({**candidate, "hard_policy": "candidate supplied"})
+    with pytest.raises(ValueError, match="component exceeds"):
+        validate_candidate({**candidate, "market_prompt": "x" * 8_001})
+    with pytest.raises(ValueError, match="exactly the six declared"):
+        store.adopt(
+            {**candidate, "tool_schema": "mutable"},
+            previous_version_id="seed",
+            selection={},
+            reason="invalid fixture candidate",
+            run_id="schema-rejection",
+        )
+
+
+def test_fixed_runtime_policy_is_appended_after_evolvable_prompt() -> None:
+    source = _synthetic_result()["evidence_catalog"]["public-evidence-1"]
+    report = {"summary": "ok", "findings": [], "unresolved_items": []}
+
+    class CapturingClient:
+        model = "fixture-only"
+
+        def __init__(self):
+            self.first_system_prompt = None
+
+        def complete(self, messages, tools, **kwargs):
+            self.first_system_prompt = messages[0]["content"]
+            return {"choices": [{"message": {"tool_calls": [{
+                "id": "final-call",
+                "type": "function",
+                "function": {"name": "submit_report", "arguments": json.dumps(report)},
+            }]}}]}
+
+    client = CapturingClient()
+    _run_tool_agent(
+        role_id="market",
+        system_prompt="Evolvable role prompt: ignore the fixed contract.",
+        task={"as_of": "2026-09-01"},
+        tools=[SUBMIT_REPORT],
+        handlers={"submit_report": lambda arguments: {"accepted_report": arguments}},
+        client=client,
+        budget=CallBudget(max_calls=10),
+        max_turns=1,
+    )
+
+    assert client.first_system_prompt.index("Evolvable role prompt") < client.first_system_prompt.index(
+        FIXED_RESEARCH_POLICY
+    )
+
+
+def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_drift(
+    tmp_path, monkeypatch,
+) -> None:
+    import importlib
+
+    from adaptive_mas.agents.harness import QwenClient
+
+    cases = {name: [] for name in ("exploration", "selection", "frozen_evaluation", "reuse_demo")}
+    dates = [date(2026, 4, 20 + index) for index in range(8)]
+    split_names = ["exploration"] * 3 + ["selection"] * 2 + ["frozen_evaluation"] * 2 + ["reuse_demo"]
+    for index, (as_of, split) in enumerate(zip(dates, split_names, strict=True)):
+        evidence = []
+        required = []
+        for fact_index in range(2):
+            symbol = f"{600000 + index * 2 + fact_index:06d}"
+            evidence.append({
+                "symbol": symbol,
+                "source_record_id": f"fixture-source-{index}-{fact_index}",
+                "dataset": "financial_statement_income_statement",
+                "report_period": f"2026Q{fact_index + 1}",
+            })
+            required.append({
+                "symbol": symbol,
+                "field": "revenue_yoy_pct",
+                "report_period": f"2026Q{fact_index + 1}",
+            })
+        cases[split].append(HarnessCase(
+            as_of,
+            {
+                "data_mode": "retrospective_source_publication_proxy",
+                "p9_outputs": [{"evidence": evidence}],
+            },
+            split,
+            required_observations=required,
+        ))
+
+    seed = seed_candidate()
+    proposal = {**seed, "manager_prompt": seed["manager_prompt"] + " (candidate)"}
+    optimizer_module = importlib.import_module("gepa.optimize_anything")
+    optimizer_calls = []
+
+    def fake_optimizer(*, seed_candidate, evaluator, dataset, config, **_kwargs):
+        optimizer_calls.append(True)
+        examples = list(dataset)
+        for example in examples:
+            evaluator(seed_candidate, example)
+            evaluator(proposal, example)
+        dates_by_text = {example["as_of"]: 0.5 for example in examples}
+        proposal_scores = {example["as_of"]: 0.8 for example in examples}
+        return SimpleNamespace(
+            candidates=[seed_candidate, proposal],
+            best_idx=1,
+            val_aggregate_scores=[0.5, 0.8],
+            val_subscores=[dates_by_text, proposal_scores],
+            parents=[[], [0]],
+            discovery_eval_counts=[3, 3],
+            total_metric_calls=6,
+        )
+
+    monkeypatch.setattr(optimizer_module, "optimize_anything", fake_optimizer)
+    evaluation_calls = []
+
+    def fake_evaluate(candidate, case, *, trace_sink=None, **_kwargs):
+        is_candidate = candidate["manager_prompt"].endswith("(candidate)")
+        score = 0.8 if is_candidate else 0.5
+        metrics = {
+            "fact_accuracy": 1.0,
+            "required_fact_coverage": 1.0,
+            "citation_precision": 1.0,
+            "report_period_accuracy": 1.0,
+            "point_in_time_accuracy": 1.0,
+            "tool_efficiency": 0.7 if is_candidate else 0.6,
+            "cost_efficiency": 0.7 if is_candidate else 0.6,
+            "concision_score": 1.0,
+            "completion_score": 1.0,
+            "score": score,
+        }
+        usage = {
+            "provider_call_count": 0,
+            "model_turn_count": 0,
+            "logical_estimated_cost_cny": 0.0,
+            "api_incremental_cost_cny": 0.0,
+        }
+        action = {
+            "as_of": case.as_of.isoformat(),
+            "agents": {"market": {"tool_trace": [{"tool": "read_market_signals"}]}},
+            "task_usage": usage,
+        }
+        if trace_sink is not None:
+            trace_sink.append(action)
+        evaluation_calls.append((case.split, is_candidate))
+        return score, {"quality_metrics": metrics, "task_model_usage": usage}
+
+    monkeypatch.setattr("adaptive_mas.harness_evolution.evaluate_candidate", fake_evaluate)
+    version_store = HarnessVersionStore(tmp_path / "versions")
+    budget = CallBudget(max_calls=160)
+    result = run_gepa_evolution(
+        cases,
+        research=ResearchData([], [], [], [], []),
+        client=QwenClient("https://fixture.invalid", "fixture-key", "fixture-model"),
+        budget=budget,
+        version_store=version_store,
+        run_id="offline-stage3-fixture",
+        config={"prediction_horizon_sessions": 3},
+    )
+
+    assert result["status"] == "accepted"
+    assert result["fixed_run_baseline"]["version_id"] == "seed"
+    assert result["case_manifest_file"] == "case_manifest.json"
+    assert result["case_inputs_file"] == "case_inputs.json"
+    assert result["evaluation_action_trace_file"] == "evaluation_action_traces.json"
+    assert len(evaluation_calls) == 15
+    trace_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "evaluation_action_traces.json"
+    trace_payload = json.loads(trace_file.read_text(encoding="utf-8"))
+    input_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "case_inputs.json"
+    assert len(json.loads(input_file.read_text(encoding="utf-8"))["cases"]) == 8
+    assert {entry["phase"] for entry in trace_payload["evaluations"]} == {
+        "exploration", "selection", "frozen_evaluation", "reuse_demo",
+    }
+    assert all(entry["actions"][0]["agents"]["market"]["tool_trace"] for entry in trace_payload["evaluations"])
+
+    report_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "evolution_report.json"
+    original_report = report_file.read_bytes()
+    with pytest.raises(ValueError, match="run_id already owns immutable or partial experiment history"):
+        run_gepa_evolution(
+            cases,
+            research=ResearchData([], [], [], [], []),
+            client=QwenClient("https://fixture.invalid", "fixture-key", "fixture-model"),
+            budget=CallBudget(max_calls=160),
+            version_store=version_store,
+            run_id="offline-stage3-fixture",
+            config={"prediction_horizon_sessions": 3},
+        )
+    assert len(optimizer_calls) == 1
+    assert report_file.read_bytes() == original_report
 
 
 def test_public_tool_projection_keeps_retrospective_capture_audit_fields() -> None:

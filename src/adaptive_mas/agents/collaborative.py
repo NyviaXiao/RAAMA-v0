@@ -610,14 +610,28 @@ def investment_manager_explanation(decision: dict[str, object], research_manager
         str(row["symbol"]): row
         for row in (research_manager_view or {}).get("candidate_priorities", [])
     }
+    risk_value = decision["annualized_risk"]
+    risk_summary = (
+        f"{float(risk_value):.2%} 年化风险，预算 {float(decision['annualized_risk_budget']):.2%}"
+        if isinstance(risk_value, (int, float))
+        else "风险估计不可用"
+    )
+    hard_risk_outcome = (decision.get("evidence") or {}).get("hard_risk_outcome", {})
+    actual_hold_state = hard_risk_outcome.get("actual_hold_state")
+    risk_unresolved = isinstance(actual_hold_state, dict) and actual_hold_state.get("risk_within_budget") is False
+    summary = (
+        f"{decision['as_of_date']} 决策：{risk_summary}；"
+        f"预计交易成本 ¥{decision['expected_transaction_cost_cny']:,.2f}，"
+        f"扣费后现金 ¥{decision['estimated_cash_after_costs_cny']:,.2f}。"
+    )
+    if decision["status"] == "risk_blocked":
+        summary += "硬性风控未通过，所有新增订单已阻断。"
+    if risk_unresolved:
+        summary += "现有持仓风险仍超预算或无法确认，风险未解决。"
     return {
         "status": decision["status"],
         "prediction_horizon_sessions": decision["prediction_horizon_sessions"],
-        "summary": (
-            f"{decision['as_of_date']} 决策：方案使用 {decision['annualized_risk']:.2%} 年化风险，"
-            f"预算 {decision['annualized_risk_budget']:.2%}；预计交易成本 ¥{decision['expected_transaction_cost_cny']:,.2f}，"
-            f"扣费后现金 ¥{decision['estimated_cash_after_costs_cny']:,.2f}。"
-        ),
+        "summary": summary,
         "buy_hold_reduce_avoid_by_symbol": status_by_symbol,
         "research_context_by_symbol": {
             symbol: {
@@ -629,6 +643,11 @@ def investment_manager_explanation(decision: dict[str, object], research_manager
             if symbol in candidates
         },
         "orders": decision["orders"],
+        "risk_review_status": hard_risk_outcome.get("status"),
+        "risk_failed_checks": hard_risk_outcome.get("failed_checks", []),
+        "risk_orders_blocked": bool(hard_risk_outcome.get("orders_blocked", False)),
+        "risk_actual_hold_state": actual_hold_state,
+        "risk_unresolved": risk_unresolved,
         "source_of_numeric_plan": "existing calibrated-return optimizer; narrative agent scores do not create expected returns or order amounts",
     }
 

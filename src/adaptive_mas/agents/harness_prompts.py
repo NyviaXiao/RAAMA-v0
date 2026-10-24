@@ -1,6 +1,10 @@
 """Seed text components that GEPA evolves as a genuine multi-component candidate."""
 
 
+MAX_COMPONENT_UTF8_BYTES = 8_000
+MAX_CANDIDATE_UTF8_BYTES = 24_000
+
+
 def seed_candidate() -> dict[str, str]:
     return {
         "market_prompt": (
@@ -21,11 +25,15 @@ def seed_candidate() -> dict[str, str]:
             "invent facts or expected returns. Finish with submit_report."
         ),
         "manager_prompt": (
-            "You are the research manager. First make one concise plan with plan_research. If you "
-            "query, use exactly the role, symbol and question in that plan. Then "
-            "you may ask one targeted question of one specialist using query_specialist. The "
-            "specialist may reopen one handed-off source while answering. If you do not query, state a specific "
-            "evidence-based stopping reason in no_query_reason. Finish with finalize_research. "
+            "You are the research manager. First state a concise goal with plan_research. You may "
+            "make at most two query_specialist actions, each targeting one cited claim, symbol, and "
+            "question. After each result, choose the next action from the new evidence or stop and "
+            "finalize; never repeat an action and stop when no new cited evidence is found. "
+            "Choose only among market, fundamental, news, and market_attention roles. News uses "
+            "on-host fixed text-rule output without sending raw news text to a model; attention is a "
+            "source-reported index only and is not discussion-text sentiment. If a channel is unavailable, "
+            "report that honestly. Include an evidence-based stopping reason in no_query_reason. Finish "
+            "with finalize_research. "
             "Rank at most twelve symbols supported by specialist citations. Rank only "
             "symbols supported by specialist citations; this ranking filters the optimizer's "
             "candidate universe while all expected returns continue to come from frozen local "
@@ -49,3 +57,19 @@ def seed_candidate() -> dict[str, str]:
             "not task-specific memory."
         ),
     }
+
+
+def validate_candidate(candidate: object) -> dict[str, str]:
+    expected = set(seed_candidate())
+    if not isinstance(candidate, dict) or set(candidate) != expected:
+        raise ValueError("candidate must contain exactly the six declared evolvable text components")
+    if any(not isinstance(value, str) or not value.strip() for value in candidate.values()):
+        raise ValueError("every evolvable text component must be a nonempty string")
+    encoded_sizes = {key: len(value.encode("utf-8")) for key, value in candidate.items()}
+    if any(size > MAX_COMPONENT_UTF8_BYTES for size in encoded_sizes.values()):
+        raise ValueError("candidate component exceeds its fixed UTF-8 size bound")
+    if sum(encoded_sizes.values()) > MAX_CANDIDATE_UTF8_BYTES:
+        raise ValueError("candidate exceeds its fixed total UTF-8 size bound")
+    if any("\x00" in value for value in candidate.values()):
+        raise ValueError("candidate text cannot contain null bytes")
+    return {key: candidate[key] for key in sorted(expected)}

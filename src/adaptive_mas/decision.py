@@ -194,6 +194,115 @@ def _optimizer_candidate_symbols(
     }
 
 
+def _portfolio_risk_from_model(
+    weights: Mapping[str, float], risk_model: Mapping[str, object]
+) -> float | None:
+    vol_by_symbol = risk_model.get("annualized_volatility_by_symbol")
+    beta_by_symbol = risk_model.get("factor_beta_by_symbol")
+    market_vol = risk_model.get("market_annualized_volatility")
+    if not isinstance(vol_by_symbol, Mapping) or not isinstance(beta_by_symbol, Mapping):
+        return None
+    try:
+        market_vol = float(market_vol)
+        factor_exposure = 0.0
+        variance = 0.0
+        for symbol, raw_weight in weights.items():
+            weight = float(raw_weight)
+            volatility = float(vol_by_symbol.get(symbol, 0.0))
+            beta = float(beta_by_symbol.get(symbol, 0.0))
+            idiosyncratic_variance = max(volatility**2 - beta**2 * market_vol**2, 0.0)
+            factor_exposure += weight * beta
+            variance += weight**2 * idiosyncratic_variance
+        variance += (factor_exposure * market_vol) ** 2
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(variance) or variance < 0:
+        return None
+    return math.sqrt(variance)
+
+
+def _hard_risk_review(
+    decision: DailyDecision, config: Mapping[str, object]
+) -> tuple[DailyDecision, dict[str, object], dict[str, object]]:
+    """Review the optimizer proposal and block orders if any fixed check fails."""
+    proposed_payload = decision.to_dict()
+    reviews = risk_role_reviews(proposed_payload, dict(config))
+    checks = dict(next(iter(reviews.values()))["checks"])
+    failed_checks = sorted(key for key, passed in checks.items() if not passed)
+    outcome: dict[str, object] = {
+        "status": "passed" if not failed_checks else "blocked",
+        "orders_blocked": bool(failed_checks),
+        "failed_checks": failed_checks,
+        "checks": checks,
+        "proposal": {
+            "target_weights": dict(decision.target_weights),
+            "target_holdings_cny": dict(decision.target_holdings_cny),
+            "annualized_risk": decision.annualized_risk,
+            "risk_budget_annualized": decision.annualized_risk_budget,
+            "estimated_cash_after_costs_cny": decision.estimated_cash_after_costs_cny,
+            "one_way_turnover": decision.one_way_turnover,
+            "order_count": len(decision.orders),
+        },
+        "execution": "optimizer proposal retained" if not failed_checks else "all proposed orders blocked; hold current positions",
+        "hard_constraints_are_narrative_overridable": False,
+    }
+    if not failed_checks:
+        return decision, reviews, outcome
+
+    current_weights = {
+        symbol: float(value) / decision.current_nav_cny
+        for symbol, value in decision.current_holdings_cny.items()
+    }
+    evidence = dict(decision.evidence)
+    risk_model = evidence.get("risk_model")
+    current_risk = (
+        _portfolio_risk_from_model(current_weights, risk_model)
+        if isinstance(risk_model, Mapping) else None
+    )
+    actual_hold_state = {
+        "target_weights": current_weights,
+        "target_holdings_cny": dict(decision.current_holdings_cny),
+        "annualized_risk": current_risk,
+        "risk_budget_annualized": decision.annualized_risk_budget,
+        "cash_cny": decision.current_cash_cny,
+        "new_orders": 0,
+        "cash_movement": 0.0,
+        "note": "Existing positions remain; any pre-existing limit breach is reported and requires separate remediation.",
+    }
+    actual_hold_state["risk_within_budget"] = (
+        current_risk is not None
+        and current_risk <= decision.annualized_risk_budget + 1e-10
+    )
+    outcome["actual_hold_state"] = actual_hold_state
+    outcome["status"] = (
+        "blocked_risk_unresolved"
+        if not actual_hold_state["risk_within_budget"]
+        else "blocked_proposal"
+    )
+    blocked = replace(
+        decision,
+        status="risk_blocked",
+        target_cash_cny=decision.current_cash_cny,
+        target_holdings_cny=dict(decision.current_holdings_cny),
+        target_weights=current_weights,
+        estimated_cash_after_costs_cny=decision.current_cash_cny,
+        buy_notional_cny=0.0,
+        sell_notional_cny=0.0,
+        orders=(),
+        expected_gross_return=None,
+        forecast_error_allowance=None,
+        expected_transaction_cost_cny=0.0,
+        current_holding_objective_value_cny=None,
+        optimized_objective_value_cny=None,
+        risk_adjusted_net_incremental_value_cny=0.0,
+        risk_penalty_cny=None,
+        annualized_risk=current_risk,
+        one_way_turnover=0.0,
+        evidence={**evidence, "hard_risk_outcome": outcome},
+    )
+    return blocked, reviews, outcome
+
+
 def optimize_forecast_target(
     research: ResearchData,
     forecast: dict[str, object],
@@ -350,7 +459,7 @@ def create_daily_decision(
     }
     if versions:
         version_info.update(versions)
-    selected_method = "loss_gated_fusion"
+    selected_method = str(config.get("optimizer_return_method", "loss_gated_fusion"))
     optimization_config = config
     collaboration_trace = None
     harness_trace = None
@@ -452,7 +561,9 @@ def create_daily_decision(
         harness_trace = dict(harness_context)
         harness_research = harness_context["research"]
         if harness_research["status"] == "completed":
-            task_usage = harness_research["task_usage"]
+            task_usage = harness_research.get(
+                "receiving_task_usage", harness_research["task_usage"]
+            )
             task_cost_source = harness_context["research_cost"]
             harness_trace["research_cost_accounting"] = {
                 "logical_research_cost_cny": float(task_usage["logical_estimated_cost_cny"]),
@@ -480,7 +591,7 @@ def create_daily_decision(
                 "method": "manager-ranked sourced symbols intersected with calibrated forecast universe",
                 "priority_symbols": priority_symbols,
                 "empty_candidate_set_allows_cash": True,
-                "expected_returns_source": "unchanged loss_gated_fusion calibrated forecast",
+                "expected_returns_source": f"unchanged {selected_method} calibrated forecast",
             }
 
     if forecast["forecast_errors_by_method"].get(selected_method) is None:
@@ -528,6 +639,7 @@ def create_daily_decision(
             one_way_turnover=0.0,
             evidence={
                 "input_cutoff": as_of_date.isoformat(),
+                "selected_optimizer_return_method": selected_method,
                 "forecast_error_status": forecast["forecast_error_status"],
                 "reason": collaboration_warmup_reason or "等待成熟预测误差后才允许优化并生成订单",
                 "collaboration_status": (
@@ -659,6 +771,7 @@ def create_daily_decision(
         one_way_turnover=optimization.maximum_one_way_turnover,
         evidence={
             "input_cutoff": as_of_date.isoformat(),
+            "selected_optimizer_return_method": selected_method,
             "forecast_errors_by_method": forecast["forecast_errors_by_method"],
             "loss_gate_weights": forecast["loss_gate_weights"],
             "loss_gate_source": forecast["loss_gate_source"],
@@ -687,25 +800,35 @@ def create_daily_decision(
         },
         versions=version_info,
     )
+    decision, hard_risk_reviews, hard_risk_outcome = _hard_risk_review(
+        decision, config
+    )
     if collaboration_trace is not None:
         decision_payload = decision.to_dict()
         collaboration_trace["fixed_p9_comparison"] = fixed_p9_comparison(
             decision, p9_optimization
         )
-        collaboration_trace["research_manager"] = research_manager(
+        research_manager_view = research_manager(
             forecast,
             selected_method,
             collaboration_trace["agent_reports"],
             float(config.get("forecast_error_multiplier", 0.5)),
         )
-        collaboration_trace["risk_role_reviews"] = risk_role_reviews(
+        collaboration_trace["research_manager"] = research_manager_view
+        collaboration_trace["risk_role_reviews"] = hard_risk_reviews
+        collaboration_trace["hard_risk_outcome"] = hard_risk_outcome
+        investment_feedback = investment_manager_explanation(
             decision_payload,
-            optimization_config,
+            research_manager_view,
         )
-        collaboration_trace["investment_manager"] = investment_manager_explanation(
-            decision_payload,
-            collaboration_trace["research_manager"],
+        investment_feedback["risk_review_status"] = hard_risk_outcome["status"]
+        investment_feedback["risk_failed_checks"] = hard_risk_outcome["failed_checks"]
+        investment_feedback["risk_orders_blocked"] = hard_risk_outcome["orders_blocked"]
+        investment_feedback["risk_actual_hold_state"] = hard_risk_outcome.get("actual_hold_state")
+        investment_feedback["risk_unresolved"] = bool(
+            hard_risk_outcome.get("actual_hold_state", {}).get("risk_within_budget") is False
         )
+        collaboration_trace["investment_manager"] = investment_feedback
         query_cost = float(
             collaboration_trace["one_round_bull_bear_challenge"].get(
                 "supplementary_query_cost_cny", 0.0
@@ -731,6 +854,45 @@ def create_daily_decision(
                 **decision.evidence,
                 "selected_optimizer_return_method": selected_method,
                 "collaborative_architecture": collaboration_trace,
+                "hard_risk_outcome": hard_risk_outcome,
+                "risk_role_reviews": hard_risk_reviews,
+                "investment_manager_feedback": investment_feedback,
+            },
+        )
+    if harness_trace is not None:
+        harness_research = harness_trace["research"]
+        manager_report = harness_research["agents"]["research_manager"]["report"]
+        investment_feedback = investment_manager_explanation(decision.to_dict())
+        investment_feedback["research_priority_symbols"] = [
+            row["symbol"] for row in manager_report["priority_symbols"]
+        ]
+        investment_feedback["risk_review_status"] = hard_risk_outcome["status"]
+        investment_feedback["risk_failed_checks"] = hard_risk_outcome["failed_checks"]
+        investment_feedback["risk_orders_blocked"] = hard_risk_outcome["orders_blocked"]
+        investment_feedback["risk_actual_hold_state"] = hard_risk_outcome.get("actual_hold_state")
+        investment_feedback["risk_unresolved"] = bool(
+            hard_risk_outcome.get("actual_hold_state", {}).get("risk_within_budget") is False
+        )
+        harness_trace["risk_role_reviews"] = hard_risk_reviews
+        harness_trace["hard_risk_outcome"] = hard_risk_outcome
+        harness_trace["investment_manager_feedback"] = investment_feedback
+        decision = replace(
+            decision,
+            evidence={
+                **decision.evidence,
+                "harness": harness_trace,
+                "hard_risk_outcome": hard_risk_outcome,
+                "risk_role_reviews": hard_risk_reviews,
+                "investment_manager_feedback": investment_feedback,
+            },
+        )
+    if harness_trace is None and collaboration_trace is None:
+        decision = replace(
+            decision,
+            evidence={
+                **decision.evidence,
+                "hard_risk_outcome": hard_risk_outcome,
+                "risk_role_reviews": hard_risk_reviews,
             },
         )
     if harness_trace is not None and "research_cost_accounting" in harness_trace:

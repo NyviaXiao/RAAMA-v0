@@ -3,6 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from adaptive_mas.agents.quantitative import AGENT_IDS
 from adaptive_mas.decision import (
     PortfolioState,
@@ -23,11 +25,13 @@ from adaptive_mas.portfolio.allocation import (
 from adaptive_mas.regime.market_state import conditional_weights, market_state
 from adaptive_mas.evaluation.uncertainty import paired_block_bootstrap
 from adaptive_mas.evaluation.mvp_research import (
+    STATE_FUSION_FEATURE_SCHEMA,
     _evaluate_matured_window,
     _extend_calibration_moments,
     _fit_return_calibrators,
     _market_horizon_forecast,
     _return_calibration_buckets,
+    _state_conditioned_features,
 )
 from adaptive_mas.evaluation.mvp_research import run_mvp_research
 from adaptive_mas.evaluation.post_p8 import (
@@ -151,6 +155,35 @@ def _walk_forward_research(reverse_future=False):
         MembershipSnapshot(dates[0], dates[0], frozenset(symbols), "synthetic")
     ]
     return ResearchData(dates, adjusted, execution, index_bars, membership)
+
+
+def _state_conditioned_research(reverse_future=False):
+    research = _walk_forward_research(reverse_future=reverse_future)
+    index_closes = [1000.0 + index for index in range(20)] + [
+        900.0, 1200.0, 1180.0, 1160.0, 1140.0, 1120.0, 1100.0, 1300.0,
+        1280.0, 1260.0, 1240.0, 1220.0, 1200.0, 1400.0, 1380.0, 1360.0,
+    ]
+    index_bars = [dict(row) for row in research.index_bars]
+    for row, close in zip(index_bars, index_closes, strict=True):
+        row["close"] = close
+        row["open"] = close / 1.001
+    return ResearchData(
+        list(research.trading_dates),
+        list(research.adjusted_bars),
+        list(research.execution_bars),
+        index_bars,
+        list(research.membership_snapshots),
+    )
+
+
+def _research_through(research, cutoff):
+    return ResearchData(
+        [day for day in research.trading_dates if day <= cutoff],
+        [row for row in research.adjusted_bars if row["trade_date"] <= cutoff],
+        [row for row in research.execution_bars if row["trade_date"] <= cutoff],
+        [row for row in research.index_bars if row["trade_date"] <= cutoff],
+        [row for row in research.membership_snapshots if row.available_at <= cutoff],
+    )
 
 
 def test_ridge_standardizes_from_training_fold_and_ranks_signal():
@@ -604,6 +637,157 @@ def test_daily_decisions_with_three_session_labels_wait_for_maturity():
     assert len(training_seed["relative_calibration_sufficient_statistics"]) == len(AGENT_IDS)
 
 
+def test_state_conditioned_fusion_uses_matured_labels_and_resumes_identically():
+    research = _state_conditioned_research()
+    dates = research.trading_dates
+    config = _small_research_config()
+    config.update({
+        "decision_step_sessions": 1,
+        "prediction_horizon_sessions": 3,
+        "state_fusion_minimum_training_rows": 6,
+        "state_fusion_minimum_rows_per_state": 2,
+    })
+    full = run_mvp_research(research, config)
+    flipped_future = run_mvp_research(
+        _state_conditioned_research(reverse_future=True), config
+    )
+    full_by_date = {row["prediction_date"]: row for row in full["prediction_decisions"]}
+    flipped_by_date = {row["prediction_date"]: row for row in flipped_future["prediction_decisions"]}
+
+    pre_future_date = dates[29].isoformat()
+    assert full_by_date[pre_future_date]["expected_returns_by_method"] == flipped_by_date[
+        pre_future_date
+    ]["expected_returns_by_method"]
+    mature_predictions = [
+        row for row in full["prediction_decisions"]
+        if row["state_conditioned_fusion"]["status"] == "matured_state_conditioned_ridge"
+    ]
+    assert mature_predictions
+    for row in full["prediction_decisions"]:
+        diagnostics = row["state_conditioned_fusion"]
+        assert diagnostics["training_label_cutoff"] is None or diagnostics[
+            "training_label_cutoff"
+        ] <= row["prediction_date"]
+        if diagnostics["status"] == "matured_state_conditioned_ridge":
+            assert diagnostics["training_rows"] >= diagnostics["minimum_training_rows"]
+            assert all(
+                diagnostics["training_rows_by_state"][state] >= diagnostics["minimum_rows_per_state"]
+                for state in ("risk_on", "risk_off")
+            )
+            assert set(row["expected_returns_by_method"]["state_conditioned_fusion"]) == set(
+                row["scored_symbols"]
+            )
+        else:
+            assert row["expected_returns_by_method"]["state_conditioned_fusion"] == {}
+
+    training_rows = full["training_seed"]["state_fusion_training_rows"]
+    settled_rows = [
+        row for row in full["prediction_settlements"] if row["status"] == "settled"
+    ]
+    assert len(training_rows) == len(settled_rows)
+
+    cutoff = dates[30]
+    cutoff2 = dates[32]
+    truncated1 = _research_through(research, cutoff)
+    partial = run_mvp_research(
+        truncated1,
+        config,
+        as_of_date=cutoff,
+        ensure_as_of_decision=True,
+    )
+    future_seed = {
+        **partial["training_seed"],
+        "state_as_of": dates[31].isoformat(),
+    }
+    with pytest.raises(ValueError, match="cannot be later than the requested as-of date"):
+        run_mvp_research(
+            research,
+            config,
+            initial_state=future_seed,
+            as_of_date=cutoff,
+        )
+    with pytest.raises(ValueError, match="must be earlier than the requested decision range"):
+        run_mvp_research(
+            truncated1,
+            config,
+            initial_state=partial["training_seed"],
+            as_of_date=cutoff,
+            ensure_as_of_decision=True,
+        )
+    with pytest.raises(ValueError, match="must be earlier than the requested decision range"):
+        run_mvp_research(
+            truncated1,
+            config,
+            initial_state=partial["training_seed"],
+        )
+
+    partial2 = run_mvp_research(
+        _research_through(research, cutoff2),
+        config,
+        initial_state=partial["training_seed"],
+        as_of_date=cutoff2,
+        ensure_as_of_decision=True,
+        decision_start_date=dates[31],
+    )
+    resumed = run_mvp_research(
+        research,
+        config,
+        initial_state=partial2["training_seed"],
+        as_of_date=dates[-1],
+        decision_start_date=dates[33],
+    )
+    segments = (partial, partial2, resumed)
+
+    combined_predictions = {
+        row["prediction_date"]: row
+        for segment in segments
+        for row in segment["prediction_decisions"]
+    }
+    assert set(combined_predictions) == set(full_by_date)
+    forecast_fields = set(full_by_date[dates[31].isoformat()]) - {
+        "entry_date", "status", "planned_exit_date",
+    }
+    for prediction_date, full_row in full_by_date.items():
+        assert {
+            field: combined_predictions[prediction_date][field]
+            for field in forecast_fields
+        } == {field: full_row[field] for field in forecast_fields}
+
+    combined_settlements = {}
+    for segment in segments:
+        combined_settlements.update({
+            (row["prediction_date"], row["symbol"]): row
+            for row in segment["prediction_settlements"]
+        })
+    full_settlements = {
+        (row["prediction_date"], row["symbol"]): row
+        for row in full["prediction_settlements"]
+    }
+    assert set(combined_settlements) == set(full_settlements)
+    for key, full_row in full_settlements.items():
+        assert combined_settlements[key] == full_row
+
+    for method, full_rows in full["decisions_by_method"].items():
+        resumed_rows = [
+            row for segment in segments for row in segment["decisions_by_method"].get(method, [])
+        ]
+        assert resumed_rows == full_rows
+    assert resumed["training_seed"] == full["training_seed"]
+
+
+@pytest.mark.parametrize(
+    ("features", "state", "message"),
+    [
+        ((0.0, 0.0), "risk_on", "三个专家分位数"),
+        ((0.0, 0.0, 0.0), "unknown", "未知的成熟市场状态"),
+        ((0.0, 0.0, 0.6), "risk_off", r"有限的 \[-0.5, 0.5\]"),
+    ],
+)
+def test_state_conditioned_features_reject_invalid_inputs(features, state, message):
+    with pytest.raises(ValueError, match=message):
+        _state_conditioned_features(features, state)
+
+
 def test_daily_decision_api_returns_latest_pending_record():
     research = _walk_forward_research()
     config = _small_research_config()
@@ -626,6 +810,62 @@ def test_daily_decision_api_returns_latest_pending_record():
     assert payload["prediction_horizon_sessions"] == 3
     assert payload["current_cash_cny"] == 1_000_000.0
     assert payload["current_nav_cny"] == 1_000_000.0
+
+
+def test_daily_decision_uses_receiver_costs_for_reused_research():
+    research = _walk_forward_research()
+    config = _small_research_config()
+    config["decision_step_sessions"] = 1
+    config["prediction_horizon_sessions"] = 3
+    as_of = research.trading_dates[-1]
+    source_usage = {
+        "provider_call_count": 4,
+        "attempt_count": 4,
+        "response_cache_reuse_count": 0,
+        "model_turn_count": 4,
+        "prompt_tokens": 400,
+        "completion_tokens": 80,
+        "logical_estimated_cost_cny": 0.04,
+        "api_incremental_cost_cny": 0.04,
+    }
+    receiving_usage = {
+        **source_usage,
+        "provider_call_count": 0,
+        "response_cache_reuse_count": 4,
+        "api_incremental_cost_cny": 0.0,
+        "source_task_api_incremental_cost_cny": 0.04,
+        "research_result_reused_from_artifact": True,
+    }
+    harness_context = {
+        "research": {
+            "status": "completed",
+            "task_usage": source_usage,
+            "receiving_task_usage": receiving_usage,
+            "agents": {
+                "research_manager": {"report": {"priority_symbols": []}},
+            },
+        },
+        "research_cost": {"cost_source": "previously paid source artifact"},
+    }
+
+    decision = create_daily_decision(
+        research,
+        config,
+        as_of,
+        PortfolioState(1_000_000.0, {}),
+        harness_context=harness_context,
+    ).to_dict()
+
+    accounting = decision["evidence"]["harness"]["research_cost_accounting"]
+    assert accounting["logical_research_cost_cny"] == 0.04
+    assert accounting["actual_incremental_api_cost_cny"] == 0.0
+    assert accounting["source_task_api_cost_cny"] == 0.04
+    assert accounting["research_result_reused"] is True
+    decision_accounting = decision["evidence"]["harness"]["decision_cost_accounting"]
+    assert decision_accounting["actual_incremental_api_cost_cny"] == 0.0
+    assert decision_accounting["estimated_total_decision_cost_cny"] == (
+        decision["expected_transaction_cost_cny"] + 0.04
+    )
 
 
 def test_daily_decision_sell_orders_include_capacity_and_execution_uncertainty():
@@ -757,6 +997,73 @@ def test_equal_fusion_minus_leave_one_out_interval_has_declared_sign():
     assert interval["mean_difference"] > 0
     assert interval["mean_difference_95pct_low"] > 0
     assert paired_block_mean_difference([0.5], [0.2])["mean_difference"] > 0
+
+
+def test_state_fusion_diagnostics_compare_only_dates_with_a_mature_forecast():
+    symbols = ["000001", "000002", "000003"]
+    candidate_hash = hashlib.sha256("\n".join(symbols).encode("ascii")).hexdigest()
+    agent_predictions = {
+        agent: {symbol: index / 100 for index, symbol in enumerate(symbols)}
+        for agent in AGENT_IDS
+    }
+    equal = {
+        symbol: sum(agent_predictions[agent][symbol] for agent in AGENT_IDS) / len(AGENT_IDS)
+        for symbol in symbols
+    }
+    dates = ("2026-01-05", "2026-01-06")
+    predictions = []
+    settlements = []
+    for index, day in enumerate(dates):
+        baseline = {symbol: index * 0.01 + value for symbol, value in equal.items()}
+        state_method = (
+            {} if index == 0 else {symbol: value * 1.2 for symbol, value in baseline.items()}
+        )
+        predictions.append({
+            "prediction_date": day,
+            "input_cutoff": day,
+            "horizon_sessions": 3,
+            "scored_symbols": symbols,
+            "candidate_symbols_sha256": candidate_hash,
+            "scores_by_method": {
+                **{agent: {symbol: float(rank) for rank, symbol in enumerate(symbols)} for agent in AGENT_IDS},
+                "equal_fusion": equal,
+            },
+            "expected_returns_by_method": {
+                **agent_predictions,
+                "equal_fusion": equal,
+                "loss_gated_fusion": baseline,
+                "state_conditioned_fusion": state_method,
+            },
+            "forecast_errors_by_method": {},
+            "target_weights_by_method": {},
+            "expert_pairwise_symbol_overlap": {
+                "trend:reversal": {
+                    "shared_symbol_count": 2,
+                    "union_symbol_count": 4,
+                    "jaccard": 0.5,
+                },
+            },
+        })
+        settlements.extend({
+            "prediction_date": day,
+            "symbol": symbol,
+            "status": "settled",
+            "candidate_symbols_sha256": candidate_hash,
+            "forward_return_3s": realized,
+        } for symbol, realized in zip(symbols, (0.01, 0.05, -0.02), strict=True))
+
+    diagnostics = expert_prediction_diagnostics({
+        "prediction_decisions": predictions,
+        "prediction_settlements": settlements,
+    })
+
+    assert diagnostics["date_level_forecast_metrics"]["state_conditioned_fusion"]["matured_dates"] == 1
+    assert diagnostics["expert_pairwise_signal_universe_overlap"]["trend:reversal"]["mean"] == 0.5
+    paired = diagnostics["paired_date_level_forecast_comparisons_vs_loss_gated_fusion"][
+        "state_conditioned_fusion"
+    ]
+    assert paired["common_dates"] == 1
+    assert paired["by_metric_candidate_minus_baseline"]["mae"]["paired_dates"] == 1
 
 
 def test_optimizer_replay_continues_actual_holdings_after_blocked_sell():

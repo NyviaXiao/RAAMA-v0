@@ -29,6 +29,7 @@ DIAGNOSTIC_METHODS = (
     "equal_fusion",
     "market_plus_relative_fusion",
     "market_only",
+    "state_conditioned_fusion",
 )
 PORTFOLIO_METHODS = (
     "trend",
@@ -37,6 +38,7 @@ PORTFOLIO_METHODS = (
     "equal_fusion",
     "adaptive_fusion",
     "loss_gated_fusion",
+    "state_conditioned_fusion",
     "market_plus_relative_fusion",
     "joint_optimization",
     "joint_market_relative",
@@ -50,6 +52,7 @@ PAIRED_METHODS = (
     "liquidity_confirmation",
     "equal_fusion",
     "market_plus_relative_fusion",
+    "state_conditioned_fusion",
     "joint_optimization",
     "joint_market_relative",
 )
@@ -271,6 +274,40 @@ def render_report(output_dir: Path) -> Path:
     primary = studies["three_session_daily"]
     primary_diag = primary["prediction_and_portfolio_diagnostics"]
     primary_prediction = primary["prediction_quality"]
+    state_fusion_comparison = (
+        primary_diag.get("paired_date_level_forecast_comparisons_vs_loss_gated_fusion") or {}
+    ).get("state_conditioned_fusion")
+    if state_fusion_comparison:
+        lines.extend(
+            [
+                "",
+                "### 三日期限：状态条件融合与固定损失门控的配对预测差",
+                "",
+                "下表按相同成熟日期计算状态条件融合减固定损失门控的预测指标差。状态条件模型只使用决策前已成熟标签；区间描述开发样本，不构成独立验证。",
+                "",
+                "| 指标 | 配对日 | 状态条件融合减损失门控 [95% 区间] |",
+                "|---|---:|---:|",
+            ]
+        )
+        for metric, label in (
+            ("rank_ic", "Rank-IC"),
+            ("mae", "MAE"),
+            ("rmse", "RMSE"),
+            ("top_decile_gross_return", "Top 10% 毛收益"),
+        ):
+            comparison = state_fusion_comparison["by_metric_candidate_minus_baseline"].get(metric)
+            if not comparison:
+                continue
+            difference = comparison["mean_difference"]
+            interval = _ci(
+                comparison.get("mean_difference_95pct_low"),
+                comparison.get("mean_difference_95pct_high"),
+                percent=metric != "rank_ic",
+            )
+            value = _pct(difference, signed=True) if metric != "rank_ic" else _number(difference, 4)
+            lines.append(
+                f"| {label} | {comparison['paired_dates']} | {value} {interval} |"
+            )
     lines.extend(
         [
             "",
@@ -404,8 +441,11 @@ def render_report(output_dir: Path) -> Path:
             _baseline_row(label, "固定风险 CSI 300 价格代理", risk, "净代理", risk.get("net_total_return"), risk.get("one_way_turnover"))
         )
         for method in PORTFOLIO_METHODS:
+            summary = report["portfolio_results"].get(method)
+            if not summary:
+                continue
             lines.append(
-                _portfolio_row(label, method, report["portfolio_results"][method])
+                _portfolio_row(label, method, summary)
             )
     lines.extend(
         [
