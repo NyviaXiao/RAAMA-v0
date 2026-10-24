@@ -891,6 +891,18 @@ def test_daily_decision_sell_orders_include_capacity_and_execution_uncertainty()
     )
     assert set(payload["evidence"]["expert_matured_performance"]) == set(AGENT_IDS)
     assert all(
+        order["source_prediction_id"] in {
+            prediction["prediction_id"] for prediction in payload["predictions_by_symbol"].values()
+        }
+        and order["prediction_date"] == payload["as_of_date"]
+        and order["prediction_horizon_sessions"] == payload["prediction_horizon_sessions"]
+        for order in payload["orders"]
+    )
+    assert all(
+        prediction["available_at"] == f"{payload['as_of_date']}T15:00:00+08:00"
+        for prediction in payload["predictions_by_symbol"].values()
+    )
+    assert all(
         order["status"] == "pending_next_session"
         and order["next_session_execution_uncertain"]
         and order["estimated_liquidity_capacity_cny"] > 0
@@ -910,6 +922,8 @@ def test_daily_decision_schema_lists_account_and_order_contracts():
     assert "estimated_cash_after_costs_cny" in daily["required"]
     assert "next_session_execution_uncertain" in order["required"]
     assert "estimated_liquidity_capacity_cny" in order["required"]
+    assert "source_prediction_id" in order["required"]
+    assert "prediction_id" in daily["properties"]["predictions_by_symbol"]["additionalProperties"]["required"]
 
 
 def test_matured_calibration_sufficient_statistics_match_batch_fit():

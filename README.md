@@ -1,6 +1,6 @@
 # Risk-Aware Adaptive Multi-Agent Portfolio Decision System
 
-这是沪深300日线研究与组合决策项目。P8 提供每个交易日收盘后的点时预测与组合优化、下一交易日执行模拟、实际现金/持仓账本、成熟预测结算和可审计结果。它是可由应用调用的 Python 决策 API 与 JSON 命令行入口；项目没有交互式应用界面或网络服务。
+这是沪深300日线研究与组合决策项目。P8 提供每个交易日收盘后的点时预测与组合优化、下一交易日执行模拟、实际现金/持仓账本、成熟预测结算和可审计结果。它包括可由应用调用的 Python 决策 API、JSON 命令行入口，以及绑定本地 SQLite 的中文研究工作台；本地服务仅监听回环地址，任务只复用已有研究工件，不执行 provider 请求或券商下单。
 
 完整研究口径、结果和限制见 [P8 最终报告](P8_FINAL_REPORT_20260926.md)、[MVP 研究记录](MVP_RESEARCH.md)、[M1 固定期限研究](M1_FIXED_HORIZON_RESEARCH.md)、[P9 前向研究报告](P9_FINAL_REPORT_20260927.md) 和 [P9–P12 实施验证补充](P9_P12_FINAL_REPORT_20260927.md)。模块职责见 [架构说明](ARCHITECTURE.md)，阶段验收依据见 [P8 完成清单](P8_COMPLETION_PLAN.md)。`base.md` 仅作为可讨论的项目参考。
 

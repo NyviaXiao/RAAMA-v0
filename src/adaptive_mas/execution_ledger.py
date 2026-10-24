@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Mapping, Sequence
 
@@ -15,6 +15,7 @@ from adaptive_mas.research_provenance import stable_hash
 _CENT = Decimal("0.01")
 _ZERO = Decimal("0")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_CHINA_TZ = timezone(timedelta(hours=8))
 
 
 def _decimal(value: object, label: str, *, minimum: Decimal | None = None) -> Decimal:
@@ -142,6 +143,7 @@ def simulate_execution_ledger(
     source_artifact_hashes: Mapping[str, str] | None = None,
     research_cost_cny_by_date: Mapping[str, object] | None = None,
     prediction_records: Sequence[Mapping[str, object]] = (),
+    prediction_linkage_mode: str = "linked",
     risk_limits: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Replay proposed orders without broker connectivity and keep forecast labels out of NAV.
@@ -152,6 +154,8 @@ def simulate_execution_ledger(
     """
     if execution_mode not in {"nominal_research", "quantity"}:
         raise ValueError("execution_mode must be nominal_research or quantity")
+    if prediction_linkage_mode not in {"linked", "independent"}:
+        raise ValueError("prediction_linkage_mode must be linked or independent")
     calendar = tuple(_day(item, "trading date") for item in trading_dates)
     if not calendar or tuple(sorted(set(calendar))) != calendar:
         raise ValueError("trading_dates must be strictly increasing and unique")
@@ -206,6 +210,56 @@ def simulate_execution_ledger(
         status = str(bar.get("tradestatus", "unknown"))
         if status not in {"0", "1", "unknown"}:
             raise ValueError(f"invalid tradestatus for {key}")
+    normalized_predictions: list[dict[str, object]] = []
+    predictions_by_id: dict[str, dict[str, object]] = {}
+    for prediction in prediction_records:
+        if not isinstance(prediction, Mapping):
+            raise ValueError("prediction records must be objects")
+        prediction_id = prediction.get("prediction_id")
+        symbol = prediction.get("symbol")
+        if not isinstance(prediction_id, str) or not prediction_id.strip():
+            raise ValueError("prediction_id must be a nonempty string")
+        if prediction_id in predictions_by_id:
+            raise ValueError("prediction IDs must be unique within the execution ledger")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError("prediction records must identify a symbol")
+        prediction_day = _day(prediction.get("prediction_date"), "prediction_date")
+        if prediction_day not in calendar_index:
+            raise ValueError("prediction_date must be on the execution calendar")
+        horizon = prediction.get("horizon_sessions")
+        if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
+            raise ValueError("prediction horizon_sessions must be a positive integer")
+        available_raw = prediction.get("available_at")
+        try:
+            available_at = datetime.fromisoformat(str(available_raw).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("prediction available_at must be an ISO timestamp with a timezone") from exc
+        if available_at.tzinfo is None or available_at.utcoffset() is None:
+            raise ValueError("prediction available_at must include a timezone")
+        available_local = available_at.astimezone(_CHINA_TZ)
+        if available_local.date() != prediction_day or available_local.time().replace(tzinfo=None) < time(15, 0):
+            raise ValueError("linked daily predictions must be available after the prediction-day close")
+        prediction_row: dict[str, object] = {
+            "prediction_id": prediction_id,
+            "symbol": symbol,
+            "prediction_date": prediction_day.isoformat(),
+            "available_at": available_at.isoformat(),
+            "label_maturity_date": (
+                _day(prediction["label_maturity_date"], "label_maturity_date").isoformat()
+                if prediction.get("label_maturity_date") else None
+            ),
+            "horizon_sessions": horizon,
+            "expected_return": float(_decimal(prediction.get("expected_return"), "prediction expected_return")),
+            "label_status": str(prediction.get("label_status", "pending")),
+            "realized_return": prediction.get("realized_return"),
+            "ledger": "prediction_only_no_NAV_effect",
+        }
+        predictions_by_id[prediction_id] = prediction_row
+        normalized_predictions.append(prediction_row)
+
+    if prediction_linkage_mode == "independent" and normalized_predictions:
+        raise ValueError("independent account replay cannot include prediction records")
+
     orders_by_date: dict[date, list[dict[str, object]]] = defaultdict(list)
     for row in order_rows:
         trade_day = _day(row.get("trade_date"), "order trade_date")
@@ -213,8 +267,32 @@ def simulate_execution_ledger(
             raise ValueError("order execution date is outside the supplied calendar")
         if row.get("side") not in {"buy", "sell"}:
             raise ValueError("order side must be buy or sell")
-        if not isinstance(row.get("source_prediction_id"), str) or not str(row["source_prediction_id"]).strip():
-            raise ValueError("each executed order must reference a separate prediction ID")
+        if prediction_linkage_mode == "independent":
+            if any(key in row for key in ("source_prediction_id", "prediction_date", "prediction_horizon_sessions")):
+                raise ValueError("independent account replay orders must not claim a prediction link")
+        else:
+            prediction_id = row.get("source_prediction_id")
+            if not isinstance(prediction_id, str) or not prediction_id.strip():
+                raise ValueError("each linked order must reference an existing prediction ID")
+            prediction = predictions_by_id.get(prediction_id)
+            if prediction is None:
+                raise ValueError(f"order source_prediction_id is unknown: {prediction_id}")
+            if prediction["symbol"] != row.get("symbol"):
+                raise ValueError("order symbol does not match its source prediction")
+            if row.get("prediction_date") != prediction["prediction_date"]:
+                raise ValueError("order prediction_date does not match its source prediction")
+            order_horizon = row.get("prediction_horizon_sessions")
+            if not isinstance(order_horizon, int) or isinstance(order_horizon, bool) or order_horizon != prediction["horizon_sessions"]:
+                raise ValueError("order prediction horizon does not match its source prediction")
+            prediction_day = date.fromisoformat(str(prediction["prediction_date"]))
+            prediction_index = calendar_index[prediction_day]
+            trade_index = calendar_index[trade_day]
+            if trade_index != prediction_index + 1:
+                raise ValueError("linked orders must execute at the next session open after their prediction date")
+            available_at = datetime.fromisoformat(str(prediction["available_at"]))
+            trade_open = datetime.combine(trade_day, time(9, 30), tzinfo=_CHINA_TZ)
+            if available_at.astimezone(_CHINA_TZ) >= trade_open:
+                raise ValueError("source prediction was not available before the execution-session open")
         orders_by_date[trade_day].append(row)
 
     lots: dict[str, list[dict[str, object]]] = defaultdict(list)
@@ -270,24 +348,7 @@ def simulate_execution_ledger(
             raise ValueError("corporate action type must be cash_dividend or stock_distribution")
         actions_by_date[effective].append(action)
 
-    prediction_ledger = []
-    for prediction in prediction_records:
-        if not isinstance(prediction, Mapping):
-            raise ValueError("prediction records must be objects")
-        predicted = _decimal(prediction.get("expected_return"), "prediction expected_return")
-        prediction_ledger.append({
-            "prediction_id": str(prediction.get("prediction_id", "")),
-            "prediction_date": _day(prediction.get("prediction_date"), "prediction_date").isoformat(),
-            "label_maturity_date": (
-                _day(prediction["label_maturity_date"], "label_maturity_date").isoformat()
-                if prediction.get("label_maturity_date") else None
-            ),
-            "horizon_sessions": int(prediction.get("horizon_sessions", 0)),
-            "expected_return": float(predicted),
-            "label_status": str(prediction.get("label_status", "pending")),
-            "realized_return": prediction.get("realized_return"),
-            "ledger": "prediction_only_no_NAV_effect",
-        })
+    prediction_ledger = normalized_predictions
 
     def quantity(symbol: str) -> Decimal:
         return _holding_quantity(lots.get(symbol, []))
@@ -471,7 +532,7 @@ def simulate_execution_ledger(
                 "trade_date": trade_day.isoformat(),
                 "symbol": symbol,
                 "side": side,
-                "source_prediction_id": order["source_prediction_id"],
+                "source_prediction_id": order.get("source_prediction_id"),
                 "requested_quantity": None,
                 "requested_notional_cny": None,
                 "filled_quantity": 0.0,
@@ -687,7 +748,7 @@ def simulate_execution_ledger(
             risk_checks.append({
                 "trade_date": trade_day.isoformat(),
                 "symbol": symbol,
-                "source_prediction_id": order["source_prediction_id"],
+                "source_prediction_id": order.get("source_prediction_id"),
                 "check": "cash_capacity_lot_settlement_market_limits_and_exposure",
                 "status": "pass",
             })
@@ -772,6 +833,7 @@ def simulate_execution_ledger(
     return {
         "schema_version": "adaptive-mas.execution-ledger.v1",
         "execution_mode": execution_mode,
+        "prediction_linkage_mode": prediction_linkage_mode,
         "broker_orders_enabled": False,
         "prediction_and_accounting_separation": "prediction_ledger_is_informational_and_has_zero_NAV_effect",
         "ruleset": {

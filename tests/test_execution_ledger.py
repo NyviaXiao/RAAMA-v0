@@ -53,15 +53,27 @@ def _bar(day, *, open_price=10, close_price=10, preclose=10, amount=1_000_000, s
     }
 
 
-def _prediction(value=0.1):
+def _prediction(value=0.1, *, prediction_date=DAYS[0], symbol="600000", horizon=3, available_at=None):
+    prediction_date = date.fromisoformat(prediction_date) if isinstance(prediction_date, str) else prediction_date
     return {
-        "prediction_id": "pred-1",
-        "prediction_date": DAYS[0].isoformat(),
+        "prediction_id": f"pred-{prediction_date.isoformat()}-{symbol}",
+        "symbol": symbol,
+        "prediction_date": prediction_date.isoformat(),
+        "available_at": available_at or f"{prediction_date.isoformat()}T15:00:00+08:00",
         "label_maturity_date": DAYS[3].isoformat(),
-        "horizon_sessions": 3,
+        "horizon_sessions": horizon,
         "expected_return": value,
         "label_status": "pending",
         "realized_return": None,
+    }
+
+
+def _linked_fields(prediction_date=DAYS[0], *, horizon=3, symbol="600000"):
+    prediction_date = date.fromisoformat(prediction_date) if isinstance(prediction_date, str) else prediction_date
+    return {
+        "source_prediction_id": f"pred-{prediction_date.isoformat()}-{symbol}",
+        "prediction_date": prediction_date.isoformat(),
+        "prediction_horizon_sessions": horizon,
     }
 
 
@@ -71,13 +83,13 @@ def test_quantity_mode_enforces_buy_lot_t_plus_one_fees_and_reconciles():
         trading_dates=DAYS[:3],
         market_bars=[_bar(day) for day in DAYS[:3]],
         orders=[
-            {"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 150, "source_prediction_id": "pred-1"},
-            {"trade_date": DAYS[1], "symbol": "600000", "side": "sell", "quantity": 100, "source_prediction_id": "pred-1"},
-            {"trade_date": DAYS[2], "symbol": "600000", "side": "sell", "quantity": 100, "source_prediction_id": "pred-1"},
+            {"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 150, **_linked_fields()},
+            {"trade_date": DAYS[1], "symbol": "600000", "side": "sell", "quantity": 100, **_linked_fields()},
+            {"trade_date": DAYS[2], "symbol": "600000", "side": "sell", "quantity": 100, **_linked_fields(DAYS[1])},
         ],
         rule_pack=_rules(),
         initial_cash_cny=10_000,
-        prediction_records=[_prediction()],
+        prediction_records=[_prediction(), _prediction(prediction_date=DAYS[1])],
     )
     buy, same_day_sell, next_day_sell = result["transactions"]
     assert buy["filled_quantity"] == 100
@@ -131,24 +143,24 @@ def test_quantity_mode_blocks_suspension_locked_limit_and_capacity():
     suspended = simulate_execution_ledger(
         execution_mode="quantity", trading_dates=DAYS[:2],
         market_bars=[_bar(DAYS[0]), _bar(DAYS[1], status="0")],
-        orders=[{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100, "source_prediction_id": "pred-1"}],
-        rule_pack=_rules(), initial_cash_cny=10_000,
+        orders=[{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100, **_linked_fields()}],
+        rule_pack=_rules(), initial_cash_cny=10_000, prediction_records=[_prediction()],
     )
     assert suspended["transactions"][0]["reason"] == "suspended_or_missing_bar"
 
     locked = simulate_execution_ledger(
         execution_mode="quantity", trading_dates=DAYS[:2],
         market_bars=[_bar(DAYS[0]), _bar(DAYS[1], open_price=11, close_price=11, preclose=10, high=11, low=11)],
-        orders=[{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100, "source_prediction_id": "pred-1"}],
-        rule_pack=_rules(), initial_cash_cny=10_000,
+        orders=[{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100, **_linked_fields()}],
+        rule_pack=_rules(), initial_cash_cny=10_000, prediction_records=[_prediction()],
     )
     assert locked["transactions"][0]["reason"] == "locked_at_upper_limit"
 
     capacity = simulate_execution_ledger(
         execution_mode="quantity", trading_dates=DAYS[:2],
         market_bars=[_bar(DAYS[0], amount=1_000), _bar(DAYS[1])],
-        orders=[{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100, "source_prediction_id": "pred-1"}],
-        rule_pack=_rules(participation=0.01), initial_cash_cny=10_000,
+        orders=[{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100, **_linked_fields()}],
+        rule_pack=_rules(participation=0.01), initial_cash_cny=10_000, prediction_records=[_prediction()],
     )
     assert capacity["transactions"][0]["status"] == "blocked"
     assert capacity["transactions"][0]["reason"] == "capacity_or_risk_limit"
@@ -157,7 +169,7 @@ def test_quantity_mode_blocks_suspension_locked_limit_and_capacity():
 def test_nominal_mode_preserves_notional_sizing_and_prediction_nav_separation():
     orders = [{
         "trade_date": DAYS[1], "symbol": "600000", "side": "buy",
-        "notional_cny": 1000, "source_prediction_id": "pred-1",
+        "notional_cny": 1000, **_linked_fields(),
     }]
     first = simulate_execution_ledger(
         execution_mode="nominal_research", trading_dates=DAYS[:3],
@@ -176,6 +188,89 @@ def test_nominal_mode_preserves_notional_sizing_and_prediction_nav_separation():
     assert first["prediction_ledger"][0]["expected_return"] != changed_prediction["prediction_ledger"][0]["expected_return"]
     assert first["prediction_ledger"][0]["ledger"] == "prediction_only_no_NAV_effect"
     assert first["summary"]["all_cash_reconciliations_exact"] is True
+
+
+def test_order_prediction_reference_must_exist_and_match_symbol_date_and_horizon():
+    kwargs = {
+        "execution_mode": "quantity",
+        "trading_dates": DAYS[:3],
+        "market_bars": [_bar(day) for day in DAYS[:3]],
+        "orders": [{
+            "trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100,
+            **(_linked_fields() | {"source_prediction_id": "unknown-prediction"}),
+        }],
+        "rule_pack": _rules(),
+        "initial_cash_cny": 10_000,
+        "prediction_records": [_prediction()],
+    }
+    with pytest.raises(ValueError, match="unknown"):
+        simulate_execution_ledger(**kwargs)
+
+    wrong_symbol = _prediction(symbol="000001")
+    with pytest.raises(ValueError, match="symbol does not match"):
+        simulate_execution_ledger(
+            **(kwargs | {
+                "orders": [{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100,
+                            **(_linked_fields() | {"source_prediction_id": wrong_symbol["prediction_id"]})}],
+                "prediction_records": [wrong_symbol],
+            })
+        )
+
+    with pytest.raises(ValueError, match="horizon does not match"):
+        simulate_execution_ledger(
+            **(kwargs | {"orders": [{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100, **_linked_fields(horizon=2)}]})
+        )
+
+
+@pytest.mark.parametrize("prediction_date", [DAYS[1], DAYS[2]])
+def test_order_cannot_use_same_day_close_or_future_prediction(prediction_date):
+    prediction = _prediction(prediction_date=prediction_date)
+    kwargs = {
+        "execution_mode": "quantity",
+        "trading_dates": DAYS[:3],
+        "market_bars": [_bar(day) for day in DAYS[:3]],
+        "orders": [{
+            "trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100,
+            **_linked_fields(prediction_date),
+        }],
+        "rule_pack": _rules(),
+        "initial_cash_cny": 10_000,
+        "prediction_records": [prediction],
+    }
+    with pytest.raises(ValueError, match="next session open"):
+        simulate_execution_ledger(**kwargs)
+
+
+def test_order_prediction_must_be_available_before_next_session_open():
+    prediction = _prediction(available_at="2026-01-06T09:31:00+08:00")
+    with pytest.raises(ValueError, match="after the prediction-day close"):
+        simulate_execution_ledger(
+            execution_mode="quantity", trading_dates=DAYS[:3], market_bars=[_bar(day) for day in DAYS[:3]],
+            orders=[{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100, **_linked_fields()}],
+            rule_pack=_rules(), initial_cash_cny=10_000, prediction_records=[prediction],
+        )
+
+
+def test_prediction_ids_must_be_unique_within_the_ledger():
+    prediction = _prediction()
+    with pytest.raises(ValueError, match="prediction IDs must be unique"):
+        simulate_execution_ledger(
+            execution_mode="quantity", trading_dates=DAYS[:2], market_bars=[_bar(day) for day in DAYS[:2]],
+            orders=[], rule_pack=_rules(), initial_cash_cny=10_000,
+            prediction_records=[prediction, prediction],
+        )
+
+
+def test_independent_account_replay_is_explicit_and_has_no_prediction_claims():
+    result = simulate_execution_ledger(
+        execution_mode="quantity", prediction_linkage_mode="independent",
+        trading_dates=DAYS[:2], market_bars=[_bar(day) for day in DAYS[:2]],
+        orders=[{"trade_date": DAYS[1], "symbol": "600000", "side": "buy", "quantity": 100}],
+        rule_pack=_rules(), initial_cash_cny=10_000,
+    )
+    assert result["prediction_linkage_mode"] == "independent"
+    assert result["transactions"][0]["source_prediction_id"] is None
+    assert result["prediction_ledger"] == []
 
 
 def test_corporate_action_dividend_and_share_distribution_reconcile_exactly():

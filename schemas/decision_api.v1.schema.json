@@ -24,7 +24,8 @@
         "target_value_cny", "expected_return", "forecast_error",
         "expected_incremental_value_cny", "estimated_cost_cny",
         "estimated_liquidity_capacity_cny", "decision_date_tradestatus",
-        "next_session_execution_uncertain", "execution_note", "status"
+        "next_session_execution_uncertain", "execution_note", "status",
+        "source_prediction_id", "prediction_date", "prediction_horizon_sessions"
       ],
       "additionalProperties": false,
       "properties": {
@@ -41,7 +42,10 @@
         "decision_date_tradestatus": { "enum": ["0", "1", "unknown"] },
         "next_session_execution_uncertain": { "type": "boolean" },
         "execution_note": { "type": "string" },
-        "status": { "const": "pending_next_session" }
+        "status": { "const": "pending_next_session" },
+        "source_prediction_id": { "type": "string", "pattern": "^pred-[0-9a-f]{24}$" },
+        "prediction_date": { "type": "string", "format": "date" },
+        "prediction_horizon_sessions": { "type": "integer", "minimum": 1 }
       }
     },
     "dailyDecision": {
@@ -71,9 +75,13 @@
           "propertyNames": { "pattern": "^[0-9]{6}$" },
           "additionalProperties": {
             "type": "object",
-            "required": ["expected_return", "forecast_error", "expert_expected_returns", "loss_gate_weights", "status"],
+            "required": ["expected_return", "prediction_id", "prediction_date", "horizon_sessions", "available_at", "forecast_error", "expert_expected_returns", "loss_gate_weights", "status"],
             "properties": {
               "expected_return": { "type": "number" },
+              "prediction_id": { "type": "string", "pattern": "^pred-[0-9a-f]{24}$" },
+              "prediction_date": { "type": "string", "format": "date" },
+              "horizon_sessions": { "type": "integer", "minimum": 1 },
+              "available_at": { "type": "string", "format": "date-time" },
               "forecast_error": { "type": ["number", "null"], "minimum": 0 },
               "expert_expected_returns": { "type": "object", "additionalProperties": { "type": "number" } },
               "loss_gate_weights": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0 } },

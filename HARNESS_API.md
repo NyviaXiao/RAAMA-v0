@@ -97,6 +97,31 @@ API 在构造 Qwen 客户端或发请求前校验账户、期限、风险预算�
 
 请求限制为每次最多 24,000 UTF-8 输入字节和 1,200 个输出 token。出站提示只含决策日、点时公共市场/财务/公告信息、专家交接和固定公共评价诊断。账户现金/持仓、私有预测、优化器目标、交易指令、`test.csv` 行和本地路径不发给模型。
 
+## 本地工作台、worker 与执行账本
+
+本地工作台提供回环地址上的中文 API 和静态界面。API 只允许 `127.0.0.1`/`localhost`，任务仅接受 `decision_reuse`，会在子进程环境中移除 provider API key；必须另行启动 worker 才会处理队列。两者默认共用 `data/processed/harness_service/harness_state.sqlite3`，状态和账本结果不会写入 GEPA 的 `experiments/` 历史目录：
+
+```powershell
+.venv\Scripts\python.exe -m adaptive_mas.harness_service serve
+.venv\Scripts\python.exe -m adaptive_mas.harness_service worker
+```
+
+打开 `http://127.0.0.1:8765`。HTTP API 包含 `/api/health`、`/api/tasks`、`/api/evaluations`、`/api/execution-ledgers` 和 `/api/releases`。任务用 SQLite `BEGIN IMMEDIATE` 领取，租约过期后可恢复；同一 idempotency key 重复提交相同输入会复用原任务，改变输入则冲突。发布与回滚接口要求 `RAAMA_RELEASE_MANAGER_TOKEN` Bearer token，角色由服务端验证，不接受请求体中的角色声明。工作台保留脱敏摘要和本地受控明细；不设置 token 时发布按钮不可用。
+
+本地 SQLite 默认保存 task/trace/span、阶段、延迟、预算/费用摘要、结果与恢复事件。遥测默认不会外发；需要 OTLP 时显式安装 `observability` 可选依赖，并设置 `RAAMA_OTEL_EXPORTER_OTLP_ENDPOINT`。导出采用字段脱敏，不包含账户持仓、提示正文、凭证和本地路径。未配置 endpoint 时，服务完全依赖本地检查记录。
+
+执行账本 API 接收 `ledger_id` 和 `request`。`request` 的字段对应 `simulate_execution_ledger`：`execution_mode`（`nominal_research` 或 `quantity`）、必填 `prediction_linkage_mode`（`linked` 或明确的 `independent`）、严格递增的 `trading_dates`、`market_bars`、`orders`、`rule_pack`、`initial_cash_cny`，以及可选 `initial_lots`、`initial_holdings_cny`、`corporate_actions`、`source_artifact_hashes`、`prediction_records` 和 `risk_limits`。`linked` 模式要求订单引用唯一存在的同证券预测 ID、匹配预测日与期限；预测须在预测日收盘后可用，并且订单只能在下一交易日开盘执行。没有预测链路的独立账户回放必须显式指定 `independent`，不得填写预测 ID。预测数值仅写入标签账，不改变 NAV。同一 `ledger_id` 只能对应相同输入；重复相同请求返回已保存结果。账本返回逐日现金/NAV/股数核对、成交/受限订单、费用、滑点、风险检查、独立预测标签账和实际规则包哈希。两种模式都不会连接券商。
+
+规则包必须明确规则 ID、生效日期、HTTPS 来源标题/链接、逐证券交易规则与费用配置；系统不提供未经核实的通用市场参数。规则审核应采用适用交易所和证券类别的当前官方规则，例如[上交所 2026 年交易规则修订](https://www.sse.com.cn/lawandrules/sselawsrules2025/trade/universal/c/c_20260424_10816492.shtml)及[深交所现行交易规则公告](https://www.szse.cn/lawrules/rule/trade/current/t20260424_620190.html)，并单独版本化实际费率和适用证券规则。未录入的数据不会被自动猜测。公司行动必须附带来源引用和与本地文件相符的 SHA-256。
+
+独立评估 API 的 `POST /api/evaluations` 只接受三种操作：`predeclare`（冻结交易日历、分区、purge/embargo 和经济风险门槛）、`register_package`（登记含训练 seed/state、校准、模型、数据、工具 schema 的完整包；可通过 `package_path` 读取项目目录内 JSON 文件）和 `evaluate`（指定已登记协议/包、唯一 run ID、分区和项目目录内证据文件）。评估器从文件哈希和指标自行计算结果，不接受调用方提供的“通过”标志。`GET /api/evaluations` 显示冻结协议、包和已计算证据；没有成熟的前向影子记录时状态保持 `pending_forward`。
+
+生产协议使用 `adaptive-mas.release-evaluation-protocol.v2`，预先固定 `evaluation_scope_sha256`、共同 `execution_context_sha256`、训练基准候选 ID/哈希、交易日历、预测期限和分区边界。独立验收的候选与基准必须使用相同起始资金/持仓/股数、交易模式、风险限制、规则费率、结算行情和公司行动；实际订单与预测必须逐项对应各自的哈希决策工件。相同冻结数据范围跨协议 ID 共享独立验收占用与已查看事件/预测区间；标签成熟日必须至少晚于预测日 `horizon_sessions` 个冻结交易日，再满足下一分区的 purge/embargo。
+
+生产评估输入必须使用 `adaptive-mas.release-evaluation-input.v2`，来源清单为每个工件登记唯一 `artifact_id`、语义 `role`、项目内路径和 SHA-256。开发/选择行引用候选与基准的完整 research-result 工件；评估器校验来源包、候选/实现身份、原始研究源快照、市场快照及捕获时点，并重新运行研究评分。独立验收行还要引用执行请求和完整账本结果；请求中的市场 bars、公司行动和费用规则必须逐项匹配哈希来源工件，评估器重算执行账本并要求 NAV、现金、股数和费用结果完全一致，再从日 NAV 重新计算净收益、风险、回撤和成本。行内自报的质量、收益、风险、回撤或费用数字不参与通过判断。旧版汇总输入只可在明确的测试模式中用于 fixture 生命周期测试，无法登记为生产证据。
+
+前向影子行必须引用 `decision` 工件 ID/hash 与持久任务 ID。服务端从自己的任务 SQLite 库读取完成状态、原决策 JSON、请求日期/期限以及创建和完成时间，并核对决策候选版本/哈希、日期与期限；单独导入的 `observed_at` 声明不构成前向证据。缺失或不匹配的持久任务保持 `pending_forward`，测试 fixture 不可发布到生产。
+
 
 
 ## 已完成运行摘要

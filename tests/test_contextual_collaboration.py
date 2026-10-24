@@ -603,6 +603,8 @@ def test_hard_risk_review_blocks_optimizer_orders_and_feedback_reports_actual_ho
             estimated_liquidity_capacity_cny=200_000.0,
             decision_date_tradestatus="1", next_session_execution_uncertain=True,
             execution_note="fixture", status="pending_next_session",
+            source_prediction_id="pred-test-1", prediction_date="2026-09-27",
+            prediction_horizon_sessions=3,
         ),),
         expected_gross_return=0.06,
         forecast_error_allowance=0.01,

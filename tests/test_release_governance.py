@@ -7,9 +7,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from adaptive_mas.agents.harness_prompts import seed_candidate
+from adaptive_mas.decision import _prediction_identifier
 from adaptive_mas.harness_evolution import HarnessVersionStore
 from adaptive_mas.package_identity import source_package_identity
 from adaptive_mas.research_provenance import build_research_package_provenance, stable_hash
+from adaptive_mas import release_governance as release_governance_module
 from adaptive_mas.release_governance import HarnessReleaseStore, _qualify_evidence
 
 
@@ -41,6 +43,15 @@ def _package():
 
 def _protocol():
     days = [date(2025, 1, 1) + timedelta(days=index) for index in range(40)]
+    execution_context = {
+        "execution_mode": "nominal_research",
+        "initial_cash_cny": 10_000.0,
+        "initial_lots": {},
+        "initial_holdings_cny": {},
+        "risk_limits": {},
+        "rule_pack_sha256": stable_hash(_fixture_rule_pack(["2025-01-01", "2025-01-02"])),
+        "prediction_linkage_mode": "linked",
+    }
     return {
         "schema_version": "adaptive-mas.release-evaluation-protocol.v2",
         "evaluation_scope_sha256": "e" * 64,
@@ -65,6 +76,8 @@ def _protocol():
             "minimum_cost_savings_cny": 0.0,
             "one_sided_confidence": 0.95,
         },
+        "execution_context": execution_context,
+        "execution_context_sha256": stable_hash(execution_context),
     }
 
 
@@ -341,10 +354,9 @@ def _artifact_backed_development_input(root, package, *, candidate_complete=True
 
 
 def _fixture_rule_pack(trading_dates):
-    days = [date.fromisoformat(value) for value in trading_dates]
     return {
         "ruleset_id": "fixture-rules-v1",
-        "effective_date": days[0].isoformat(),
+        "effective_date": "2025-01-01",
         "source_title": "Explicit test-only market rules",
         "source_url": "https://example.invalid/fixture-rules",
         "symbols": {
@@ -370,7 +382,7 @@ def _fixture_rule_pack(trading_dates):
     }
 
 
-def _fixture_execution_request(trading_dates, market_hash, rule_hash):
+def _fixture_execution_request(trading_dates, market_hash, rule_hash, *, decision, label_matured_date, initial_cash_cny=10_000, rule_pack=None, risk_limits=None):
     days = [date.fromisoformat(value) for value in trading_dates]
     market_bars = [{
         "symbol": "600000",
@@ -384,20 +396,54 @@ def _fixture_execution_request(trading_dates, market_hash, rule_hash):
         "amount": 1_000_000.0,
         "volume": 100_000,
     } for day in days]
+    predictions = decision["predictions_by_symbol"]
+    prediction_records = [{
+        "prediction_id": row["prediction_id"],
+        "symbol": symbol,
+        "prediction_date": row["prediction_date"],
+        "available_at": row["available_at"],
+        "horizon_sessions": row["horizon_sessions"],
+        "expected_return": row["expected_return"],
+        "label_maturity_date": label_matured_date,
+        "label_status": "pending",
+        "realized_return": None,
+    } for symbol, row in predictions.items()]
+    orders = [{
+        "trade_date": decision["execution_date"],
+        "symbol": row["symbol"],
+        "side": row["side"],
+        "notional_cny": row["notional_cny"],
+        "source_prediction_id": row["source_prediction_id"],
+        "prediction_date": row["prediction_date"],
+        "prediction_horizon_sessions": row["prediction_horizon_sessions"],
+    } for row in decision["orders"]]
     return {
         "execution_mode": "nominal_research",
+        "prediction_linkage_mode": "linked",
         "trading_dates": trading_dates,
         "market_bars": market_bars,
-        "orders": [],
-        "rule_pack": _fixture_rule_pack(trading_dates),
-        "initial_cash_cny": 10_000,
+        "orders": orders,
+        "prediction_records": prediction_records,
+        "rule_pack": rule_pack or _fixture_rule_pack(trading_dates),
+        "initial_cash_cny": initial_cash_cny,
+        "initial_lots": {},
+        "initial_holdings_cny": {},
+        "risk_limits": risk_limits or {},
+        "corporate_actions": [],
         "source_artifact_hashes": {"market-bars": market_hash, "execution-rules": rule_hash},
     }
 
 
-def _artifact_backed_acceptance_input(root, package, *, tamper_result=False):
-    scope = {"schema_version": "fixture-evaluation-scope.v1", "scope": "explicit-test-fixture"}
+def _artifact_backed_acceptance_input(
+    root, package, *, tamper_result=False, candidate_cash_cny=10_000,
+    candidate_commission_bps=5, candidate_market_close=10.0, tamper_candidate_order=False,
+):
     protocol = _protocol()
+    scope = {
+        "schema_version": "fixture-evaluation-scope.v1",
+        "scope": "explicit-test-fixture",
+        "execution_context_sha256": protocol["execution_context_sha256"],
+    }
     protocol["evaluation_scope_sha256"] = stable_hash(scope)
     store = HarnessReleaseStore(root / "release_store", project_root=root, test_mode=True)
     store.predeclare_protocol("artifact-acceptance-protocol", protocol)
@@ -427,17 +473,66 @@ def _artifact_backed_acceptance_input(root, package, *, tamper_result=False):
             descriptors.append(_write_artifact(root, research_id, "research_result", research))
             market_identity = research["package_provenance"]["source_manifest"]["source_package_identity"]["market_snapshot_identity"]
             execution_dates = [day.isoformat() for day in days[18 + offset:22 + offset]]
+            prediction_date = as_of.isoformat()
+            expected_return = 0.05 if arm == "candidate" else 0.02
+            prediction_record_id = _prediction_identifier(prediction_date, "600000", 3, "loss_gated_fusion", expected_return, None)
+            prediction = {
+                "prediction_id": prediction_record_id,
+                "prediction_date": prediction_date,
+                "horizon_sessions": 3,
+                "available_at": f"{prediction_date}T15:00:00+08:00",
+                "expected_return": expected_return,
+                "forecast_error": None,
+            }
+            decision = {
+                "schema_version": "adaptive-mas.decision.v1",
+                "as_of_date": prediction_date,
+                "execution_date": execution_dates[1],
+                "status": "pending_execution",
+                "prediction_status": "pending",
+                "prediction_horizon_sessions": 3,
+                "predictions_by_symbol": {"600000": prediction},
+                "orders": [{
+                    "symbol": "600000", "side": "buy", "notional_cny": 1000.0,
+                    "expected_return": expected_return,
+                    "source_prediction_id": prediction_record_id,
+                    "prediction_date": prediction_date,
+                    "prediction_horizon_sessions": 3,
+                }],
+                "versions": {
+                    "harness_version_id": version_id,
+                    "harness_candidate_sha256": candidate_sha,
+                },
+                "evidence": {"harness": {"research": research}},
+            }
+            decision_id = f"{arm}-decision-{offset}"
+            descriptors.append(_write_artifact(root, decision_id, "decision", decision))
             rule_artifact = _write_artifact(
                 root,
                 f"execution-rules-{arm}-{offset}",
                 "execution_rules",
                 {
                     "schema_version": "adaptive-mas.execution-rule-pack.v1",
-                    "rule_pack": _fixture_rule_pack(execution_dates),
+                    "rule_pack": _fixture_rule_pack(execution_dates) | {
+                        "fees": _fixture_rule_pack(execution_dates)["fees"] | {
+                            "commission_per_side_bps": candidate_commission_bps
+                            if arm == "candidate" else 5,
+                        },
+                    },
                 },
             )
             descriptors.append(rule_artifact)
-            request = _fixture_execution_request(execution_dates, "0" * 64, rule_artifact["sha256"])
+            rule_pack = _fixture_rule_pack(execution_dates) | {
+                "fees": _fixture_rule_pack(execution_dates)["fees"] | {
+                    "commission_per_side_bps": candidate_commission_bps if arm == "candidate" else 5,
+                },
+            }
+            request = _fixture_execution_request(
+                execution_dates, "0" * 64, rule_artifact["sha256"], decision=decision,
+                label_matured_date=days[21 + offset].isoformat(),
+                initial_cash_cny=candidate_cash_cny if arm == "candidate" else 10_000,
+                rule_pack=rule_pack,
+            )
             settlement_market = {
                 "schema_version": "adaptive-mas.settlement-market-data.v1",
                 "market_bars": request["market_bars"],
@@ -448,10 +543,21 @@ def _artifact_backed_acceptance_input(root, package, *, tamper_result=False):
             )
             descriptors.append(market_descriptor)
             request["source_artifact_hashes"]["market-bars"] = market_descriptor["sha256"]
+            if arm == "candidate" and candidate_market_close != 10.0:
+                request["market_bars"][-1]["close"] = candidate_market_close
+                settlement_market["market_bars"][-1]["close"] = candidate_market_close
+                market_descriptor = _write_artifact(
+                    root, f"settlement-market-{arm}-{offset}", "market_data", settlement_market
+                )
+                descriptors[-1] = market_descriptor
+                request["source_artifact_hashes"]["market-bars"] = market_descriptor["sha256"]
+            if tamper_candidate_order and arm == "candidate" and offset == 0:
+                request["orders"][0]["notional_cny"] = 1500.0
             request_id = f"{arm}-execution-request-{offset}"
             wrapper = {
-                "schema_version": "adaptive-mas.execution-ledger-request.v1",
+                "schema_version": "adaptive-mas.execution-ledger-request.v2",
                 "market_snapshot_identity": market_identity,
+                "decision_artifact_id": decision_id,
                 "request": request,
             }
             descriptors.append(_write_artifact(root, request_id, "execution_request", wrapper))
@@ -465,6 +571,7 @@ def _artifact_backed_acceptance_input(root, package, *, tamper_result=False):
             result_id = f"{arm}-execution-result-{offset}"
             descriptors.append(_write_artifact(root, result_id, "execution_result", execution_result))
             identities[f"{arm}_research_artifact_id"] = research_id
+            identities[f"{arm}_decision_artifact_id"] = decision_id
             identities[f"{arm}_execution_request_artifact_id"] = request_id
             identities[f"{arm}_execution_result_artifact_id"] = result_id
         records.append({
@@ -722,12 +829,34 @@ def test_acceptance_rejects_hashed_but_nonreproducible_nav_claim(tmp_path):
         _artifact_backed_acceptance_input(tmp_path, _package(), tamper_result=True)
 
 
-def test_shadow_hash_must_match_a_same_day_persisted_completed_task(tmp_path):
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"candidate_cash_cny": 100_000_000}, "predeclared account/risk/rule context"),
+        ({"candidate_commission_bps": 6}, "predeclared account/risk/rule context"),
+        ({"candidate_market_close": 10.2}, "identical market_bars"),
+        ({"tamper_candidate_order": True}, "orders do not match the decision artifact"),
+    ],
+)
+def test_acceptance_rejects_unpaired_account_rules_market_or_unlinked_orders(tmp_path, override, message):
+    with pytest.raises(ValueError, match=message):
+        _artifact_backed_acceptance_input(tmp_path, _package(), **override)
+
+
+def test_shadow_hash_must_match_a_same_day_after_close_persisted_completed_task(tmp_path, monkeypatch):
     task_db = tmp_path / "service.sqlite3"
     store = HarnessReleaseStore(tmp_path / "registry", project_root=tmp_path, task_store_path=task_db)
     today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    created = datetime.combine(today, datetime.min.time(), ZoneInfo("Asia/Shanghai")).replace(hour=9).astimezone(timezone.utc)
+    created = datetime.combine(today, datetime.min.time(), ZoneInfo("Asia/Shanghai")).replace(hour=15, minute=5).astimezone(timezone.utc)
     updated = created + timedelta(minutes=1)
+    frozen_now = datetime.combine(today, datetime.min.time(), ZoneInfo("Asia/Shanghai")).replace(hour=16).astimezone(timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen_now.astimezone(tz) if tz is not None else frozen_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(release_governance_module, "datetime", FrozenDateTime)
     package_identity = {"candidate_version_id": "candidate-x", "candidate_sha256": "a" * 64}
     decision = {
         "schema_version": "adaptive-mas.decision.v1",
@@ -760,6 +889,21 @@ def test_shadow_hash_must_match_a_same_day_persisted_completed_task(tmp_path):
         row=evidence_row, artifacts_by_id={"decision-1": artifact}, prediction_date=today, declared_at=declared_at,
         package=package_identity, horizon_sessions=3,
     ) is True
+    before_close = datetime.combine(today, datetime.min.time(), ZoneInfo("Asia/Shanghai")).replace(hour=14, minute=59).astimezone(timezone.utc)
+    with sqlite3.connect(task_db) as connection:
+        connection.execute(
+            "UPDATE service_jobs SET created_at=?,updated_at=? WHERE task_id=?",
+            (before_close.isoformat(), (before_close + timedelta(minutes=1)).isoformat(), "forward-task-1"),
+        )
+    assert store._verify_persisted_shadow_decision(
+        row=evidence_row, artifacts_by_id={"decision-1": artifact}, prediction_date=today, declared_at=declared_at,
+        package=package_identity, horizon_sessions=3,
+    ) is False
+    with sqlite3.connect(task_db) as connection:
+        connection.execute(
+            "UPDATE service_jobs SET created_at=?,updated_at=? WHERE task_id=?",
+            (created.isoformat(), updated.isoformat(), "forward-task-1"),
+        )
     with sqlite3.connect(task_db) as connection:
         tampered = {**decision, "as_of_date": (today - timedelta(days=1)).isoformat()}
         connection.execute("UPDATE service_jobs SET result_json=? WHERE task_id=?", (json.dumps(tampered), "forward-task-1"))

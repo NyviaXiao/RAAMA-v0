@@ -15,8 +15,16 @@ dependencies = [
     "pypdf>=5.0",
 ]
 
+[project.scripts]
+raama-harness = "adaptive_mas.harness_service:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+observability = [
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

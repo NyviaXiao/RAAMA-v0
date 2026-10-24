@@ -78,6 +78,150 @@ def _finite(value: object, label: str, *, minimum: float | None = None) -> float
     return number
 
 
+def _canonical_numeric_values(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _canonical_numeric_values(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_numeric_values(item) for item in value]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("execution comparison context must contain finite numbers")
+        return number
+    return value
+
+
+def _normalize_execution_context(context: Mapping[str, object], *, from_request: bool = False) -> dict[str, object]:
+    required = {
+        "execution_mode", "initial_cash_cny", "initial_lots", "initial_holdings_cny",
+        "risk_limits", "rule_pack_sha256", "prediction_linkage_mode",
+    }
+    if set(context) != required:
+        raise ValueError("predeclared execution_context must freeze mode, account, risk, rule hash, and prediction linkage")
+    if context.get("execution_mode") not in {"nominal_research", "quantity"}:
+        raise ValueError("execution_context execution_mode is invalid")
+    if context.get("prediction_linkage_mode") != "linked":
+        raise ValueError("production acceptance requires linked decision predictions")
+    for key in ("initial_lots", "initial_holdings_cny", "risk_limits"):
+        if not isinstance(context.get(key), Mapping):
+            raise ValueError(f"execution_context {key} must be an object")
+    rule_hash = context.get("rule_pack_sha256")
+    if not isinstance(rule_hash, str) or not _HEX64.fullmatch(rule_hash):
+        raise ValueError("execution_context rule_pack_sha256 is invalid")
+    return {
+        "execution_mode": str(context["execution_mode"]),
+        "initial_cash_cny": _finite(context.get("initial_cash_cny"), "execution_context initial_cash_cny", minimum=0),
+        "initial_lots": _canonical_numeric_values(context["initial_lots"]),
+        "initial_holdings_cny": _canonical_numeric_values(context["initial_holdings_cny"]),
+        "risk_limits": _canonical_numeric_values(context["risk_limits"]),
+        "rule_pack_sha256": rule_hash,
+        "prediction_linkage_mode": "linked",
+    }
+
+
+def _execution_context_from_request(request: Mapping[str, object]) -> dict[str, object]:
+    rule_pack = request.get("rule_pack")
+    if not isinstance(rule_pack, Mapping):
+        raise ValueError("execution request rule_pack is invalid")
+    for key in ("initial_lots", "initial_holdings_cny", "risk_limits"):
+        if request.get(key) is not None and not isinstance(request.get(key), Mapping):
+            raise ValueError(f"execution request {key} must be an object")
+    return _normalize_execution_context({
+        "execution_mode": request.get("execution_mode"),
+        "initial_cash_cny": request.get("initial_cash_cny"),
+        "initial_lots": request.get("initial_lots") or {},
+        "initial_holdings_cny": request.get("initial_holdings_cny") or {},
+        "risk_limits": request.get("risk_limits") or {},
+        "rule_pack_sha256": stable_hash(dict(rule_pack)),
+        "prediction_linkage_mode": request.get("prediction_linkage_mode"),
+    })
+
+
+def _decision_execution_inputs(
+    decision: Mapping[str, object],
+    *,
+    research_result: Mapping[str, object],
+    candidate_identity: Mapping[str, object],
+    prediction_date: date,
+    horizon_sessions: int,
+    label_matured_date: str,
+) -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
+    versions = decision.get("versions")
+    evidence = decision.get("evidence")
+    harness = evidence.get("harness") if isinstance(evidence, Mapping) else None
+    embedded_research = harness.get("research") if isinstance(harness, Mapping) else None
+    if (
+        decision.get("schema_version") != "adaptive-mas.decision.v1"
+        or decision.get("as_of_date") != prediction_date.isoformat()
+        or decision.get("prediction_horizon_sessions") != horizon_sessions
+        or not isinstance(versions, Mapping)
+        or versions.get("harness_version_id") != candidate_identity.get("candidate_version_id")
+        or versions.get("harness_candidate_sha256") != candidate_identity.get("candidate_sha256")
+        or not isinstance(embedded_research, Mapping)
+        or stable_hash(dict(embedded_research)) != stable_hash(dict(research_result))
+    ):
+        raise ValueError("execution decision does not match its research artifact and frozen candidate")
+    execution_date = decision.get("execution_date")
+    if not isinstance(execution_date, str):
+        raise ValueError("execution decision has no next-session execution date")
+    _iso_day(execution_date, "decision execution_date")
+    predictions = decision.get("predictions_by_symbol")
+    orders = decision.get("orders")
+    if not isinstance(predictions, Mapping) or not isinstance(orders, list):
+        raise ValueError("execution decision must contain prediction and order records")
+    records: list[dict[str, object]] = []
+    predictions_by_id: dict[str, Mapping[str, object]] = {}
+    for symbol, raw_prediction in predictions.items():
+        if not isinstance(raw_prediction, Mapping):
+            raise ValueError("decision prediction rows must be objects")
+        prediction_id = raw_prediction.get("prediction_id")
+        if (
+            not isinstance(prediction_id, str)
+            or not prediction_id.strip()
+            or prediction_id in predictions_by_id
+            or raw_prediction.get("prediction_date") != prediction_date.isoformat()
+            or raw_prediction.get("horizon_sessions") != horizon_sessions
+            or not isinstance(raw_prediction.get("available_at"), str)
+        ):
+            raise ValueError("decision prediction is missing its unique ID or point-in-time fields")
+        _finite(raw_prediction.get("expected_return"), "decision expected_return")
+        predictions_by_id[prediction_id] = raw_prediction
+        records.append({
+            "prediction_id": prediction_id,
+            "symbol": str(symbol),
+            "prediction_date": prediction_date.isoformat(),
+            "available_at": raw_prediction["available_at"],
+            "horizon_sessions": horizon_sessions,
+            "expected_return": raw_prediction.get("expected_return"),
+            "label_maturity_date": label_matured_date,
+            "label_status": "pending",
+            "realized_return": None,
+        })
+    expected_orders: list[dict[str, object]] = []
+    for raw_order in orders:
+        if not isinstance(raw_order, Mapping):
+            raise ValueError("decision orders must be objects")
+        prediction_id = raw_order.get("source_prediction_id")
+        prediction = predictions_by_id.get(str(prediction_id))
+        if (
+            prediction is None
+            or raw_order.get("prediction_date") != prediction.get("prediction_date")
+            or raw_order.get("prediction_horizon_sessions") != prediction.get("horizon_sessions")
+            or raw_order.get("expected_return") != prediction.get("expected_return")
+        ):
+            raise ValueError("decision order does not reference its matching dated prediction")
+        expected_orders.append({
+            "trade_date": execution_date,
+            "symbol": raw_order.get("symbol"),
+            "side": raw_order.get("side"),
+            "notional_cny": raw_order.get("notional_cny"),
+            "source_prediction_id": prediction_id,
+            "prediction_date": prediction_date.isoformat(),
+            "prediction_horizon_sessions": horizon_sessions,
+        })
+    return execution_date, records, expected_orders
+
+
 class HarnessReleaseStore:
     """The registry and production pointer share one transactional SQLite database.
 
@@ -221,7 +365,7 @@ class HarnessReleaseStore:
             relative = path.relative_to(self.project_root)
         except ValueError as exc:
             raise ValueError("evidence artifacts must stay inside the configured project root") from exc
-        if not path.is_file() or path.suffix.lower() == ".csv" or path.name.lower() == "test.csv":
+        if not path.is_file() or path.suffix.lower() == ".csv":
             raise ValueError("evidence path must be an existing non-CSV file")
         if not self.test_mode and any(
             part.lower() in {"test", "tests", "fixture", "fixtures", "synthetic", "testdata"}
@@ -291,6 +435,13 @@ class HarnessReleaseStore:
         }
         if normalized_gate["one_sided_confidence"] != 0.95:
             raise ValueError("current evaluator supports a predeclared one-sided 95% confidence bound")
+        execution_context_raw = protocol.get("execution_context")
+        if not isinstance(execution_context_raw, Mapping):
+            raise ValueError("protocol must predeclare a common execution_context")
+        execution_context = _normalize_execution_context(execution_context_raw)
+        execution_context_sha256 = protocol.get("execution_context_sha256")
+        if execution_context_sha256 != stable_hash(execution_context):
+            raise ValueError("predeclared execution_context_sha256 does not match its frozen context")
         return {
             "schema_version": protocol["schema_version"],
             "evaluation_scope_sha256": scope_sha256,
@@ -304,6 +455,8 @@ class HarnessReleaseStore:
             "minimum_event_groups": minimum_groups,
             "partitions": partitions,
             "economic_gate": normalized_gate,
+            "execution_context": execution_context,
+            "execution_context_sha256": execution_context_sha256,
         }
 
     def predeclare_protocol(self, protocol_id: str, protocol: Mapping[str, object]) -> dict[str, object]:
@@ -516,8 +669,11 @@ class HarnessReleaseStore:
         if role_counts.get("frozen_scope_manifest", 0) != 1:
             raise ValueError("production input must reference one frozen scope manifest")
         scope_artifact = next(item for item in source_artifacts if item["role"] == "frozen_scope_manifest")
-        if stable_hash(self._artifact_json(scope_artifact)) != protocol["evaluation_scope_sha256"]:
+        scope_manifest = self._artifact_json(scope_artifact)
+        if stable_hash(scope_manifest) != protocol["evaluation_scope_sha256"]:
             raise ValueError("frozen scope manifest does not match the predeclared evaluation scope")
+        if partition == "independent_acceptance" and scope_manifest.get("execution_context_sha256") != protocol["execution_context_sha256"]:
+            raise ValueError("frozen scope does not bind the predeclared execution comparison context")
         research_market_artifacts = [item for item in source_artifacts if item["role"] == "research_market_snapshot"]
         if not research_market_artifacts:
             raise ValueError("production input must bind research_market_snapshot artifacts")
@@ -557,6 +713,8 @@ class HarnessReleaseStore:
             prediction_date = _iso_day(row.get("prediction_date"), "prediction_date")
             output: dict[str, object] = dict(row)
             paired_execution_calendars: dict[str, list[str]] = {}
+            paired_execution_contexts: dict[str, dict[str, object]] = {}
+            paired_decision_hashes: dict[str, str] = {}
             for arm in ("candidate", "baseline"):
                 research_id = row.get(f"{arm}_research_artifact_id")
                 if not isinstance(research_id, str) or research_id not in by_id:
@@ -624,15 +782,46 @@ class HarnessReleaseStore:
                     raise ValueError(f"{arm} acceptance artifact roles do not match their declared references")
 
                 execution_wrapper = self._artifact_json(request_artifact)
-                if execution_wrapper.get("schema_version") != "adaptive-mas.execution-ledger-request.v1":
+                if execution_wrapper.get("schema_version") != "adaptive-mas.execution-ledger-request.v2":
                     raise ValueError(f"{arm} execution request artifact has an unsupported schema")
                 market_request_identity = execution_wrapper.get("market_snapshot_identity")
                 if market_request_identity != dict(market_identity):
                     raise ValueError(f"{arm} execution request is not linked to its research market snapshot")
+                decision_id = execution_wrapper.get("decision_artifact_id")
+                decision_artifact = by_id.get(str(decision_id)) if isinstance(decision_id, str) else None
+                if decision_artifact is None or decision_artifact["role"] != "decision":
+                    raise ValueError(f"{arm} execution request must reference its hashed decision artifact")
+                decision = self._artifact_json(decision_artifact)
                 request = execution_wrapper.get("request")
                 if not isinstance(request, Mapping):
                     raise ValueError(f"{arm} execution request artifact has no request object")
                 request = dict(request)
+                if _execution_context_from_request(request) != protocol["execution_context"]:
+                    raise ValueError(f"{arm} execution request does not match the predeclared account/risk/rule context")
+                maturity_date = _iso_day(row.get("label_matured_date"), "label_matured_date")
+                try:
+                    decision_execution_date, expected_predictions, expected_orders = _decision_execution_inputs(
+                        decision,
+                        research_result=research_result,
+                        candidate_identity=identity,
+                        prediction_date=prediction_date,
+                        horizon_sessions=int(protocol["horizon_sessions"]),
+                        label_matured_date=maturity_date.isoformat(),
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"{arm} decision artifact is not a valid execution source: {exc}") from exc
+                request_calendar = request.get("trading_dates")
+                if (
+                    not isinstance(request_calendar, list)
+                    or len(request_calendar) < 2
+                    or request_calendar[0] != prediction_date.isoformat()
+                    or request_calendar[1] != decision_execution_date
+                ):
+                    raise ValueError(f"{arm} execution calendar does not match its decision's next-session date")
+                if stable_hash(request.get("prediction_records")) != stable_hash(expected_predictions):
+                    raise ValueError(f"{arm} execution predictions do not match the decision artifact")
+                if stable_hash(request.get("orders")) != stable_hash(expected_orders):
+                    raise ValueError(f"{arm} execution orders do not match the decision artifact")
                 source_hashes = request.get("source_artifact_hashes")
                 if not isinstance(source_hashes, Mapping) or not source_hashes:
                     raise ValueError(f"{arm} execution request is not linked to market data artifact hashes")
@@ -680,7 +869,7 @@ class HarnessReleaseStore:
                 if not isinstance(request_bars, list) or any(
                     not isinstance(bar, Mapping) or stable_hash(dict(bar)) not in available_bars
                     for bar in request_bars
-                ):
+                ) or {stable_hash(dict(bar)) for bar in request_bars if isinstance(bar, Mapping)} != available_bars:
                     raise ValueError(f"{arm} execution request market bars do not match hashed settlement data")
                 requested_actions = request.get("corporate_actions", [])
                 available_actions = {
@@ -692,8 +881,14 @@ class HarnessReleaseStore:
                 if not isinstance(requested_actions, list) or any(
                     not isinstance(action, Mapping) or stable_hash(dict(action)) not in available_actions
                     for action in requested_actions
-                ):
+                ) or {stable_hash(dict(action)) for action in requested_actions if isinstance(action, Mapping)} != available_actions:
                     raise ValueError(f"{arm} execution request corporate actions do not match hashed settlement data")
+                paired_execution_contexts[arm] = {
+                    "request": request,
+                    "market_hashes": sorted(referenced_market_hashes),
+                    "rule_hashes": sorted(referenced_hashes & rule_hashes),
+                }
+                paired_decision_hashes[arm] = decision_artifact["sha256"]
                 usage = research_result.get("task_usage")
                 if not isinstance(usage, Mapping):
                     raise ValueError(f"{arm} research artifact has no source task usage")
@@ -753,6 +948,38 @@ class HarnessReleaseStore:
                 output[f"{arm}_maximum_drawdown"] = drawdown
             if paired_execution_calendars.get("candidate") != paired_execution_calendars.get("baseline"):
                 raise ValueError("candidate and baseline settlement calendars must match exactly")
+            if partition != "independent_acceptance":
+                derived.append(output)
+                continue
+            candidate_context = paired_execution_contexts.get("candidate")
+            baseline_context = paired_execution_contexts.get("baseline")
+            if candidate_context is None or baseline_context is None:
+                raise ValueError("acceptance requires execution context for both paired arms")
+            candidate_request = candidate_context["request"]
+            baseline_request = baseline_context["request"]
+            assert isinstance(candidate_request, Mapping) and isinstance(baseline_request, Mapping)
+            for field in ("trading_dates", "market_bars", "corporate_actions"):
+                default = [] if field == "corporate_actions" else None
+                if stable_hash(_canonical_numeric_values(candidate_request.get(field, default))) != stable_hash(
+                    _canonical_numeric_values(baseline_request.get(field, default))
+                ):
+                    raise ValueError(f"candidate and baseline must share identical {field}")
+            if (
+                candidate_context["market_hashes"] != baseline_context["market_hashes"]
+                or candidate_context["rule_hashes"] != baseline_context["rule_hashes"]
+            ):
+                raise ValueError("candidate and baseline must reference the same hashed settlement data and execution rules")
+            output["execution_comparison_context_sha256"] = stable_hash({
+                "predeclared_execution_context_sha256": protocol["execution_context_sha256"],
+                "event_group_id": row.get("event_group_id"),
+                "market_data_artifact_sha256s": candidate_context["market_hashes"],
+                "execution_rule_artifact_sha256s": candidate_context["rule_hashes"],
+                "trading_dates": candidate_request.get("trading_dates"),
+                "market_bars": _canonical_numeric_values(candidate_request.get("market_bars")),
+                "corporate_actions": _canonical_numeric_values(candidate_request.get("corporate_actions", [])),
+            })
+            output["candidate_decision_artifact_sha256"] = paired_decision_hashes["candidate"]
+            output["baseline_decision_artifact_sha256"] = paired_decision_hashes["baseline"]
             derived.append(output)
         return derived
 
@@ -805,8 +1032,11 @@ class HarnessReleaseStore:
             declared = declared.astimezone(timezone.utc)
             if created_at <= declared or updated_at < created_at or updated_at > datetime.now(timezone.utc):
                 return False
+            local_created = created_at.astimezone(ZoneInfo("Asia/Shanghai"))
+            if (local_created.hour, local_created.minute) < (15, 0):
+                return False
             if (
-                created_at.astimezone(ZoneInfo("Asia/Shanghai")).date() != prediction_date
+                local_created.date() != prediction_date
                 or updated_at.astimezone(ZoneInfo("Asia/Shanghai")).date() != prediction_date
             ):
                 return False

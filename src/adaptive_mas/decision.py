@@ -70,6 +70,9 @@ class DecisionOrder:
     next_session_execution_uncertain: bool
     execution_note: str
     status: str
+    source_prediction_id: str = ""
+    prediction_date: str = ""
+    prediction_horizon_sessions: int = 0
 
 
 @dataclass(frozen=True)
@@ -688,6 +691,7 @@ def create_daily_decision(
         for row in research.execution_bars
         if row["trade_date"] == as_of_date
     }
+    prediction_rows = _predictions_by_symbol(forecast, selected_method)
     proposed_orders = []
     for symbol in sorted(set(portfolio.holdings_cny) | set(target_values)):
         current_value = float(portfolio.holdings_cny.get(symbol, 0.0))
@@ -726,6 +730,9 @@ def create_daily_decision(
                 next_session_execution_uncertain=True,
                 execution_note="次交易日状态与实际成交量须在执行时由行情或模拟账本确认",
                 status="pending_next_session",
+                source_prediction_id=str(prediction_rows[symbol]["prediction_id"]),
+                prediction_date=str(prediction_rows[symbol]["prediction_date"]),
+                prediction_horizon_sessions=int(prediction_rows[symbol]["horizon_sessions"]),
             )
         )
     execution_index = research.trading_dates.index(as_of_date) + 1
@@ -740,7 +747,7 @@ def create_daily_decision(
         status="pending_execution" if proposed_orders else "hold",
         prediction_status="pending",
         prediction_horizon_sessions=int(forecast["horizon_sessions"]),
-        predictions_by_symbol=_predictions_by_symbol(forecast, selected_method),
+        predictions_by_symbol=prediction_rows,
         current_nav_cny=portfolio.nav_cny,
         current_cash_cny=portfolio.cash_cny,
         current_holdings_cny=dict(sorted(portfolio.holdings_cny.items())),
@@ -939,10 +946,24 @@ def _expert_matured_performance(
 def _predictions_by_symbol(forecast: dict[str, object], method: str = "loss_gated_fusion") -> dict[str, dict[str, object]]:
     methods = forecast["expected_returns_by_method"]
     errors = forecast["forecast_errors_by_method"]
+    prediction_date = str(forecast["prediction_date"])
+    horizon_sessions = int(forecast["horizon_sessions"])
+    available_at = f"{prediction_date}T15:00:00+08:00"
     symbols = sorted(methods[method])
     return {
         symbol: {
             "expected_return": float(methods[method][symbol]),
+            "prediction_id": _prediction_identifier(
+                prediction_date,
+                symbol,
+                horizon_sessions,
+                method,
+                float(methods[method][symbol]),
+                errors.get(method),
+            ),
+            "prediction_date": prediction_date,
+            "horizon_sessions": horizon_sessions,
+            "available_at": available_at,
             "forecast_error": errors.get(method),
             "expert_expected_returns": {
                 agent_id: float(methods[agent_id][symbol])
@@ -954,6 +975,26 @@ def _predictions_by_symbol(forecast: dict[str, object], method: str = "loss_gate
         }
         for symbol in symbols
     }
+
+
+def _prediction_identifier(
+    prediction_date: str,
+    symbol: str,
+    horizon_sessions: int,
+    method: str,
+    expected_return: float,
+    forecast_error: object,
+) -> str:
+    identity = {
+        "prediction_date": prediction_date,
+        "symbol": symbol,
+        "horizon_sessions": horizon_sessions,
+        "method": method,
+        "expected_return": expected_return,
+        "forecast_error": forecast_error,
+    }
+    canonical = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"pred-{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:24]}"
 
 
 def _manifest_sha256(research: ResearchData) -> str | None:

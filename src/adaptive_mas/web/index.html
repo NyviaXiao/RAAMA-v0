@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAAMA 本地研究工作台</title>
+  <style>
+    :root{color-scheme:light;--ink:#162321;--muted:#65736f;--line:#dce5df;--paper:#f5f7f2;--panel:#fff;--green:#176b55;--mint:#dff1e8;--amber:#9b5e08;--red:#a13c37;--shadow:0 14px 36px rgba(22,54,43,.07)}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;color:var(--ink);font-size:14px;line-height:1.55}
+    button,input,textarea,select{font:inherit}button{cursor:pointer}.shell{min-height:100vh;display:grid;grid-template-columns:226px minmax(0,1fr)}
+    aside{background:#142b27;color:#e7f0eb;padding:25px 17px;display:flex;flex-direction:column;gap:26px}.brand{display:flex;align-items:center;gap:10px;padding:0 8px}.logo{width:34px;height:34px;border-radius:11px;background:#b7e3cd;color:#163a2e;display:grid;place-items:center;font-weight:800;font-size:17px}.brand strong{letter-spacing:.02em}.brand small{display:block;color:#abc0b6;font-size:11px;margin-top:1px}.nav{display:grid;gap:6px}.nav button{border:0;text-align:left;background:transparent;color:#c8d8d0;padding:10px 12px;border-radius:9px}.nav button:hover,.nav button.active{background:#24463d;color:#fff}.nav button span{display:inline-block;width:23px;color:#a8d4bd}.rail-note{margin-top:auto;border:1px solid #315248;background:#1a3932;padding:13px;border-radius:11px;font-size:12px;color:#bed0c7}.rail-note strong{display:block;color:#f1f7f3;margin-bottom:4px}.main{padding:27px clamp(20px,4vw,54px) 56px;max-width:1600px;width:100%;margin:0 auto}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:22px}.eyebrow{text-transform:uppercase;color:var(--green);font-size:11px;font-weight:750;letter-spacing:.12em}.top h1{margin:4px 0 3px;font-size:27px;letter-spacing:-.03em}.sub{color:var(--muted);margin:0}.status-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:#fff;border-radius:20px;padding:8px 12px;color:#39524a;font-size:12px;white-space:nowrap}.dot{width:8px;height:8px;border-radius:50%;background:#d59b38}.dot.ok{background:#25a174}.dot.bad{background:#c75b4e}
+    .notice{border:1px solid #cae5d7;background:#eaf6ef;color:#274d3e;border-radius:12px;padding:12px 15px;margin:0 0 20px;display:flex;align-items:flex-start;gap:10px}.notice b{font-size:15px}.grid{display:grid;gap:16px}.summary-grid{grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:20px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:18px}.stat-label{font-size:12px;color:var(--muted)}.stat-value{font-weight:750;font-size:20px;margin-top:6px}.stat-foot{font-size:11px;color:var(--muted);margin-top:2px}.section{scroll-margin-top:20px;margin-top:24px}.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:0 0 12px}.section h2{font-size:18px;margin:0}.section-head p{margin:3px 0 0;color:var(--muted);font-size:12px}.two-col{grid-template-columns:minmax(0,1.25fr) minmax(320px,.75fr);align-items:start}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field{display:grid;gap:5px}.field.full{grid-column:1/-1}.field label{color:#42554e;font-size:12px;font-weight:650}.field input,.field textarea,.field select{border:1px solid #cbd7d0;background:#fcfdfb;border-radius:8px;padding:9px 10px;color:var(--ink);width:100%;outline:none}.field input:focus,.field textarea:focus{border-color:#52967a;box-shadow:0 0 0 3px #def1e7}.field textarea{min-height:110px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12px}.help{font-size:11px;color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.primary,.secondary,.danger{border:0;border-radius:8px;padding:9px 14px;font-weight:700}.primary{background:var(--green);color:white}.primary:hover{background:#0f5945}.secondary{background:#edf3ef;color:#34554a;border:1px solid #d5e1da}.danger{background:#a13c37;color:#fff}.small{padding:6px 10px;font-size:12px}.empty{padding:26px 12px;text-align:center;color:var(--muted);border:1px dashed #cbd8d0;border-radius:10px;background:#fbfcfa}.task-list{display:grid;gap:8px}.task-row{display:flex;justify-content:space-between;align-items:center;gap:14px;border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:#fff}.task-row button{border:0;background:none;color:var(--green);font-weight:700}.task-meta{min-width:0}.task-meta strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.task-meta small{color:var(--muted)}.tag{display:inline-flex;padding:3px 8px;border-radius:20px;background:#eef2ee;color:#52635c;font-size:11px}.tag.good{background:#e0f3e8;color:#186747}.tag.warn{background:#fff2d8;color:#85560c}.tag.bad{background:#fde8e5;color:#923e36}.detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.detail-block{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fcfdfb}.detail-block h3{font-size:12px;color:#52645d;margin:0 0 7px}.detail-block p{margin:3px 0}.detail-block pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:330px;overflow:auto;margin:0;font-size:11px;color:#30453c}.line-list{display:grid;gap:7px}.line-item{border-left:2px solid #a9d4bc;padding:2px 0 2px 10px;font-size:12px}.line-item small{display:block;color:var(--muted)}.table{width:100%;border-collapse:collapse;font-size:12px}.table th,.table td{padding:8px 7px;border-bottom:1px solid #e8eeea;text-align:left}.table th{color:var(--muted);font-weight:650}.release-card{display:grid;gap:13px}.release-top{display:flex;align-items:center;justify-content:space-between;gap:14px}.release-top strong{font-size:16px}.release-status{font-size:12px;color:var(--muted)}.divider{border:0;border-top:1px solid var(--line);margin:4px 0}.toast{position:fixed;right:22px;bottom:20px;max-width:420px;padding:12px 15px;background:#183931;color:#eff8f3;border-radius:10px;box-shadow:var(--shadow);display:none;z-index:5}.toast.show{display:block}.muted{color:var(--muted)}.nowrap{white-space:nowrap}
+    @media(max-width:980px){.shell{grid-template-columns:1fr}aside{display:none}.two-col{grid-template-columns:1fr}.summary-grid{grid-template-columns:1fr 1fr}.main{padding:20px}}
+    @media(max-width:600px){.top{display:block}.status-pill{margin-top:12px}.form-grid,.summary-grid,.detail-grid{grid-template-columns:1fr}.task-row{align-items:flex-start}.section-head{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><div class="logo">R</div><div><strong>RAAMA</strong><small>本地研究工作台</small></div></div>
+      <nav class="nav" aria-label="主要导航">
+        <button class="active" data-go="overview"><span>◈</span>总览</button>
+        <button data-go="submit"><span>＋</span>新建任务</button>
+        <button data-go="tasks"><span>↻</span>任务与证据</button>
+        <button data-go="ledger"><span>▤</span>执行账本</button>
+        <button data-go="release"><span>◇</span>版本与发布</button>
+      </nav>
+      <div class="rail-note"><strong>本地保护模式</strong>当前工作台只接受已缓存研究复用。模型请求、券商下单与公开部署均关闭。</div>
+    </aside>
+    <main class="main">
+      <header class="top" id="overview">
+        <div><div class="eyebrow">Local research operations</div><h1>研究与决策工作台</h1><p class="sub">查看任务进度、证据链、组合风险、成本和已登记版本。</p></div>
+        <div class="status-pill"><span id="apiDot" class="dot"></span><span id="apiStatus">正在连接本地服务…</span></div>
+      </header>
+      <div class="notice"><b>ⓘ</b><div><strong>离线复用模式</strong>：任务必须引用已有研究 JSON。系统不会发出新的模型请求，不会向券商发送订单，也不会部署到公网。</div></div>
+
+      <div class="grid summary-grid">
+        <div class="card"><div class="stat-label">独立工作进程</div><div class="stat-value" id="workerStat">检查中</div><div class="stat-foot" id="workerFoot">任务保存在本地 SQLite</div></div>
+        <div class="card"><div class="stat-label">生产版本</div><div class="stat-value" id="releaseStat">读取中</div><div class="stat-foot" id="releaseFoot">研究候选与生产指针相互隔离</div></div>
+        <div class="card"><div class="stat-label">执行状态</div><div class="stat-value">模拟账本</div><div class="stat-foot">不会生成真实券商委托</div></div>
+      </div>
+
+      <section class="section" id="submit">
+        <div class="section-head"><div><h2>新建离线决策任务</h2><p>选择本机缓存的研究数据、账户快照与已完成研究结果。</p></div><span class="tag">worker 独立运行</span></div>
+        <div class="grid two-col">
+          <div class="card">
+            <form id="taskForm">
+              <div class="form-grid">
+                <div class="field"><label for="asOf">决策日期</label><input id="asOf" type="date" required><div class="help">请选 BaoStock 缓存覆盖的交易日。</div></div>
+                <div class="field"><label for="horizon">预测期限（交易日）</label><input id="horizon" type="number" min="1" value="3" required></div>
+                <div class="field"><label for="risk">年化风险预算</label><input id="risk" type="number" min="0.001" max="2" step="0.001" value="0.20" required></div>
+                <div class="field"><label for="seedCutoff">训练 seed 截止日</label><input id="seedCutoff" type="date" value="2026-03-06" required></div>
+                <div class="field full"><label for="marketDir">BaoStock 本地数据目录（相对项目根目录）</label><input id="marketDir" value="data/raw/baostock/fetch-20260924T150656Z" required></div>
+                <div class="field full"><label for="seedFile">训练 seed 文件</label><input id="seedFile" value="data/processed/p8_daily_three_session_continuous_v1/training_seed.json.gz" required></div>
+                <div class="field full"><label for="researchFile">已完成研究 JSON（离线复用）</label><input id="researchFile" value="experiments/gepa_harness/runs/20261023104652/daily_api_reuse_2026-08-31.json" required></div>
+                <div class="field full"><label for="portfolio">账户快照（人民币名义金额）</label><textarea id="portfolio" spellcheck="false">{
+  "cash_cny": 250000.0,
+  "holdings_cny": {"600000": 250000.0}
+}</textarea><div class="help">账户快照保存在本机任务记录中，不发送给模型。</div></div>
+              </div>
+              <div class="actions"><button class="primary" type="submit">提交离线任务</button><button class="secondary" type="button" id="reloadTasks">刷新任务</button></div>
+            </form>
+          </div>
+          <div class="card">
+            <h3 style="margin:0 0 8px">提交前检查</h3>
+            <div class="line-list">
+              <div class="line-item"><strong>复用研究工件</strong><small>只允许引用已有完成结果；不执行 provider 请求。</small></div>
+              <div class="line-item"><strong>日期与 seed 匹配</strong><small>期限必须一致，训练截止日必须早于决策日。</small></div>
+              <div class="line-item"><strong>账户与预测分账</strong><small>预测结果只作证据展示；NAV 仅由现金、持仓、费用和模拟成交计算。</small></div>
+              <div class="line-item"><strong>风险与成本可追溯</strong><small>任务输出包含风险检查、预算、成本和版本哈希。</small></div>
+            </div>
+            <hr class="divider">
+            <p class="help">路径仅接受项目目录内的本地文件。若缓存目录不可用，任务会在提交时显示不可用原因。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="tasks">
+        <div class="section-head"><div><h2>任务与证据</h2><p>任务进度、来源证据、挑战记录、组合风险与成本都来自本地后端。</p></div><span id="taskCount" class="tag">0 个任务</span></div>
+        <div class="grid two-col">
+          <div class="card"><div id="taskList" class="task-list"><div class="empty">还没有任务。提交一项离线复用决策后，这里会显示真实任务状态。</div></div></div>
+          <div class="card"><div id="taskDetail"><div class="empty">选择一个任务，查看来源、风险、费用、版本和恢复轨迹。</div></div></div>
+        </div>
+      </section>
+
+      <section class="section" id="ledger">
+        <div class="section-head"><div><h2>金融执行账本</h2><p>离线重放名义金额或真实股数约束，结果与规则版本写入本地 SQLite。</p></div><span class="tag">只模拟 · 不发单</span></div>
+        <div class="grid two-col">
+          <div class="card">
+            <form id="ledgerForm">
+              <div class="field"><label for="ledgerInput">本地执行回放 JSON</label><textarea id="ledgerInput" spellcheck="false" style="min-height:260px">{}</textarea>
+                <div class="help">需提供交易日、行情 bar、订单、资金、预测记录，以及含来源/生效日的规则包。每只证券都要明确交易单位、T+1、涨跌停、容量和费用规则。接口只读取此处粘贴的数据，不连接 provider 或券商。</div>
+              </div>
+              <div class="actions"><button class="primary" type="submit">核算并保存账本</button><button class="secondary" type="button" id="reloadLedgers">刷新账本</button></div>
+            </form>
+            <hr class="divider">
+            <div id="ledgerList" class="task-list"><div class="empty">尚无本地执行账本。</div></div>
+          </div>
+          <div class="card"><div id="ledgerDetail"><div class="empty">运行账本后查看股数、费用、净值、风险和逐日核对。</div></div></div>
+        </div>
+      </section>
+
+      <section class="section" id="release">
+        <div class="section-head"><div><h2>版本、评估与发布</h2><p>生产发布需要完整包、独立验收、经济风险门槛和前向影子证据。</p></div><span class="tag">release manager 权限</span></div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="section-head"><div><h3 style="margin:0">独立评估记录</h3><p>评估结果由冻结协议、完整版本包和本地证据文件计算。当前没有前向证据时仍显示待积累。</p></div><button class="secondary small" id="reloadEvaluations">刷新</button></div>
+          <div id="evaluationList" class="line-list"><div class="empty">正在读取协议、版本包和分区证据…</div></div>
+          <details style="margin-top:12px"><summary>登记协议、版本包或分区评估</summary>
+            <div class="field" style="margin-top:10px"><label for="evaluationCommand">评估请求</label><textarea id="evaluationCommand" spellcheck="false" style="min-height:180px">{}</textarea><div class="help">支持 predeclare、register_package（提交完整包对象或本机 JSON 文件路径）或 evaluate。evaluate 只接收项目目录内的证据文件；验收与经济状态由后端重新计算，不能在请求中指定“通过”。详细字段见 HARNESS_API.md。</div></div>
+            <div class="actions"><button class="secondary small" id="submitEvaluation" type="button">计算并登记</button></div>
+          </details>
+          <pre id="evaluationResult" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font-size:11px"></pre>
+        </div>
+        <div class="grid two-col">
+          <div class="card release-card">
+            <div class="release-top"><div><strong id="activeRelease">生产指针读取中</strong><div id="activeReleaseMeta" class="release-status">研究版本不能更改生产指针。</div></div><button class="secondary small" id="reloadRelease">刷新</button></div>
+            <div id="releaseHistory" class="line-list"><div class="empty">尚无发布审计记录。</div></div>
+            <hr class="divider">
+            <div class="field"><label for="managerToken">发布管理员令牌</label><input id="managerToken" type="password" autocomplete="off" placeholder="仅在本机内存中使用，不会保存"></div>
+            <div class="field"><label for="rollbackId">回滚到版本</label><input id="rollbackId" value="seed"></div>
+            <div class="field"><label for="rollbackConfig">回滚配置 JSON</label><textarea id="rollbackConfig" spellcheck="false">{}</textarea></div>
+            <div class="field"><label for="rollbackReason">回滚原因</label><input id="rollbackReason" value="工作台本地回滚操作"></div>
+            <div class="actions"><button class="danger small" id="rollbackButton" type="button">执行回滚</button></div>
+          </div>
+          <div class="card release-card">
+            <div><strong>发布已登记的完整评估包</strong><div class="release-status">只接受本地 evidence registry 的工件 ID；不会接受手填 passed 状态或哈希。</div></div>
+            <div class="field"><label for="packageId">完整包 ID</label><input id="packageId" placeholder="pkg-…"></div>
+            <div class="field"><label for="evidenceIds">四个证据 ID（JSON）</label><textarea id="evidenceIds" spellcheck="false">{
+  "development": "ev-…",
+  "selection": "ev-…",
+  "independent_acceptance": "ev-…",
+  "forward_shadow": "ev-…"
+}</textarea></div>
+            <div class="field"><label for="publishReason">发布原因</label><input id="publishReason" placeholder="简述为何满足预声明的发布门槛"></div>
+            <div class="actions"><button class="primary small" id="publishButton" type="button">验证并发布</button></div>
+            <p class="help">当前没有实际前向影子证据时，后端会保持 pending_forward 并拒绝发布。</p>
+          </div>
+        </div>
+      </section>
+      <footer class="muted" style="margin-top:30px;font-size:11px">RAAMA 本地服务 · SQLite 持久队列 · 不连接券商 · 不部署公网</footer>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let currentTask = null;
+    const showToast = (message) => { const t=$('toast'); t.textContent=message; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),4200); };
+    const request = async (url, options={}) => {
+      const response = await fetch(url,{cache:'no-store',...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
+      const payload = await response.json().catch(()=>({error:'服务返回了无法读取的内容'}));
+      if(!response.ok) throw new Error(payload.error || `请求失败 (${response.status})`);
+      return payload;
+    };
+    const escapeHtml = (value) => String(value??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const statusTag = (status) => {
+      const label={queued:'排队中',running:'运行中',completed:'已完成',failed:'失败',unknown:'待核对'}[status]||status||'未知';
+      const cls=status==='completed'?'good':status==='failed'||status==='unknown'?'bad':status==='running'?'warn':'';
+      return `<span class="tag ${cls}">${escapeHtml(label)}</span>`;
+    };
+    async function refreshHealth(){
+      try{const h=await request('/api/health');$('apiDot').className=`dot ${h.ok?'ok':'bad'}`;$('apiStatus').textContent=h.ok?'本地 API 已连接': '本地 API 不可用';
+        const online=h.workers?.filter(w=>w.state==='idle'||w.state==='busy')||[];$('workerStat').textContent=online.length?`${online.length} 个在线`:'未连接';$('workerFoot').textContent=online.length?online.map(w=>w.worker_id).join(' · '):'请启动独立 worker 进程后再提交任务';
+      }catch(e){$('apiDot').className='dot bad';$('apiStatus').textContent='本地 API 不可用';$('workerStat').textContent='不可用';$('workerFoot').textContent=e.message;}}
+    async function refreshTasks(){
+      try{const data=await request('/api/tasks');const tasks=data.tasks||[];$('taskCount').textContent=`${tasks.length} 个任务`;
+        if(!tasks.length){$('taskList').innerHTML='<div class="empty">还没有任务。提交一项离线复用决策后，这里会显示真实任务状态。</div>';return;}
+        $('taskList').innerHTML=tasks.map(t=>`<div class="task-row"><div class="task-meta"><strong>${escapeHtml(t.task_id)}</strong><small>${escapeHtml(t.request?.as_of||'')} · ${escapeHtml(t.stage||'')} · ${escapeHtml(t.updated_at||'')}</small></div><div>${statusTag(t.status)} <button data-task="${escapeHtml(t.task_id)}">查看</button></div></div>`).join('');
+        document.querySelectorAll('[data-task]').forEach(button=>button.addEventListener('click',()=>showTask(button.dataset.task)));
+        if(currentTask && tasks.some(t=>t.task_id===currentTask)) await showTask(currentTask,true);
+      }catch(e){$('taskList').innerHTML=`<div class="empty">任务列表不可用：${escapeHtml(e.message)}</div>`;}}
+    async function showTask(taskId,silent=false){
+      try{const d=await request(`/api/tasks/${encodeURIComponent(taskId)}?detail=1`);currentTask=taskId;const result=d.result||{};const summary=d.result_summary||{};const events=d.events||[];const research=result.evidence?.harness?.research||{};const agents=research.agents||{};const challenges=research.manager_actions||research.directed_actions||[];const orders=summary.orders||[];
+        const versions=summary.versions||{};const risk=summary.risk_checks||{};
+        $('taskDetail').innerHTML=`<div class="release-top"><div><strong>${escapeHtml(taskId)}</strong><div class="release-status">${escapeHtml(d.request?.as_of||'')} · ${escapeHtml(d.request?.horizon_sessions||'')} 日期限 · ${escapeHtml(d.stage||'')}</div></div>${statusTag(d.status)}</div>
+          <div class="detail-grid" style="margin-top:12px">
+            <div class="detail-block"><h3>决策与组合</h3><p>状态：${escapeHtml(summary.status||'待生成')}</p><p>预测标的：${escapeHtml(summary.prediction_count??0)} · 订单：${escapeHtml(summary.order_count??0)}</p><p>当前 NAV：${summary.current_nav_cny==null?'—':Number(summary.current_nav_cny).toLocaleString('zh-CN',{style:'currency',currency:'CNY'})}</p>${orders.map(o=>`<p>${escapeHtml(o.symbol)} ${escapeHtml(o.side)} · ¥${escapeHtml(o.notional_cny)} · ${escapeHtml(o.status)}</p>`).join('')}</div>
+            <div class="detail-block"><h3>风险与费用</h3><p>年化风险：${escapeHtml(summary.annualized_risk??'未知')} / 预算 ${escapeHtml(summary.annualized_risk_budget??'—')}</p><p>风险增量价值：¥${escapeHtml(summary.risk_adjusted_net_incremental_value_cny??'—')}</p><p>预计交易成本：¥${escapeHtml(summary.expected_transaction_cost_cny??'—')}</p><p>研究逻辑成本：¥${escapeHtml(summary.logical_research_cost_cny??'—')} · 新增 API：¥${escapeHtml(summary.new_api_cost_cny??'—')}</p><p>${escapeHtml(JSON.stringify(risk))}</p></div>
+            <div class="detail-block"><h3>来源与研究证据</h3><p>来源代理：${escapeHtml(research.data_mode||result.evidence?.harness?.public_evidence_mode||'见结果证据')}</p><p>角色：${escapeHtml(Object.keys(agents).join('、')||'尚无角色报告')}</p><p>引用：${escapeHtml(research.evidence_catalog?.length??research.citation_count??'—')}</p><p>版本：${escapeHtml(summary.versions?.harness_version_id||'seed')}</p></div>
+            <div class="detail-block"><h3>质询与改进动作</h3>${Array.isArray(challenges)&&challenges.length?challenges.slice(0,6).map(x=>`<p>${escapeHtml(x.status||'动作')} · ${escapeHtml(x.target_claim||x.target_role||x.action||'')}</p>`).join(''):'<p class="muted">此任务没有新增质询动作。</p>'}</div>
+            <div class="detail-block"><h3>版本与运行标识</h3>${Object.entries(versions).slice(0,8).map(([k,v])=>`<p>${escapeHtml(k)}：${escapeHtml(v)}</p>`).join('')||'<p class="muted">版本信息尚未产生。</p>'}</div>
+            <div class="detail-block"><h3>恢复与观测事件</h3><div class="line-list">${events.slice(-8).reverse().map(e=>`<div class="line-item">${escapeHtml(e.stage)}<small>${escapeHtml(e.created_at)} · ${escapeHtml(e.source)}</small></div>`).join('')||'<p class="muted">等待 worker 领取任务。</p>'}</div></div>
+          </div><details style="margin-top:10px"><summary>查看完整本地决策工件</summary><pre style="margin-top:9px">${escapeHtml(JSON.stringify(result,null,2))}</pre></details>`;
+      }catch(e){if(!silent)showToast(`读取任务失败：${e.message}`);}}
+    async function refreshRelease(){
+      try{const data=await request('/api/releases');const active=data.active||{};$('releaseStat').textContent=active.status==='seed'?'Seed（默认）':active.candidate_version_id||active.status||'—';$('releaseFoot').textContent=active.status==='seed'?'没有完整验收包；生产继续使用 seed':`版本 ${active.release_id||''}`;$('activeRelease').textContent=active.status==='seed'?'生产指针：Seed':`生产指针：${active.candidate_version_id||active.release_id}`;$('activeReleaseMeta').textContent=JSON.stringify(active.evidence_status||{status:active.status||'unknown'});
+        const history=data.history||[];$('releaseHistory').innerHTML=history.length?history.slice().reverse().map(e=>`<div class="line-item">${escapeHtml(e.action)} · ${escapeHtml(e.release_id||'seed')}<small>${escapeHtml(e.created_at)} · ${escapeHtml(e.actor_role)} · ${escapeHtml(e.details?.reason||'')}</small></div>`).join(''):'<div class="empty">尚无发布审计记录。</div>';
+      }catch(e){$('activeRelease').textContent='发布状态不可用';$('activeReleaseMeta').textContent=e.message;}}
+    async function showLedger(ledgerId,provided=null){
+      try{const saved=provided||await request(`/api/execution-ledgers/${encodeURIComponent(ledgerId)}`);const r=saved.result||{};const s=r.summary||{};const rules=r.ruleset||{};const days=r.daily_nav||[];const checks=r.reconciliation||[];const tx=r.transactions||[];
+        $('ledgerDetail').innerHTML=`<div class="release-top"><div><strong>${escapeHtml(saved.ledger_id||ledgerId)}</strong><div class="release-status">${escapeHtml(r.execution_mode||'')} · 规则 ${escapeHtml(rules.ruleset_id||'')}</div></div><span class="tag ${s.all_cash_reconciliations_exact&&s.all_nav_reconciliations_exact&&s.all_quantity_reconciliations_exact?'good':'bad'}">${s.all_cash_reconciliations_exact&&s.all_nav_reconciliations_exact&&s.all_quantity_reconciliations_exact?'核对通过':'核对失败'}</span></div>
+          <div class="detail-grid" style="margin-top:12px"><div class="detail-block"><h3>净值与成交</h3><p>初始 NAV：¥${escapeHtml(s.initial_nav_cny??'—')} · 最终 NAV：¥${escapeHtml(s.final_nav_cny??'—')}</p><p>成交额：¥${escapeHtml(s.total_traded_notional_cny??'—')} · 手续费：¥${escapeHtml(s.total_fees_cny??'—')} · 滑点：¥${escapeHtml(s.total_slippage_cost_cny??'—')}</p><p>受限订单：${escapeHtml(s.blocked_order_count??0)} · 券商委托：${r.broker_orders_enabled?'启用':'关闭'}</p></div>
+          <div class="detail-block"><h3>规则来源</h3><p>${escapeHtml(rules.source_title||'')}</p><p><a href="${escapeHtml(rules.source_url||'#')}" target="_blank" rel="noreferrer">${escapeHtml(rules.source_url||'未提供')}</a></p><p>生效日：${escapeHtml(rules.effective_date||'')} · 配置 SHA-256：${escapeHtml(rules.configuration_sha256||'')}</p></div>
+          <div class="detail-block"><h3>逐日净值</h3><table class="table"><thead><tr><th>交易日</th><th>现金</th><th>持仓市值</th><th>NAV</th><th>费用</th></tr></thead><tbody>${days.slice(-12).map(d=>`<tr><td>${escapeHtml(d.trade_date)}</td><td>¥${escapeHtml(d.cash_cny)}</td><td>¥${escapeHtml(d.market_value_cny)}</td><td>¥${escapeHtml(d.nav_cny)}</td><td>¥${escapeHtml(d.fees_cny)}</td></tr>`).join('')}</tbody></table></div>
+          <div class="detail-block"><h3>成交与阻断</h3><div class="line-list">${tx.slice(-12).map(t=>`<div class="line-item">${escapeHtml(t.trade_date)} · ${escapeHtml(t.symbol)} ${escapeHtml(t.side)} · ${escapeHtml(t.status)}<small>请求 ${escapeHtml(t.requested_quantity??t.requested_notional_cny??'—')} · 成交股数 ${escapeHtml(t.filled_quantity)} · 成交金额 ¥${escapeHtml(t.filled_notional_cny)} · ${escapeHtml(t.reason||'')}</small></div>`).join('')||'<p class="muted">无订单记录</p>'}</div></div>
+          <div class="detail-block"><h3>现金、NAV 与股数核对</h3><p>${checks.length} 个交易日；现金 ${s.all_cash_reconciliations_exact?'逐日相等':'存在偏差'}，NAV ${s.all_nav_reconciliations_exact?'逐日相等':'存在偏差'}，股数 ${s.all_quantity_reconciliations_exact?'逐日相等':'存在偏差'}。</p><p>预测标签账与 NAV 分离：${escapeHtml(r.prediction_and_accounting_separation||'未声明')}</p></div></div>`;
+      }catch(e){$('ledgerDetail').innerHTML=`<div class="empty">账本读取失败：${escapeHtml(e.message)}</div>`;}}
+    async function refreshLedgers(){
+      try{const data=await request('/api/execution-ledgers');const rows=data.ledgers||[];if(!rows.length){$('ledgerList').innerHTML='<div class="empty">尚无本地执行账本。</div>';return;}
+        $('ledgerList').innerHTML=rows.map(x=>`<div class="task-row"><div class="task-meta"><strong>${escapeHtml(x.ledger_id)} · ${escapeHtml(x.execution_mode)}</strong><small>${escapeHtml(x.ruleset?.ruleset_id||'')} · ¥${escapeHtml(x.summary?.final_nav_cny??'—')} · ${escapeHtml(x.created_at)}</small></div><button data-ledger="${escapeHtml(x.ledger_id)}">查看</button></div>`).join('');document.querySelectorAll('[data-ledger]').forEach(b=>b.addEventListener('click',()=>showLedger(b.dataset.ledger)));}
+      catch(e){$('ledgerList').innerHTML=`<div class="empty">账本列表不可用：${escapeHtml(e.message)}</div>`;}}
+    async function refreshEvaluations(){
+      try{const d=await request('/api/evaluations');const rows=[];
+        (d.protocols||[]).forEach(x=>rows.push(`<div class="line-item">已冻结协议 · ${escapeHtml(x.protocol_id)}<small>${escapeHtml(x.declared_at)} · SHA-256 ${escapeHtml(x.protocol_sha256)}</small></div>`));
+        (d.packages||[]).forEach(x=>rows.push(`<div class="line-item">完整版本包 · ${escapeHtml(x.package_id)}<small>${escapeHtml(x.created_at)} · SHA-256 ${escapeHtml(x.package_sha256)}</small></div>`));
+        (d.evidence||[]).forEach(x=>rows.push(`<div class="line-item">${escapeHtml(x.partition)} · ${escapeHtml(x.evidence_status||'pending')} · ${escapeHtml(x.evidence_id)}<small>run ${escapeHtml(x.run_id)} · 研究门槛 ${escapeHtml(x.research_quality_passed??'待计算')} · 经济门槛 ${escapeHtml(x.economic_gate?.status||'待计算')} · 前向检查 ${escapeHtml(x.forward_shadow_checks_passed??'待积累')}</small></div>`));
+        $('evaluationList').innerHTML=rows.join('')||'<div class="empty">尚未登记评估协议、完整版本包或分区证据。</div>';
+      }catch(e){$('evaluationList').innerHTML=`<div class="empty">评估记录不可用：${escapeHtml(e.message)}</div>`;}}
+    $('submitEvaluation').addEventListener('click',async()=>{
+      try{const body=JSON.parse($('evaluationCommand').value);const result=await request('/api/evaluations',{method:'POST',body:JSON.stringify(body)});$('evaluationResult').textContent=JSON.stringify(result,null,2);showToast('评估请求已由本地后端处理。');await refreshEvaluations();}
+      catch(e){$('evaluationResult').textContent=e.message;showToast(`评估未登记：${e.message}`);}});
+    $('ledgerForm').addEventListener('submit',async event=>{
+      event.preventDefault();try{const replay=JSON.parse($('ledgerInput').value);const ledgerId=crypto.randomUUID().replaceAll('-','');const saved=await request('/api/execution-ledgers',{method:'POST',body:JSON.stringify({ledger_id:ledgerId,request:replay})});showToast('执行账本已核算并保存。');await refreshLedgers();await showLedger(ledgerId,saved);}
+      catch(e){showToast(`账本未保存：${e.message}`);}});
+    $('taskForm').addEventListener('submit',async event=>{
+      event.preventDefault();try{const portfolio=JSON.parse($('portfolio').value);const requestBody={mode:'decision_reuse',as_of:$('asOf').value,horizon_sessions:Number($('horizon').value),risk_budget_annualized:Number($('risk').value),training_seed_trained_through:$('seedCutoff').value,training_seed_horizon_sessions:Number($('horizon').value),baostock_run_dir:$('marketDir').value,training_seed:$('seedFile').value,reuse_research_json:$('researchFile').value,portfolio};
+        const task_id=crypto.randomUUID().replaceAll('-','');const idempotency_key=`workbench:${task_id}`;const created=await request('/api/tasks',{method:'POST',body:JSON.stringify({task_id,idempotency_key,request:requestBody})});currentTask=created.task_id;showToast('任务已写入 SQLite 队列。');await refreshTasks();await showTask(currentTask);
+      }catch(e){showToast(`提交失败：${e.message}`);}});
+    $('reloadTasks').addEventListener('click',refreshTasks);$('reloadRelease').addEventListener('click',refreshRelease);$('reloadLedgers').addEventListener('click',refreshLedgers);$('reloadEvaluations').addEventListener('click',refreshEvaluations);
+    $('rollbackButton').addEventListener('click',async()=>{try{const token=$('managerToken').value;const body={release_id:$('rollbackId').value,reason:$('rollbackReason').value,config:JSON.parse($('rollbackConfig').value)};const d=await request('/api/releases/rollback',{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify(body)});showToast(`已回滚至 ${d.to_release_id}`);await refreshRelease();}catch(e){showToast(`回滚未执行：${e.message}`);}});
+    $('publishButton').addEventListener('click',async()=>{try{const token=$('managerToken').value;const body={package_id:$('packageId').value,evidence_ids:JSON.parse($('evidenceIds').value),reason:$('publishReason').value};const d=await request('/api/releases/publish',{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify(body)});showToast(`已发布版本 ${d.release_id}`);await refreshRelease();}catch(e){showToast(`发布未执行：${e.message}`);}});
+    document.querySelectorAll('[data-go]').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('[data-go]').forEach(x=>x.classList.remove('active'));button.classList.add('active');$(button.dataset.go).scrollIntoView({behavior:'smooth'});}));
+    refreshHealth();refreshTasks();refreshLedgers();refreshEvaluations();refreshRelease();setInterval(()=>{refreshHealth();refreshTasks();},3000);
+  </script>
+</body>
+</html>
