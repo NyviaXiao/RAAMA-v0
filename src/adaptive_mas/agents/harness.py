@@ -2140,15 +2140,22 @@ CLAIM_TYPES = {"source_fact", "calculation", "inference", "unknown"}
 CALCULATION_DECIMAL_PRECISION = 50
 CALCULATION_DECIMAL_ROUNDING = "ROUND_HALF_EVEN"
 _CLAIM_NUMBER = re.compile(
-    r"(?<![A-Za-z0-9_])(?P<number>[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?)(?P<unit>\s*(?:%|％|percent(?:age)?(?:\s+points?)?|percentage\s+points?|basis\s+points?|百分点|百分比|亿元|万元|千元|元|人民币|CNY|RMB|美元|港元|万股|股|倍))?(?![A-Za-z0-9_])",
+    r"(?<![A-Za-z0-9_])(?P<number>[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?)(?P<unit>\s*(?:%|％|percent(?:age)?(?:\s+points?)?|percentage\s+points?|basis\s+points?|bps?|个基点|基点|百分点|百分比|亿元|万元|千元|元|人民币|CNY|RMB|美元|港元|万股|股|倍))?(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
 _CLAIM_CHINESE_NUMBER = re.compile(
-    r"(?<![A-Za-z0-9_])(?P<number>负?[零〇一二两三四五六七八九十百千万亿点]+)(?P<unit>个百分点|%|％|percent(?:age)?|百分点|百分比|亿元|万元|千元|元|人民币|CNY|RMB|美元|港元|万股|股|倍|basis\s+points?)?",
+    r"(?<![A-Za-z0-9_])(?P<number>负?[零〇一二两三四五六七八九十百千万亿点]+)(?P<unit>个百分点|%|％|percent(?:age)?|百分点|百分比|个基点|基点|亿元|万元|千元|元|人民币|CNY|RMB|美元|港元|万股|股|倍|basis\s+points?|bps?)?",
     re.IGNORECASE,
 )
 _CLAIM_PREFIXED_NUMBER = re.compile(
     r"(?<![A-Za-z0-9_])(?P<unit>CNY|RMB|USD|HKD)\s*(?P<number>[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?)(?P<suffix_unit>\s*(?:%|％))?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CLAIM_SAMPLE_WINDOW = re.compile(
+    r"(?:近|最近|过去(?:的)?|(?:the\s+)?(?:last|past|recent)|over\s+the\s+last)\s*"
+    r"(?P<number>[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?|"
+    r"负?[零〇一二两三四五六七八九十百千万亿点]+)\s*"
+    r"(?:个\s*)?(?:交易日|交易天|trading\s+(?:sessions|days))",
     re.IGNORECASE,
 )
 _CHINESE_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
@@ -2209,7 +2216,7 @@ def _calculation_operand(
         raise ValueError(f"source fact {field_name!r} has no verified source vintage identity")
     unit_key = _numeric_unit_key(unit)
     currency_key = _numeric_unit_key(currency)
-    if unit_key not in {"percent", "percentage_point", "CNY", "USD", "HKD"}:
+    if unit_key not in {"percent", "percentage_point", "basis_point", "CNY", "USD", "HKD"}:
         raise ValueError(f"source fact {field_name!r} uses a unit outside the calculator's financial unit contract")
     if unit_key in {"CNY", "USD", "HKD"} and currency_key != unit_key:
         raise ValueError(f"source fact {field_name!r} has no matching verified currency")
@@ -2559,8 +2566,10 @@ def _numeric_unit_key(unit: object) -> str | None:
     normalized = re.sub(r"\s+", "", unit).casefold()
     if normalized in {"%", "％", "percent", "percentage"}:
         return "percent"
-    if normalized in {"百分点", "个百分点", "percentagepoint", "percentagepoints", "basispoint", "basispoints", "bp", "bps"}:
+    if normalized in {"百分点", "个百分点", "percentagepoint", "percentagepoints"}:
         return "percentage_point"
+    if normalized in {"基点", "个基点", "basispoint", "basispoints", "bp", "bps"}:
+        return "basis_point"
     if normalized in {"cny", "rmb", "元", "人民币"}:
         return "CNY"
     if normalized in {"usd", "美元"}:
@@ -2634,6 +2643,32 @@ def _is_contextual_security_code(text: str, start: int, end: int) -> bool:
     return prefix_label is not None or suffix_label is not None
 
 
+def _allowed_sample_window_spans(
+    text: str,
+    cited_sources: Sequence[Mapping[str, object]],
+) -> list[tuple[int, int]]:
+    allowed_counts = {
+        int(source["sample_sessions"])
+        for source in cited_sources
+        if source.get("source_type") == "industry_market_risk_diagnostic"
+        and isinstance(source.get("sample_sessions"), int)
+        and not isinstance(source.get("sample_sessions"), bool)
+        and 1 <= int(source["sample_sessions"]) <= 120
+    }
+    spans: list[tuple[int, int]] = []
+    if not allowed_counts:
+        return spans
+    for match in _CLAIM_SAMPLE_WINDOW.finditer(text):
+        token = match.group("number")
+        try:
+            value = _parse_chinese_decimal(token) if any(character in _CHINESE_DIGITS or character in "十百千万亿点负" for character in token) else Decimal(token.replace(",", ""))
+        except (InvalidOperation, ValueError):
+            continue
+        if value in allowed_counts:
+            spans.append(match.span("number"))
+    return spans
+
+
 def _validate_numeric_claim_text(
     text: str,
     *,
@@ -2652,6 +2687,7 @@ def _validate_numeric_claim_text(
             allowed_values.setdefault(value, set()).add(_numeric_unit_key(observation.get("unit")))
 
     calendar_spans = _allowed_calendar_spans(text, cited_sources)
+    sample_window_spans = _allowed_sample_window_spans(text, cited_sources)
     literals: list[tuple[int, int, str, str | None, bool]] = []
     for match in _CLAIM_NUMBER.finditer(text):
         literals.append((
@@ -2697,13 +2733,22 @@ def _validate_numeric_claim_text(
         if (
             unit is None
             and not prefix_match
-            and any(start >= span_start and end <= span_end for span_start, span_end in calendar_spans)
+            and (
+                any(start >= span_start and end <= span_end for span_start, span_end in calendar_spans)
+                or any(start >= span_start and end <= span_end for span_start, span_end in sample_window_spans)
+            )
         ):
             continue
         if token in symbols and unit is None and not prefix_match and _is_contextual_security_code(text, start, end):
             continue
         matching_units = allowed_values.get(value)
-        if matching_units is not None and (literal_unit is None or literal_unit in matching_units):
+        if literal_unit is None and matching_units is not None:
+            continue
+        if matching_units is not None and literal_unit in matching_units:
+            continue
+        if literal_unit == "basis_point" and "percentage_point" in allowed_values.get(value / Decimal(100), set()):
+            continue
+        if literal_unit == "percentage_point" and "basis_point" in allowed_values.get(value * Decimal(100), set()):
             continue
         raise ValueError(f"{role_id} claim contains unsupported numeric literal {token}{unit or ''}")
 
@@ -3376,6 +3421,7 @@ def _run_local_risk_role(
                 "fetched_at": source_time,
                 "period_start": dates[0].isoformat(),
                 "period_end": dates[-1].isoformat(),
+                "sample_sessions": len(daily_returns),
                 "metric": metric,
                 "value": float(value),
                 "unit": unit,

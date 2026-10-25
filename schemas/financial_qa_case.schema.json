@@ -24,9 +24,9 @@
         "type": "object", "additionalProperties": false,
         "required": ["source_id", "content_sha256", "page_number", "evidence_type", "metric"],
         "properties": {
-          "source_id": {"type": "string", "minLength": 1},
-          "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "page_number": {"type": "integer", "minimum": 1},
+          "source_id": {"type": ["string", "null"], "minLength": 1},
+          "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "page_number": {"type": ["integer", "null"], "minimum": 1},
           "evidence_type": {"enum": ["fact", "table", "cell", "span", "paragraph", "refutation", "permission", "time"]},
           "metric": {"type": ["string", "null"]},
           "raw_value": {"type": ["string", "null"]},
@@ -50,6 +50,7 @@
           "annotation_note": {"type": ["string", "null"]}
         },
         "allOf": [
+          {"if": {"properties": {"evidence_type": {"enum": ["fact", "table", "cell", "span", "paragraph", "refutation"]}}}, "then": {"properties": {"source_id": {"type": "string", "minLength": 1}, "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "page_number": {"type": "integer", "minimum": 1}}}},
           {"if": {"properties": {"evidence_type": {"const": "cell"}}}, "then": {"required": ["table_id", "row_index", "column_index"], "properties": {"table_id": {"type": "string", "minLength": 1}, "row_index": {"type": "integer", "minimum": 0}, "column_index": {"type": "integer", "minimum": 0}}}},
           {"if": {"properties": {"evidence_type": {"const": "table"}}}, "then": {"required": ["table_id"], "properties": {"table_id": {"type": "string", "minLength": 1}}, "anyOf": [{"required": ["row_index"], "properties": {"row_index": {"type": "integer", "minimum": 0}}}, {"required": ["row_start", "row_end"], "properties": {"row_start": {"type": "integer", "minimum": 0}, "row_end": {"type": "integer", "minimum": 0}}}]}},
           {"if": {"properties": {"evidence_type": {"const": "fact"}}}, "then": {"required": ["fact_id"], "properties": {"fact_id": {"type": "string", "minLength": 1}}}},

@@ -147,6 +147,32 @@ def test_exact_cell_rejects_explicit_cell_unit_conflicting_with_table_unit(tmp_p
     assert report["metrics"]["at_k"]["1"]["evidence_recall_mean"] == 0.0
 
 
+@pytest.mark.parametrize(("candidate_record_id", "expected_recall"), [
+    ("grant-revocation-1", 1.0),
+    ("grant-revocation-2", 0.0),
+])
+def test_permission_evidence_matches_event_id_without_document_location(
+    tmp_path, candidate_record_id: str, expected_recall: float,
+) -> None:
+    case = _case()
+    case["required_evidence"] = [{
+        "source_id": None,
+        "content_sha256": None,
+        "page_number": None,
+        "evidence_type": "permission",
+        "evidence_record_id": "grant-revocation-1",
+        "metric": None,
+    }]
+    candidate = {
+        "evidence_id": "event-1",
+        "citation": {"evidence_record_id": candidate_record_id},
+    }
+
+    report = _run(tmp_path, case, [candidate])
+
+    assert report["metrics"]["at_k"]["1"]["evidence_recall_mean"] == expected_recall
+
+
 def test_offline_evaluator_does_not_match_metric_substrings_in_text(tmp_path) -> None:
     candidate = _candidate()
     candidate["text"] = "营业收入 10.00"

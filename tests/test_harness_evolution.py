@@ -19,6 +19,8 @@ from adaptive_mas.agents.harness import (
     _financial_calculation,
     _fundamental_handlers,
     _run_tool_agent,
+    _numeric_unit_key,
+    _validate_numeric_claim_text,
     _validate_report,
     compact_agent_messages,
 )
@@ -812,6 +814,63 @@ def test_runtime_fact_gate_rejects_unsupported_numeric_claim_literals() -> None:
     }]
     with pytest.raises(ValueError, match="unsupported numeric literal 25%"):
         _validate_report(report, {unit_source["evidence_id"]: unit_source}, "fundamental")
+
+
+def test_runtime_claim_scanner_keeps_basis_points_and_percentage_points_distinct() -> None:
+    assert _numeric_unit_key("basis points") == "basis_point"
+    assert _numeric_unit_key("percentage points") == "percentage_point"
+
+    positive_and_negative = [
+        ("0.01", "percentage points", "The rate increased by 1 basis point.", True),
+        ("0.01", "percentage points", "The rate increased by 1 percentage point.", False),
+        ("1", "percentage points", "The rate increased by 100 basis points.", True),
+        ("1", "percentage points", "The rate increased by 10 basis points.", False),
+        ("100", "basis points", "The rate increased by 1 percentage point.", True),
+        ("100", "basis points", "The rate increased by 100 percentage points.", False),
+        ("51", "个基点", "利差下降51个基点。", True),
+    ]
+    for value, unit, text, supported in positive_and_negative:
+        observations = [{"value": Decimal(value), "unit": unit}]
+        if supported:
+            _validate_numeric_claim_text(
+                text, symbols={"600000"}, cited_sources=[], observations=observations, role_id="fundamental",
+            )
+        else:
+            with pytest.raises(ValueError, match="unsupported numeric literal"):
+                _validate_numeric_claim_text(
+                    text, symbols={"600000"}, cited_sources=[], observations=observations, role_id="fundamental",
+                )
+
+
+def test_runtime_claim_scanner_allows_only_source_backed_risk_sample_windows() -> None:
+    source = {
+        "source_type": "industry_market_risk_diagnostic",
+        "sample_sessions": 60,
+    }
+    _validate_numeric_claim_text(
+        "The estimate uses the recent 60 trading sessions.",
+        symbols={"600000"},
+        cited_sources=[source],
+        observations=[],
+        role_id="risk",
+    )
+    _validate_numeric_claim_text(
+        "近六十个交易日样本用于风险统计。",
+        symbols={"600000"},
+        cited_sources=[source],
+        observations=[],
+        role_id="risk",
+    )
+
+    for text, cited_sources in (
+        ("The recent 60 trading sessions support the estimate.", [{**source, "sample_sessions": 20}]),
+        ("The estimate uses the recent 60 trading sessions.", []),
+        ("The estimate reports 60 units.", [source]),
+    ):
+        with pytest.raises(ValueError, match="unsupported numeric literal 60"):
+            _validate_numeric_claim_text(
+                text, symbols={"600000"}, cited_sources=cited_sources, observations=[], role_id="risk",
+            )
 
 
 def test_runtime_fact_gate_flags_conflicting_same_period_financial_sources() -> None:

@@ -99,7 +99,23 @@ def _normalized_gold_evidence(item: Mapping[str, Any]) -> dict[str, Any]:
 def _validate_gold_evidence(case_id: Any, gold: Sequence[Mapping[str, Any]]) -> None:
     for item in gold:
         evidence_type = item.get("evidence_type")
-        if (
+        if evidence_type in {"permission", "time"}:
+            if not isinstance(item.get("evidence_record_id"), str) or not item["evidence_record_id"].strip():
+                raise ValueError(f"case {case_id!r} evidence requires an exact evidence_record_id for {evidence_type!r}")
+            source_id = item.get("source_id")
+            content_sha256 = item.get("content_sha256")
+            page_number = item.get("page_number")
+            if source_id is not None and (not isinstance(source_id, str) or not source_id.strip()):
+                raise ValueError(f"case {case_id!r} evidence has an invalid optional source_id")
+            if content_sha256 is not None and (
+                not isinstance(content_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", content_sha256) is None
+            ):
+                raise ValueError(f"case {case_id!r} evidence has an invalid optional content_sha256")
+            if page_number is not None and (
+                isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1
+            ):
+                raise ValueError(f"case {case_id!r} evidence has an invalid optional page_number")
+        elif (
             not isinstance(item.get("source_id"), str)
             or not str(item.get("source_id")).strip()
             or not isinstance(item.get("content_sha256"), str)
@@ -160,6 +176,13 @@ def _required_match(required: Mapping[str, Any], candidate: Mapping[str, Any]) -
         if expected is not None and citation.get(citation_key) != expected:
             return False
     evidence_type = required.get("evidence_type")
+    if evidence_type in {"permission", "time"}:
+        evidence_record_id = required.get("evidence_record_id")
+        return (
+            isinstance(evidence_record_id, str)
+            and bool(evidence_record_id.strip())
+            and citation.get("evidence_record_id") == evidence_record_id
+        )
     if not all(required.get(key) is not None for key in ("source_id", "content_sha256", "page_number")):
         return False
 
@@ -190,9 +213,6 @@ def _required_match(required: Mapping[str, Any], candidate: Mapping[str, Any]) -
             if required.get(key) is not None and citation.get(key) != required.get(key):
                 return False
         if not (required.get("span_id") or (required.get("char_start") is not None and required.get("char_end") is not None)):
-            return False
-    elif evidence_type in {"permission", "time"}:
-        if not required.get("evidence_record_id") or citation.get("evidence_record_id") != required.get("evidence_record_id"):
             return False
     else:
         return False
@@ -317,12 +337,13 @@ def _candidate_identity(candidate: Mapping[str, Any]) -> str:
         key: citation.get(key)
         for key in (
             "source_id", "content_sha256", "page_number", "table_id", "row_start", "row_end",
-            "span_id", "char_start", "char_end", "fact_id",
+            "span_id", "char_start", "char_end", "fact_id", "evidence_record_id",
         )
     }
     location["supporting_cells"] = cells
     has_precise_location = bool(
         citation.get("fact_id")
+        or citation.get("evidence_record_id")
         or citation.get("span_id")
         or (citation.get("char_start") is not None and citation.get("char_end") is not None)
         or (citation.get("table_id") and (citation.get("row_start") is not None or cells))
