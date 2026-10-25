@@ -157,9 +157,212 @@ def _explicit_unit_text(parts: list[str]) -> str | None:
 def _period_header(value: str) -> str | None:
     """Keep the source's period label when a table heading states one clearly."""
     text = value.strip()
-    if re.search(r"(?:19|20)\d{2}", text) and re.search(r"年|FY|Q[1-4]|季度|截至|期末", text, flags=re.IGNORECASE):
+    period_marker = r"年|FY|Q[1-4]|季度|截至|期末|(?:1[-—~至]3|1[-—~至]6|1[-—~至]9|4[-—~至]6|7[-—~至]9|10[-—~至]12)月|12月31日"
+    if re.search(r"(?:19|20)\d{2}", text) and re.search(period_marker, text, flags=re.IGNORECASE):
         return text
     return None
+
+
+_STATEMENT_TITLE = re.compile(
+    r"(?:资产负债表|利润表|现金流量表|所有者权益变动表|主要会计数据和财务指标|财务指标)",
+)
+_TABLE_HEADER_WORDS = (
+    "项目", "科目", "指标", "本期金额", "上期金额", "期末余额", "期初余额",
+    "期末数", "期初数", "报告期",
+)
+
+
+def _docling_table_segments(cells: list[Any]) -> list[dict[str, Any]]:
+    """Separate a merged Docling table only at explicit headers or statement titles."""
+    rows: dict[int, list[Any]] = {}
+    for cell in cells:
+        rows.setdefault(int(cell.start_row_offset_idx), []).append(cell)
+    if not rows:
+        return []
+    for row_cells in rows.values():
+        row_cells.sort(key=lambda cell: int(cell.start_col_offset_idx))
+
+    column_header_rows = sorted({
+        int(cell.start_row_offset_idx)
+        for cell in cells
+        if bool(getattr(cell, "column_header", False))
+    })
+    header_runs: list[tuple[int, int]] = []
+    for row in column_header_rows:
+        if not header_runs or row != header_runs[-1][1] + 1:
+            header_runs.append((row, row))
+        else:
+            header_runs[-1] = (header_runs[-1][0], row)
+
+    def row_text(row_index: int) -> str:
+        return " ".join(str(getattr(cell, "text", "")).strip() for cell in rows[row_index] if str(getattr(cell, "text", "")).strip())
+
+    def is_statement_title(row_index: int) -> bool:
+        nonempty = [str(getattr(cell, "text", "")).strip() for cell in rows[row_index] if str(getattr(cell, "text", "")).strip()]
+        return len(nonempty) <= 2 and any(_STATEMENT_TITLE.search(value) for value in nonempty)
+
+    def is_header_like(row_index: int) -> bool:
+        texts = [str(getattr(cell, "text", "")).strip() for cell in rows[row_index] if str(getattr(cell, "text", "")).strip()]
+        return (
+            len(texts) >= 2
+            and (
+                any(re.fullmatch(r"(?:项目|科目|指标|项目名称|会计科目)", text) for text in texts)
+                or any(word in " ".join(texts) for word in _TABLE_HEADER_WORDS[3:])
+            )
+        )
+
+    def is_text_preamble(row_index: int) -> bool:
+        return (
+            is_statement_title(row_index)
+            or _period_header(row_text(row_index)) is not None
+            or _explicit_unit_text([row_text(row_index)]) is not None
+            or not any(re.search(r"[-+]?\d", str(getattr(cell, "text", ""))) for cell in rows[row_index])
+        )
+
+    first_header_end = min(rows) - 1
+    if header_runs:
+        first_start, first_end = header_runs[0]
+        preamble_rows = [row for row in rows if row < first_start]
+        if first_start <= min(rows) + 1 or all(is_text_preamble(row) for row in preamble_rows):
+            first_header_end = first_end
+    boundaries: set[int] = set()
+    for run_start, _run_end in header_runs[1:]:
+        if run_start > first_header_end:
+            title_row = run_start - 1 if run_start - 1 in rows and is_statement_title(run_start - 1) else run_start
+            boundaries.add(title_row)
+    for row_index in sorted(rows):
+        if row_index <= first_header_end:
+            continue
+        if is_statement_title(row_index):
+            boundaries.add(row_index)
+        elif is_header_like(row_index) and not (
+            row_index - 1 in rows and is_statement_title(row_index - 1)
+        ):
+            boundaries.add(row_index)
+
+    row_indexes = sorted(rows)
+    starts = sorted({row_indexes[0], *boundaries})
+    segments: list[dict[str, Any]] = []
+    for segment_index, start in enumerate(starts):
+        end = starts[segment_index + 1] - 1 if segment_index + 1 < len(starts) else row_indexes[-1]
+        segment_rows = [row for row in row_indexes if start <= row <= end]
+        segment_cells = [cell for row in segment_rows for cell in rows[row]]
+        segment_header_rows = [row for row in column_header_rows if start <= row <= end]
+        quarantine = None
+        if not segment_header_rows:
+            header_rows = 1
+            quarantine = "column_headers_not_detected"
+        else:
+            header_start = segment_header_rows[0]
+            contiguous_end = header_start
+            for row in segment_header_rows[1:]:
+                if row != contiguous_end + 1:
+                    break
+                contiguous_end = row
+            preamble_rows = [row for row in segment_rows if row < header_start]
+            preamble_is_text = all(is_text_preamble(row) for row in preamble_rows)
+            if not preamble_is_text:
+                header_rows = max(1, contiguous_end - start + 1)
+                quarantine = "data_precedes_column_headers"
+            else:
+                header_rows = contiguous_end - start + 1
+            if contiguous_end < max(segment_header_rows):
+                quarantine = quarantine or "non_contiguous_column_header_rows"
+        title_values = [
+            str(getattr(cell, "text", "")).strip()
+            for row in segment_rows
+            if is_statement_title(row)
+            for cell in rows[row]
+            if str(getattr(cell, "text", "")).strip()
+        ]
+        segments.append({
+            "start_row": start,
+            "end_row": end,
+            "cells": segment_cells,
+            "column_header_rows": tuple(segment_header_rows),
+            "header_rows": max(1, header_rows),
+            "quarantine_reason": quarantine,
+            "title": " ".join(dict.fromkeys(title_values)) or None,
+        })
+    return segments
+
+
+def _docling_segment_records(
+    segment: dict[str, Any],
+    *,
+    table_id: str,
+    page_number: int,
+    title_parts: list[str],
+    unit_context: list[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    from adaptive_mas.industrial_rag.parser import normalize_financial_cell
+
+    source_cells = list(segment["cells"])
+    row_offset = int(segment["start_row"])
+    header_rows = int(segment["header_rows"])
+    title_values = [value for value in (*title_parts, segment.get("title")) if value]
+    title = " · ".join(dict.fromkeys(title_values)) or None
+    unit_parts = unit_context + title_values + [str(getattr(cell, "text", "")) for cell in source_cells]
+    unit_text = _explicit_unit_text(unit_parts)
+    table_cells: list[dict[str, Any]] = []
+    for cell in source_cells:
+        row_index = int(cell.start_row_offset_idx) - row_offset
+        column_index = int(cell.start_col_offset_idx)
+        raw = str(getattr(cell, "text", ""))
+        normalized = normalize_financial_cell(raw)
+        kind = str(normalized["value_kind"])
+        if kind == "unknown":
+            kind = "text"
+        table_cells.append({
+            "cell_id": f"{table_id}-r{row_index}-c{column_index}",
+            "table_id": table_id,
+            "row_index": row_index,
+            "column_index": column_index,
+            "raw_text": raw,
+            "normalized_value": normalized.get("normalized_value"),
+            "value_kind": kind,
+            "page_number": page_number,
+            "unit": unit_text,
+            "multiplier": normalized.get("multiplier"),
+            "currency": None,
+            "accounting_basis": None,
+            "report_period": None,
+            "footnote_refs": [],
+        })
+
+    header_row_indexes = {
+        int(row_index) - row_offset for row_index in segment.get("column_header_rows", ())
+    }
+    headers_by_column: dict[int, list[str]] = {}
+    for cell in table_cells:
+        if int(cell["row_index"]) in header_row_indexes:
+            headers_by_column.setdefault(int(cell["column_index"]), []).append(str(cell["raw_text"]).strip())
+    period_by_column: dict[int, str] = {}
+    for column, values in headers_by_column.items():
+        periods = tuple(dict.fromkeys(
+            period for value in values
+            if (period := _period_header(value)) is not None
+        ))
+        if len(periods) == 1:
+            period_by_column[column] = periods[0]
+    for cell in table_cells:
+        if int(cell["row_index"]) >= header_rows:
+            cell["report_period"] = period_by_column.get(int(cell["column_index"]))
+
+    table = {
+        "table_id": table_id,
+        "title": title,
+        "header_rows": header_rows,
+        "page_start": page_number,
+        "page_end": page_number,
+        "unit_text": unit_text,
+        "accounting_basis": None,
+        "report_period": None,
+        "continued_from_table_id": None,
+        "continuation_confidence": None,
+        "row_group_quarantine_reason": segment.get("quarantine_reason"),
+    }
+    return table, table_cells
 
 
 def parse_pdf_with_docling(payload: bytes, *, asset_dir: str | Path, max_pages: int, timeout_seconds: float) -> dict[str, Any]:
@@ -217,6 +420,7 @@ def parse_pdf_with_docling(payload: bytes, *, asset_dir: str | Path, max_pages: 
     if len(page_numbers) > max_pages:
         raise RuntimeError("Docling returned more pages than the configured page limit")
     page_text: dict[int, list[str]] = {number: [] for number in page_numbers}
+    table_context_by_page: dict[int, list[str]] = {number: [] for number in page_numbers}
     raw_tables: list[dict[str, Any]] = []
     raw_cells: list[dict[str, Any]] = []
     content_blocks: dict[int, list[dict[str, Any]]] = {number: [] for number in page_numbers}
@@ -225,7 +429,7 @@ def parse_pdf_with_docling(payload: bytes, *, asset_dir: str | Path, max_pages: 
     block_total = 0
     table_row_total = 0
 
-    from adaptive_mas.industrial_rag.parser import _table_row_group_blocks, normalize_financial_cell
+    from adaptive_mas.industrial_rag.parser import _table_row_group_blocks
 
     for item, _level in document.iterate_items():
         provenance = getattr(item, "prov", None) or []
@@ -235,85 +439,55 @@ def parse_pdf_with_docling(payload: bytes, *, asset_dir: str | Path, max_pages: 
         if page_number not in page_text:
             continue
         if isinstance(item, TableItem):
-            table_index += 1
-            table_id = f"docling-table-{table_index}-p{page_number}"
             captions = [str(getattr(value, "text", "")).strip() for value in getattr(item, "captions", [])]
-            title = " ".join(value for value in captions if value) or None
+            caption_title = " ".join(value for value in captions if value) or None
             data_cells = list(getattr(getattr(item, "data", None), "table_cells", []) or [])
             if len(raw_cells) + len(data_cells) > 1_000_000:
                 raise RuntimeError("Docling table exceeds the configured cell limit")
-            header_rows, header_quarantine = _docling_header_contract(data_cells)
-            unit_text = _explicit_unit_text(page_text[page_number])
-            for cell in data_cells:
-                row_index = int(cell.start_row_offset_idx)
-                column_index = int(cell.start_col_offset_idx)
-                raw = str(getattr(cell, "text", ""))
-                normalized = normalize_financial_cell(raw)
-                kind = str(normalized["value_kind"])
-                if kind == "unknown":
-                    kind = "text"
-                raw_cells.append({
-                    "cell_id": f"{table_id}-r{row_index}-c{column_index}",
-                    "table_id": table_id,
-                    "row_index": row_index,
-                    "column_index": column_index,
-                    "raw_text": raw,
-                    "normalized_value": normalized.get("normalized_value"),
-                    "value_kind": kind,
-                    "page_number": page_number,
-                    "unit": unit_text,
-                    "multiplier": normalized.get("multiplier"),
-                    "currency": None,
-                    "accounting_basis": None,
-                    "report_period": None,
-                    "footnote_refs": [],
-                })
-            table_cells = [cell for cell in raw_cells if cell["table_id"] == table_id]
-            headers_by_column: dict[int, list[str]] = {}
-            for cell in table_cells:
-                if int(cell["row_index"]) < header_rows:
-                    headers_by_column.setdefault(int(cell["column_index"]), []).append(str(cell["raw_text"]).strip())
-            period_by_column = {
-                column: period
-                for column, values in headers_by_column.items()
-                if (period := _period_header(" / ".join(value for value in values if value))) is not None
-            }
-            for cell in table_cells:
-                if int(cell["row_index"]) >= header_rows:
-                    cell["report_period"] = period_by_column.get(int(cell["column_index"]))
-            row_count = max((int(cell["row_index"]) for cell in table_cells), default=-1) + 1
-            table_row_total += row_count
-            if table_row_total > 100_000:
-                raise RuntimeError("Docling table exceeds the configured row limit")
-            raw_tables.append({
-                "table_id": table_id, "title": title, "header_rows": header_rows,
-                "page_start": page_number, "page_end": page_number,
-                "unit_text": unit_text, "accounting_basis": None, "report_period": None,
-                "continued_from_table_id": None, "continuation_confidence": None,
-                "row_group_quarantine_reason": header_quarantine,
-            })
+            segments = _docling_table_segments(data_cells)
+            prior_context = list(table_context_by_page[page_number])
+            item_table_cells: list[dict[str, Any]] = []
+            for segment_index, segment in enumerate(segments):
+                table_index += 1
+                table_id = f"docling-table-{table_index}-p{page_number}"
+                title_parts = [value for value in (caption_title, segment.get("title")) if value]
+                table_record, table_cells = _docling_segment_records(
+                    segment,
+                    table_id=table_id,
+                    page_number=page_number,
+                    title_parts=title_parts,
+                    unit_context=prior_context if segment_index == 0 else [],
+                )
+                table_row_total += max((int(cell["row_index"]) for cell in table_cells), default=-1) + 1
+                if table_row_total > 100_000:
+                    raise RuntimeError("Docling table exceeds the configured row limit")
+                raw_cells.extend(table_cells)
+                item_table_cells.extend(table_cells)
+                raw_tables.append(table_record)
             try:
                 table_text = item.export_to_markdown(doc=document).strip()
             except Exception:
                 table_text = ""
             if table_text:
                 page_text[page_number].append(table_text)
-            elif table_cells:
+            elif item_table_cells:
                 page_text[page_number].append("\n".join(
                     " | ".join(
                         str(cell["raw_text"]) for cell in sorted(
-                            (value for value in table_cells if int(value["row_index"]) == row),
+                            (value for value in item_table_cells if int(value["row_index"]) == row),
                             key=lambda value: int(value["column_index"]),
                         )
                     )
-                    for row in sorted({int(value["row_index"]) for value in table_cells})
+                    for row in sorted({int(value["row_index"]) for value in item_table_cells})
                 ))
+            table_context_by_page[page_number] = []
             continue
 
         text = str(getattr(item, "text", "") or "").strip()
         if not text:
             continue
         page_text[page_number].append(text)
+        table_context_by_page[page_number].append(text)
         block_index[page_number] += 1
         block_total += 1
         if block_total > 50_000:

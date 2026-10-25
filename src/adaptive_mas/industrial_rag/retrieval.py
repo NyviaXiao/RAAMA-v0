@@ -8,10 +8,19 @@ import math
 import re
 import uuid
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Callable, Mapping, Sequence
 
 from adaptive_mas.industrial_rag.models import EvidenceResult, QueryPlan, parse_datetime
+from adaptive_mas.industrial_rag.planning import (
+    METRIC_ALIASES,
+    normalize_period,
+    plan_research,
+    requested_metrics,
+    requested_periods,
+)
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore, ReleaseNotReady, _json
 from adaptive_mas.research_provenance import stable_hash
 
@@ -34,6 +43,17 @@ def financial_tokens(text: str) -> list[str]:
             else:
                 tokens.extend(run[index:index + 2] for index in range(len(run) - 1))
     return tokens
+
+
+def _period_matches(requested: object, observed_periods: set[str]) -> bool:
+    requested_key = normalize_period(requested)
+    if requested_key is None:
+        return True
+    if requested_key in observed_periods:
+        return True
+    if re.fullmatch(r"(?:19|20)\d{2}", requested_key):
+        return any(value.startswith(requested_key) for value in observed_periods)
+    return False
 
 
 def _citation(block: Mapping[str, object], *, fact: Mapping[str, object] | None = None) -> dict[str, object]:
@@ -273,6 +293,290 @@ class IndustrialRagService:
         }
         self.store.cache_put(cache_key, response)
         return response
+
+    def research(
+        self,
+        plan: QueryPlan,
+        *,
+        max_searches: int = 8,
+        evidence_limit: int = 24,
+        table_expansion_limit: int = 12,
+    ) -> dict[str, object]:
+        """Run a fixed-template financial search plan with explicit coverage and stop reasons."""
+        if isinstance(evidence_limit, bool) or not 2 <= evidence_limit <= 64:
+            raise ValueError("evidence_limit must be between 2 and 64")
+        if isinstance(table_expansion_limit, bool) or not 0 <= table_expansion_limit <= 24:
+            raise ValueError("table_expansion_limit must be between 0 and 24")
+        if plan.time_mode == "retrospective_diagnostic" and not self.allow_retrospective_diagnostic:
+            raise PermissionError("retrospective diagnostic queries are disabled by server policy")
+        release_id = plan.release_id or self.store.active_release_id()
+        if release_id is None:
+            raise ReleaseNotReady("no published corpus release is active")
+        # Freeze the release at task start; all subqueries and reopen actions use it.
+        pinned_plan = replace(plan, release_id=release_id)
+        searches = plan_research(pinned_plan, max_searches=max_searches)
+        metrics = requested_metrics(plan.query)
+        periods = requested_periods(plan.query, plan.report_periods)
+        support: list[dict[str, object]] = []
+        counter_candidates: list[dict[str, object]] = []
+        step_trace: list[dict[str, object]] = []
+        warnings: list[str] = []
+        channel_status: dict[str, dict[str, object]] = {}
+        seen: dict[tuple[object, ...], dict[str, object]] = {}
+        table_expansions = 0
+
+        def location_key(item: Mapping[str, object]) -> tuple[object, ...]:
+            citation = item.get("citation", {})
+            if not isinstance(citation, Mapping):
+                citation = {}
+            return (
+                citation.get("source_id") or item.get("source_id"),
+                citation.get("content_sha256") or item.get("content_sha256"),
+                citation.get("fact_id") or item.get("fact_id"),
+                citation.get("span_id") or item.get("span_id"),
+                citation.get("table_id"),
+                citation.get("row_start"),
+                citation.get("row_end"),
+                citation.get("page_number") or item.get("page_number"),
+                citation.get("block_id") or item.get("block_id"),
+            )
+
+        for index, step in enumerate(searches, start=1):
+            counter = step.kind == "counter_evidence_candidate"
+            channels = ("bm25",) if counter else pinned_plan.channels
+            subplan = replace(
+                pinned_plan,
+                plan_id=f"{plan.plan_id}:s{index}",
+                query=step.query,
+                task_type="refutation" if counter else plan.task_type,
+                report_periods=(
+                    (step.report_period,)
+                    if step.report_period is not None and plan.report_periods
+                    else pinned_plan.report_periods
+                ),
+                channels=channels,
+                top_k=min(pinned_plan.top_k, 10),
+            )
+            result = self.search(subplan)
+            for name, status in result.get("channels", {}).items():
+                channel_status[f"{step.step_id}:{name}"] = dict(status)
+            warnings.extend(str(value) for value in result.get("warnings", []))
+            step_trace.append({
+                "step_id": step.step_id,
+                "kind": step.kind,
+                "metric": step.metric,
+                "report_period": step.report_period,
+                "query_sha256": hashlib.sha256(step.query.encode("utf-8")).hexdigest(),
+                "result_status": result.get("status"),
+                "candidate_count": len(result.get("retrieved", [])),
+                "channels": result.get("channels", {}),
+            })
+            for raw_item in result.get("retrieved", []):
+                item = dict(raw_item)
+                item["research_role"] = "counter_evidence_candidate" if counter else "supporting_evidence"
+                key = location_key(item)
+                if key in seen:
+                    if counter:
+                        candidate = dict(seen[key])
+                        candidate["research_role"] = "counter_evidence_candidate"
+                        candidate["duplicate_of_supporting_evidence"] = True
+                        counter_candidates.append(candidate)
+                    continue
+                seen[key] = item
+                if not counter:
+                    citation = item.get("citation", {})
+                    if isinstance(citation, Mapping) and citation.get("table_id") is not None:
+                        table_id = citation.get("table_id")
+                        row_start = citation.get("row_start")
+                        row_end = citation.get("row_end")
+                        if (
+                            table_expansions < table_expansion_limit
+                            and isinstance(table_id, str)
+                            and isinstance(row_start, int) and not isinstance(row_start, bool)
+                            and isinstance(row_end, int) and not isinstance(row_end, bool)
+                        ):
+                            table_expansions += 1
+                            try:
+                                item["reopened_table_row"] = self.read_table_row(
+                                    subplan, table_id, row_start, row_end,
+                                )
+                            except (PermissionError, FileNotFoundError, ValueError) as error:
+                                item["table_reopen_status"] = str(error)
+                    support.append(item)
+                else:
+                    item["counter_review_status"] = "candidate_requires_source_and_claim_review"
+                    counter_candidates.append(item)
+
+        def evidence_metrics(item: Mapping[str, object]) -> set[str]:
+            citation = item.get("citation", {})
+            citation = citation if isinstance(citation, Mapping) else {}
+            fact_metric = str(citation.get("metric") or "").casefold()
+            text = str(item.get("text") or "").casefold()
+            expanded = item.get("reopened_table_row")
+            if isinstance(expanded, Mapping):
+                text += " " + str(expanded.get("text") or "").casefold()
+            matches = set()
+            for metric, aliases in METRIC_ALIASES.items():
+                if any(alias.casefold() in fact_metric or alias.casefold() in text for alias in aliases):
+                    matches.add(metric)
+            return matches
+
+        def evidence_periods(item: Mapping[str, object]) -> set[str]:
+            citation = item.get("citation", {})
+            citation = citation if isinstance(citation, Mapping) else {}
+            values: set[str] = set()
+            for value in (citation.get("report_period"),):
+                normalized = normalize_period(value)
+                if normalized:
+                    values.add(normalized)
+            for cell in citation.get("supporting_cells", []) if isinstance(citation.get("supporting_cells", []), list) else []:
+                if isinstance(cell, Mapping):
+                    normalized = normalize_period(cell.get("report_period"))
+                    if normalized:
+                        values.add(normalized)
+            expanded = item.get("reopened_table_row")
+            if isinstance(expanded, Mapping):
+                expanded_citation = expanded.get("citation", {})
+                if isinstance(expanded_citation, Mapping):
+                    normalized = normalize_period(expanded_citation.get("report_period"))
+                    if normalized:
+                        values.add(normalized)
+                    for cell in expanded_citation.get("supporting_cells", []):
+                        if isinstance(cell, Mapping):
+                            normalized = normalize_period(cell.get("report_period"))
+                            if normalized:
+                                values.add(normalized)
+            return values
+
+        supporting_limit = evidence_limit - max(1, min(6, evidence_limit // 4))
+        support = support[:supporting_limit]
+        counter_candidates = counter_candidates[: evidence_limit - len(support)]
+        coverage_rows = []
+        for metric in metrics or (None,):
+            for period in periods or (None,):
+                matching = []
+                for item in support:
+                    if metric is not None and metric not in evidence_metrics(item):
+                        continue
+                    observed_periods = evidence_periods(item)
+                    if period is not None and observed_periods and not _period_matches(period, observed_periods):
+                        continue
+                    if period is not None and not observed_periods:
+                        continue
+                    matching.append(item)
+                coverage_rows.append({
+                    "metric": metric,
+                    "report_period": period,
+                    "status": "located" if matching else "missing",
+                    "evidence_ids": [str(item.get("evidence_id")) for item in matching],
+                    "source_locations": [
+                        {
+                            "source_id": item.get("source_id"),
+                            "content_sha256": item.get("content_sha256"),
+                            "page_number": item.get("page_number"),
+                            "fact_id": (item.get("citation") or {}).get("fact_id") if isinstance(item.get("citation"), Mapping) else None,
+                            "table_id": (item.get("citation") or {}).get("table_id") if isinstance(item.get("citation"), Mapping) else None,
+                        }
+                        for item in matching
+                    ],
+                })
+
+        def fact_observation(item: Mapping[str, object]) -> tuple[object, ...] | None:
+            citation = item.get("citation", {})
+            if not isinstance(citation, Mapping) or citation.get("numeric_eligible") is not True:
+                return None
+            try:
+                value = Decimal(str(citation.get("normalized_value")))
+                multiplier = Decimal(str(citation.get("multiplier")))
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+            if not value.is_finite() or not multiplier.is_finite():
+                return None
+            return (
+                str(citation.get("metric") or ""),
+                str(citation.get("report_period") or ""),
+                str(citation.get("accounting_basis") or ""),
+                str(citation.get("unit") or ""),
+                str(citation.get("currency") or ""),
+                value * multiplier,
+            )
+
+        numeric_by_key: dict[tuple[object, ...], list[dict[str, object]]] = defaultdict(list)
+        for item in support:
+            observation = fact_observation(item)
+            if observation is None:
+                continue
+            semantic_key = observation[:-1]
+            numeric_by_key[semantic_key].append({
+                "value": str(observation[-1]),
+                "source_id": item.get("source_id"),
+                "content_sha256": item.get("content_sha256"),
+                "evidence_id": item.get("evidence_id"),
+                "citation": item.get("citation"),
+            })
+        candidate_conflicts = [
+            {"metric": key[0], "report_period": key[1], "accounting_basis": key[2], "unit": key[3], "currency": key[4], "observations": rows}
+            for key, rows in numeric_by_key.items()
+            if len({row["value"] for row in rows}) > 1
+        ]
+        all_covered = bool(coverage_rows) and all(row["status"] == "located" for row in coverage_rows)
+        planned_dimensions = max(1, len(metrics) * max(1, len(periods)))
+        supporting_steps = sum(step["kind"] == "supporting_evidence" for step in step_trace)
+        if all_covered:
+            stop_reason = "requested_metric_period_coverage_located"
+            next_action = "answer_with_source_citations_and_review_counter_candidates"
+        elif not support:
+            stop_reason = "no_supporting_evidence_after_bounded_search"
+            next_action = "abstain_or_clarify_missing_metric_period"
+        elif supporting_steps < planned_dimensions:
+            stop_reason = "search_budget_reached_before_all_dimensions"
+            next_action = "report_coverage_gaps_and_do_not_infer_missing_values"
+        else:
+            stop_reason = "bounded_search_completed_with_coverage_gaps"
+            next_action = "report_coverage_gaps_and_do_not_infer_missing_values"
+        if candidate_conflicts:
+            next_action = "pause_numeric_claims_until_candidate_conflicts_are_reviewed"
+        return {
+            "schema_version": "adaptive-mas.financial-rag-research.v1",
+            "plan_id": plan.plan_id,
+            "query_binding": {
+                "security_code": plan.security_code,
+                "as_of": parse_datetime(plan.as_of, "as_of", required=True).isoformat(),
+                "time_mode": plan.time_mode,
+                "release_id": release_id,
+            },
+            "planner": {
+                "implementation": "fixed_metric_alias_period_templates",
+                "max_searches": max_searches,
+                "evidence_limit": evidence_limit,
+                "returned_supporting_count": len(support),
+                "returned_counter_candidate_count": len(counter_candidates),
+                "evidence_truncated": max(0, len(seen) - len(support) - len(counter_candidates)),
+                "search_count": len(step_trace),
+                "requested_metrics": list(metrics),
+                "requested_report_periods": list(periods),
+                "dimensions_truncated": supporting_steps < planned_dimensions,
+                "steps": step_trace,
+            },
+            "status": "available" if support else "no_evidence",
+            "coverage": coverage_rows,
+            "channels": channel_status,
+            "retrieved": [*support, *counter_candidates],
+            "supporting_evidence": support,
+            "counter_evidence": {
+                "status": "candidate_search_completed" if step_trace and step_trace[-1]["kind"] == "counter_evidence_candidate" else "not_attempted",
+                "backend_scope": "local BM25 search for correction and restatement language; results require source and claim review",
+                "candidates": counter_candidates,
+            },
+            "candidate_numeric_conflicts": candidate_conflicts,
+            "channel_status": channel_status,
+            "stop_policy": {
+                "stop_reason": stop_reason,
+                "next_action": next_action,
+                "automatic_contradiction_claims": False,
+            },
+            "warnings": sorted(set(warnings)),
+        }
 
     def read_span(self, plan: QueryPlan, span_id: str) -> dict[str, object]:
         """Expand a cited page span only after rechecking present-day permission and as-of scope."""

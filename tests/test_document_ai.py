@@ -79,4 +79,61 @@ def test_docling_unit_and_period_are_kept_as_explicit_source_labels() -> None:
     assert document_ai._explicit_unit_text(["2024年度财务报告", "人民币百万元"]) is None
     assert document_ai._period_header("2024年度") == "2024年度"
     assert document_ai._period_header("2024年") == "2024年"
+    assert document_ai._period_header("2024年1-3月") == "2024年1-3月"
     assert document_ai._period_header("累计收入") is None
+
+
+def test_docling_splits_a_merged_table_at_a_repeated_statement_heading() -> None:
+    cells = [
+        SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=0, text="项目", column_header=True),
+        SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=1, text="2024年12月31日", column_header=True),
+        SimpleNamespace(start_row_offset_idx=1, start_col_offset_idx=0, text="货币资金", column_header=False),
+        SimpleNamespace(start_row_offset_idx=1, start_col_offset_idx=1, text="1,000", column_header=False),
+        SimpleNamespace(start_row_offset_idx=2, start_col_offset_idx=0, text="合并现金流量表", column_header=False),
+        SimpleNamespace(start_row_offset_idx=3, start_col_offset_idx=0, text="项目", column_header=True),
+        SimpleNamespace(start_row_offset_idx=3, start_col_offset_idx=1, text="2024年1-3月", column_header=True),
+        SimpleNamespace(start_row_offset_idx=4, start_col_offset_idx=0, text="经营活动产生的现金流量净额", column_header=False),
+        SimpleNamespace(start_row_offset_idx=4, start_col_offset_idx=1, text="(1,208)", column_header=False),
+    ]
+    segments = document_ai._docling_table_segments(cells)
+    assert [segment["start_row"] for segment in segments] == [0, 2]
+    assert [segment["title"] for segment in segments] == [None, "合并现金流量表"]
+    assert [segment["header_rows"] for segment in segments] == [1, 2]
+    assert all(segment["quarantine_reason"] is None for segment in segments)
+    assert segments[1]["column_header_rows"] == (3,)
+
+    balance_table, balance_cells = document_ai._docling_segment_records(
+        segments[0],
+        table_id="table-balance",
+        page_number=3,
+        title_parts=[],
+        unit_context=["单位：", "人民币百万元"],
+    )
+    cashflow_table, cashflow_cells = document_ai._docling_segment_records(
+        segments[1],
+        table_id="table-cashflow",
+        page_number=3,
+        title_parts=[],
+        unit_context=[],
+    )
+    assert balance_table["unit_text"] == "人民币百万元"
+    assert cashflow_table["unit_text"] is None
+    q1_amount = next(cell for cell in cashflow_cells if cell["raw_text"] == "(1,208)")
+    assert q1_amount["normalized_value"] == "-1208"
+    assert q1_amount["report_period"] == "2024年1-3月"
+    assert q1_amount["row_index"] == 2
+
+
+def test_docling_keeps_a_subtable_without_column_headers_unsearchable() -> None:
+    cells = [
+        SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=0, text="项目", column_header=True),
+        SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=1, text="2024年12月31日", column_header=True),
+        SimpleNamespace(start_row_offset_idx=1, start_col_offset_idx=0, text="资产总额", column_header=False),
+        SimpleNamespace(start_row_offset_idx=1, start_col_offset_idx=1, text="1,000", column_header=False),
+        SimpleNamespace(start_row_offset_idx=2, start_col_offset_idx=0, text="合并现金流量表", column_header=False),
+        SimpleNamespace(start_row_offset_idx=3, start_col_offset_idx=0, text="经营活动现金流", column_header=False),
+        SimpleNamespace(start_row_offset_idx=3, start_col_offset_idx=1, text="(1,208)", column_header=False),
+    ]
+    segments = document_ai._docling_table_segments(cells)
+    assert [segment["start_row"] for segment in segments] == [0, 2]
+    assert segments[1]["quarantine_reason"] == "column_headers_not_detected"

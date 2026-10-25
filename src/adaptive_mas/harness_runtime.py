@@ -18,6 +18,7 @@ from adaptive_mas.data.research import ResearchData
 from adaptive_mas.decision import DailyDecision, DecisionOrder, PortfolioState, create_daily_decision
 from adaptive_mas.evaluation.mvp_research import run_mvp_research
 from adaptive_mas.harness_state import HarnessStateStore, UnknownOutboundOutcome
+from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
 from adaptive_mas.package_identity import source_package_identity
 from adaptive_mas.release_governance import HarnessReleaseStore
 from adaptive_mas.research_provenance import (
@@ -74,6 +75,9 @@ def create_harness_daily_decision(
     task_id: str | None = None,
     idempotency_key: str | None = None,
     risk_profile: Mapping[str, object] | None = None,
+    industrial_rag_service: IndustrialRagService | None = None,
+    industrial_rag_principal_id: str = "local-public",
+    industrial_rag_release_id: str | None = None,
 ) -> DailyDecision:
     """Run public agents, apply their sourced candidate filter and return a normal DailyDecision.
 
@@ -348,6 +352,32 @@ def create_harness_daily_decision(
         precomputed_provenance.get("source_manifest_sha256")
         if isinstance(precomputed_provenance, Mapping) else None
     )
+    if industrial_rag_service is not None and not industrial_rag_principal_id.strip():
+        raise ValueError("industrial RAG principal identity must be nonempty")
+    pinned_industrial_rag_release_id = None
+    industrial_rag_snapshot: dict[str, object] = {"status": "disabled"}
+    if industrial_rag_service is not None:
+        pinned_industrial_rag_release_id = (
+            industrial_rag_release_id or industrial_rag_service.store.active_release_id()
+        )
+        if pinned_industrial_rag_release_id is None:
+            industrial_rag_snapshot = {
+                "status": "unavailable",
+                "reason": "no published corpus release was active at task start",
+                "principal_id": industrial_rag_principal_id,
+            }
+        else:
+            release_spec, release_spec_sha256 = industrial_rag_service.store.release_spec(
+                pinned_industrial_rag_release_id,
+            )
+            industrial_rag_snapshot = {
+                "status": "pinned",
+                "release_id": pinned_industrial_rag_release_id,
+                "release_spec_sha256": release_spec_sha256,
+                "source_manifest_sha256": release_spec["source_manifest_sha256"],
+                "principal_id": industrial_rag_principal_id,
+                "time_mode": "strict_forward",
+            }
     package_identity = {
         "schema_version": "adaptive-mas.runtime-package-identity.v1",
         "as_of": as_of.isoformat(),
@@ -367,6 +397,7 @@ def create_harness_daily_decision(
         "public_snapshot_sha256": public_snapshot_sha256,
         "precomputed_research_artifact_sha256": precomputed_research_artifact_sha256,
         "source_manifest_sha256": source_manifest_sha256,
+        "industrial_rag_snapshot": industrial_rag_snapshot,
         "provider_identity": provider_identity,
         "implementation_identity": implementation_identity,
         "retrospective_public_cache": retrospective_public_cache,
@@ -396,6 +427,7 @@ def create_harness_daily_decision(
         "public_snapshot_sha256": public_snapshot_sha256,
         "precomputed_research_artifact_sha256": precomputed_research_artifact_sha256,
         "source_manifest_sha256": source_manifest_sha256,
+        "industrial_rag_snapshot": industrial_rag_snapshot,
         "market_snapshot": market_snapshot_identity,
         "model_risk_context_sha256": model_risk_context["context_sha256"],
         "provider_identity": provider_identity,
@@ -569,6 +601,9 @@ def create_harness_daily_decision(
                 candidate_version_id=version_id,
                 procedural_memory=version.get("procedural_memory"),
                 model_risk_context=model_risk_context,
+                industrial_rag_service=industrial_rag_service,
+                industrial_rag_principal_id=industrial_rag_principal_id,
+                industrial_rag_release_id=pinned_industrial_rag_release_id,
             )
             if state_store is not None:
                 task_calls = [row for row in budget.calls if row.get("task_id") == task_identifier]

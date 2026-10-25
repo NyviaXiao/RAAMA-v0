@@ -78,6 +78,10 @@ def _value_matches(key: str, expected: Any, observed: Any) -> bool:
     return " ".join(str(expected).split()).casefold() == " ".join(str(observed).split()).casefold()
 
 
+def _has_metadata(value: Any) -> bool:
+    return value is not None and not (isinstance(value, str) and not value.strip())
+
+
 def _normalized_gold_evidence(item: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(item)
     reference = normalized.get("cell_reference")
@@ -200,20 +204,91 @@ def _required_match(required: Mapping[str, Any], candidate: Mapping[str, Any]) -
     ]
     if evidence_type in {"table", "cell"} and not row_cells and located_cells:
         row_cells = located_cells
+    if located_cells:
+        # For an exact cell citation, source cell content is authoritative.
+        # Top-level fields may inherit table metadata when a cell omits that
+        # field, but may never override or contradict an explicit cell value.
+        cell_field_keys = {
+            "raw_value": "raw_text",
+            "normalized_value": "normalized_value",
+            "unit": "unit",
+            "multiplier": "multiplier",
+            "currency": "currency",
+            "report_period": "report_period",
+            "accounting_basis": "accounting_basis",
+        }
+        for key, cell_key in cell_field_keys.items():
+            cell_values = [cell[cell_key] for cell in located_cells if _has_metadata(cell.get(cell_key))]
+            cited_values = [
+                value for value in (citation.get(key), candidate.get(key))
+                if _has_metadata(value)
+            ]
+            if cell_values:
+                if any(
+                    not any(_value_matches(key, cell_value, cited_value) for cell_value in cell_values)
+                    for cited_value in cited_values
+                ):
+                    return False
+            elif key in {"unit", "multiplier", "currency", "report_period", "accounting_basis"}:
+                source_values = [citation[key]] if _has_metadata(citation.get(key)) else []
+                if any(
+                    not any(_value_matches(key, source_value, cited_value) for source_value in source_values)
+                    for cited_value in cited_values
+                ):
+                    return False
+        metric_cells = [cell.get("raw_text") for cell in row_cells if _has_metadata(cell.get("raw_text"))]
+        for metric_value in (citation.get("metric"), candidate.get("metric")):
+            if _has_metadata(metric_value) and metric_cells and not any(
+                _value_matches("metric", metric_value, cell_value) for cell_value in metric_cells
+            ):
+                return False
+
     for key in ("metric", "raw_value", "normalized_value", "unit", "multiplier", "currency", "report_period", "accounting_basis"):
         expected = required.get(key)
-        if expected is None or expected == "":
+        if not _has_metadata(expected):
             continue
-        observed_values: list[Any] = []
-        if citation.get(key) is not None:
-            observed_values.append(citation[key])
-        if candidate.get(key) is not None:
-            observed_values.append(candidate[key])
-        value_cells = located_cells if key in {"raw_value", "normalized_value", "multiplier", "unit", "currency", "report_period", "accounting_basis"} and located_cells else row_cells
-        cell_key = "raw_text" if key == "raw_value" else key
-        observed_values.extend(cell[cell_key] for cell in value_cells if cell.get(cell_key) is not None)
-        if key == "metric":
-            observed_values.extend(cell.get("raw_text") for cell in row_cells if cell.get("raw_text") is not None)
+        if located_cells:
+            if key == "metric":
+                observed_values = [
+                    cell.get("raw_text") for cell in row_cells
+                    if _has_metadata(cell.get("raw_text"))
+                ]
+            else:
+                cell_key = {
+                    "raw_value": "raw_text",
+                    "normalized_value": "normalized_value",
+                    "unit": "unit",
+                    "multiplier": "multiplier",
+                    "currency": "currency",
+                    "report_period": "report_period",
+                    "accounting_basis": "accounting_basis",
+                }[key]
+                observed_values = [
+                    cell.get(cell_key) for cell in located_cells
+                    if _has_metadata(cell.get(cell_key))
+                ]
+                if (
+                    not observed_values
+                    and key in {"unit", "multiplier", "currency", "report_period", "accounting_basis"}
+                    and _has_metadata(citation.get(key))
+                ):
+                    observed_values = [citation[key]]
+        else:
+            observed_values = []
+            if _has_metadata(citation.get(key)):
+                observed_values.append(citation[key])
+            if _has_metadata(candidate.get(key)):
+                observed_values.append(candidate[key])
+            value_cells = row_cells
+            cell_key = "raw_text" if key == "raw_value" else key
+            observed_values.extend(
+                cell[cell_key] for cell in value_cells if _has_metadata(cell.get(cell_key))
+            )
+            if key == "metric":
+                observed_values.extend(
+                    cell.get("raw_text") for cell in row_cells
+                    if _has_metadata(cell.get("raw_text"))
+                )
         if not any(_value_matches(key, expected, observed) for observed in observed_values):
             return False
     return True

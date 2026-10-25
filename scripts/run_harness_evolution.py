@@ -246,7 +246,6 @@ def main() -> None:
     )
     parser.add_argument("--execute-gepa", action="store_true", help="Run the reviewed retrospective GEPA experiment.")
     parser.add_argument("--approved-review-sha256", help="Optional review hash recorded for this run.")
-    parser.add_argument("--resume-run-id", help="Resume an existing GEPA checkpoint without creating a new run.")
     args = parser.parse_args()
 
     config = tomllib.loads(args.config.read_text(encoding="utf-8"))
@@ -288,15 +287,10 @@ def main() -> None:
 
     if args.approved_review_sha256 and args.approved_review_sha256 != review["review_content_sha256"]:
         raise ValueError("--approved-review-sha256 does not match the current outgoing review file")
-    if args.resume_run_id:
-        if Path(args.resume_run_id).name != args.resume_run_id:
-            raise ValueError("--resume-run-id must be a plain run-directory name")
-        run_id = args.resume_run_id
-        checkpoint = args.version_dir / "runs" / run_id / "gepa_state.bin"
-        if not checkpoint.is_file():
-            raise ValueError(f"GEPA checkpoint does not exist for run {run_id}")
-    else:
-        run_id = datetime.now(SHANGHAI).strftime("%Y%m%d%H%M%S")
+    # GEPA 0.1.4 persists evaluation cache/logs but does not persist optimizer
+    # state. A retry is a new immutable run and can reuse exact responses from
+    # the shared call ledger/cache; it must not claim to resume a checkpoint.
+    run_id = datetime.now(SHANGHAI).strftime("%Y%m%d%H%M%S%f")
     run_artifact_dir = args.artifact_dir / "runs" / run_id
     budget = CallBudget(
         max_calls=MAX_CALLS_PER_EXPERIMENT,

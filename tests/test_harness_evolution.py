@@ -659,6 +659,7 @@ def test_report_text_and_collection_sizes_are_soft_but_evidence_boundary_is_hard
     ("field", "value", "unit", "report_period", "visible_ids", "error"),
     [
         ("revenue_yoy_pct", 12.6, "percent", "2026Q2", {"public-evidence-1"}, "value does not match"),
+        ("revenue_yoy_pct", 12.5000000001, "percent", "2026Q2", {"public-evidence-1"}, "value does not match"),
         ("revenue_yoy_pct", 12.5, "CNY", "2026Q2", {"public-evidence-1"}, "unit does not match"),
         ("revenue_yoy_pct", 12.5, "percent", "2026Q1", {"public-evidence-1"}, "report period does not match"),
         ("revenue_surprise_pct", 12.5, "percent", "2026Q2", {"public-evidence-1"}, "was not exposed"),

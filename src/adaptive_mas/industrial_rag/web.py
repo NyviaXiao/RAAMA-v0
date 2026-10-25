@@ -143,12 +143,36 @@ class RagRequestHandler(BaseHTTPRequestHandler):
                 result = self._context()["service"].search(plan)  # type: ignore[union-attr]
                 self._send(200, result)
                 return
+            if path == "/api/research":
+                plan = self._plan(payload)
+                result = self._context()["service"].research(plan)  # type: ignore[union-attr]
+                self._send(200, result)
+                return
             if path == "/api/evidence":
                 if set(payload) != {"security_code", "query", "as_of", "span_id", "report_periods", "accounting_basis"}:
                     raise ValueError("evidence expansion requires a cited span and the original query scope")
                 plan_payload = {key: payload[key] for key in ("security_code", "query", "as_of", "report_periods", "accounting_basis") if key in payload}
                 plan = self._plan(plan_payload)
                 result = self._context()["service"].read_span(plan, str(payload["span_id"]))  # type: ignore[union-attr]
+                self._send(200, result)
+                return
+            if path == "/api/table-row":
+                allowed = {
+                    "security_code", "query", "as_of", "report_periods", "accounting_basis",
+                    "table_id", "row_start", "row_end",
+                }
+                required = {"security_code", "query", "as_of", "table_id", "row_start", "row_end"}
+                if set(payload) - allowed or required - set(payload):
+                    raise ValueError("table expansion requires a cited row and its original query scope")
+                plan_payload = {
+                    key: payload[key]
+                    for key in ("security_code", "query", "as_of", "report_periods", "accounting_basis")
+                    if key in payload
+                }
+                plan = self._plan(plan_payload)
+                result = self._context()["service"].read_table_row(
+                    plan, payload["table_id"], payload["row_start"], payload["row_end"],
+                )  # type: ignore[union-attr]
                 self._send(200, result)
                 return
             self._send(404, {"error": "not found"})

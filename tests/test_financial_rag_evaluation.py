@@ -108,6 +108,45 @@ def test_offline_evaluator_rejects_wrong_value_or_original_location(tmp_path, ca
     assert report["metrics"]["at_k"]["1"]["ndcg_mean"] == 0.0
 
 
+def test_exact_cell_rejects_conflicting_top_level_numeric_metadata(tmp_path) -> None:
+    candidate = _candidate(raw_value="100", normalized_value="100")
+    candidate["citation"]["raw_value"] = "10"
+    candidate["citation"]["normalized_value"] = "10.00"
+    report = _run(tmp_path, _case(), [candidate])
+    assert report["metrics"]["at_k"]["1"]["evidence_recall_mean"] == 0.0
+
+
+def test_exact_cell_inherits_unit_from_table_when_cell_omits_it(tmp_path) -> None:
+    candidate = _candidate()
+    candidate["citation"]["supporting_cells"][2].pop("unit")
+    report = _run(tmp_path, _case(), [candidate])
+    assert report["metrics"]["at_k"]["1"]["evidence_recall_mean"] == 1.0
+
+
+@pytest.mark.parametrize("metadata", [
+    {"citation": {"unit": "unknown"}},
+    {"citation": {"unit": "人民币元"}},
+    {"citation": {"multiplier": "1000000"}},
+    {"citation": {"report_period": "2023年度"}},
+    {"candidate": {"unit": "人民币元"}},
+    {"candidate": {"report_period": "2023年度"}},
+])
+def test_exact_cell_rejects_unknown_or_conflicting_inherited_metadata(tmp_path, metadata) -> None:
+    candidate = _candidate()
+    candidate["citation"]["supporting_cells"][2].pop("unit")
+    target = candidate if "candidate" in metadata else candidate["citation"]
+    target.update(metadata.get("candidate", metadata.get("citation", {})))
+    report = _run(tmp_path, _case(), [candidate])
+    assert report["metrics"]["at_k"]["1"]["evidence_recall_mean"] == 0.0
+
+
+def test_exact_cell_rejects_explicit_cell_unit_conflicting_with_table_unit(tmp_path) -> None:
+    candidate = _candidate()
+    candidate["citation"]["supporting_cells"][2]["unit"] = "人民币元"
+    report = _run(tmp_path, _case(), [candidate])
+    assert report["metrics"]["at_k"]["1"]["evidence_recall_mean"] == 0.0
+
+
 def test_offline_evaluator_does_not_match_metric_substrings_in_text(tmp_path) -> None:
     candidate = _candidate()
     candidate["text"] = "营业收入 10.00"

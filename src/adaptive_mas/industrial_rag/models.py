@@ -406,6 +406,8 @@ class QueryPlan:
             raise ContractError("query must contain 1..2000 characters")
         if not self.principal_id or len(self.principal_id) > 128:
             raise ContractError("principal_id is required")
+        if self.task_type not in {"fact", "comparison", "table", "narrative", "refutation", "unknown"}:
+            raise ContractError("task_type is unsupported")
         if self.top_k < 1 or self.top_k > 100:
             raise ContractError("top_k must be between 1 and 100")
         allowed = {"structured_facts", "bm25", "toc_page", "dense", "vision", "source_relations"}

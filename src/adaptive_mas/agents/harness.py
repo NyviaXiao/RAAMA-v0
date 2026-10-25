@@ -11,6 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
 from urllib.error import URLError
@@ -1550,6 +1551,8 @@ def _fundamental_handlers(
             retrieved: list[dict[str, object]] = []
             reused_evidence_ids: list[str] = []
             channel_status: list[dict[str, object]] = []
+            counter_refs: list[dict[str, object]] = []
+            query_coverage: list[dict[str, object]] = []
             warnings: list[str] = []
             for symbol in dict.fromkeys(symbols):
                 plan = QueryPlan(
@@ -1566,11 +1569,41 @@ def _fundamental_handlers(
                     top_k=limit,
                     time_mode="strict_forward",
                 )
-                result = industrial_rag_service.search(plan)
-                channel_status.append({"symbol": symbol, "channels": result["channels"], "status": result["status"]})
+                result = industrial_rag_service.research(
+                    plan,
+                    evidence_limit=max(2, limit * 2),
+                )
+                channel_status.append({
+                    "symbol": symbol,
+                    "channels": result["channel_status"],
+                    "status": result["status"],
+                    "stop_policy": result["stop_policy"],
+                })
+                query_coverage.append({
+                    "symbol": symbol,
+                    "planner": result["planner"],
+                    "coverage": result["coverage"],
+                    "stop_policy": result["stop_policy"],
+                })
                 warnings.extend(str(item) for item in result.get("warnings", []))
-                for item in result["retrieved"]:
-                    citation = dict(item["citation"])
+                evidence_items = [
+                    (item, "supporting_evidence")
+                    for item in result.get("supporting_evidence", [])
+                ]
+                counter_candidates = result.get("counter_evidence", {}).get("candidates", [])
+                evidence_items.extend(
+                    (item, "counter_evidence_candidate")
+                    for item in counter_candidates
+                    if isinstance(item, dict)
+                )
+                for item, evidence_role in evidence_items:
+                    expanded_row = item.get("reopened_table_row")
+                    citation_source = (
+                        expanded_row.get("citation")
+                        if isinstance(expanded_row, dict)
+                        else item.get("citation", {})
+                    )
+                    citation = dict(citation_source) if isinstance(citation_source, dict) else {}
                     evidence_id = _opaque_id(
                         "industrial-rag",
                         f"{industrial_rag_release_id}:{symbol}:{item['evidence_id']}",
@@ -1606,39 +1639,64 @@ def _fundamental_handlers(
                         "facts_units": fact_units,
                         "reopen_ref": reference,
                         "content_scope": "table_row_group" if citation.get("table_id") is not None else "page_span_excerpt",
+                        "citation": citation,
+                        "source_location": {
+                            key: citation.get(key)
+                            for key in ("page_number", "span_id", "char_start", "char_end", "table_id", "row_start", "row_end")
+                            if citation.get(key) is not None
+                        },
+                        "research_role": evidence_role,
                     }
                     if evidence_id in industrial_rag_evidence:
                         reused_evidence_ids.append(evidence_id)
-                        continue
-                    if evidence_id in evidence_catalog:
-                        raise InvalidResearchOutput("fundamental", "evidence_identity_conflicts_with_existing_source")
-                    evidence_catalog[evidence_id] = source_ref
-                    industrial_rag_evidence[evidence_id] = {
-                        "plan": plan,
-                        "span_id": citation.get("span_id"),
-                        "search_result": item,
-                    }
-                    retrieved.append({
-                        **source_ref,
-                        "text_excerpt": str(item["text"])[:1_200],
-                        "page_number": citation.get("page_number"),
-                        "financial_fact": {
-                            key: citation.get(key)
-                            for key in (
-                                "fact_id", "metric", "raw_value", "normalized_value", "unit",
-                                "multiplier", "currency", "report_period", "accounting_basis",
-                                "review_status", "numeric_eligible",
-                            )
-                            if citation.get(key) is not None
-                        },
-                        "citation": citation,
-                    })
+                    else:
+                        if evidence_id in evidence_catalog:
+                            raise InvalidResearchOutput("fundamental", "evidence_identity_conflicts_with_existing_source")
+                        evidence_catalog[evidence_id] = source_ref
+                        industrial_rag_evidence[evidence_id] = {
+                            "plan": plan,
+                            "span_id": citation.get("span_id"),
+                            "search_result": item,
+                        }
+                        excerpt = (
+                            str(expanded_row.get("text") or "")
+                            if isinstance(expanded_row, dict)
+                            else str(item.get("text") or "")
+                        )
+                        retrieved.append({
+                            **source_ref,
+                            "text_excerpt": excerpt[:1_200],
+                            "page_number": citation.get("page_number"),
+                            "financial_fact": {
+                                key: citation.get(key)
+                                for key in (
+                                    "fact_id", "metric", "raw_value", "normalized_value", "unit",
+                                    "multiplier", "currency", "report_period", "accounting_basis",
+                                    "review_status", "numeric_eligible",
+                                )
+                                if citation.get(key) is not None
+                            },
+                            "citation": citation,
+                        })
+                    if evidence_role == "counter_evidence_candidate":
+                        counter_refs.append({
+                            "evidence_id": evidence_id,
+                            "symbol": symbol,
+                            "review_status": item.get("counter_review_status", "candidate_requires_source_and_claim_review"),
+                            "duplicate_of_supporting_evidence": bool(item.get("duplicate_of_supporting_evidence", False)),
+                        })
             return {
                 "status": "available" if retrieved else "no_new_evidence" if reused_evidence_ids else "no_evidence",
                 "release_id": industrial_rag_release_id,
                 "retrieved": retrieved,
                 "reused_evidence_ids": reused_evidence_ids,
                 "channels": channel_status,
+                "coverage": query_coverage,
+                "counter_evidence": {
+                    "status": "candidate_search_completed",
+                    "candidates": counter_refs,
+                    "automatic_contradiction_claims": False,
+                },
                 "warnings": sorted(set(warnings)),
                 "scores_are_confidence": False,
             }
@@ -1682,7 +1740,7 @@ def _fundamental_handlers(
         tools.extend([
             _tool(
                 "search_indexed_financial_documents",
-                "Search the pinned, locally indexed public financial corpus with the task's strict decision-time and permission scope.",
+                "Run bounded metric and period searches against the pinned local public financial corpus; return coverage gaps and correction/restatement candidates for review.",
                 {
                     "question": {"type": "string", "minLength": 1, "maxLength": 240},
                     "symbols": {"type": "array", "items": {"type": "string", "pattern": "^[0-9]{6}$"}, "minItems": 1, "maxItems": 4},
@@ -2060,7 +2118,13 @@ def _validate_report(
             source = catalog[evidence_id]
             field_name = observation["field"]
             value = observation.get("value")
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{role_id} structured observation value must be a finite number")
+            try:
+                observation_decimal = Decimal(str(value))
+            except (InvalidOperation, TypeError, ValueError):
+                raise ValueError(f"{role_id} structured observation value must be a finite number") from None
+            if not observation_decimal.is_finite():
                 raise ValueError(f"{role_id} structured observation value must be a finite number")
             report_period = observation.get("report_period")
             period_start = observation.get("period_start")
@@ -2093,10 +2157,19 @@ def _validate_report(
                 raise ValueError(f"{role_id} cited source has no verified unit for {field_name!r}")
             if observation["unit"] != expected_unit:
                 raise ValueError(f"{role_id} structured observation unit does not match its source")
-            if isinstance(expected, bool) or not isinstance(expected, (int, float)) or not math.isfinite(float(expected)):
+            if isinstance(expected, bool) or not isinstance(expected, (str, int, float)):
                 raise ValueError(f"{role_id} cited source does not expose a finite numeric value for {field_name!r}")
-            if not math.isclose(float(value), float(expected), rel_tol=1e-9, abs_tol=1e-10):
-                raise ValueError(f"{role_id} structured observation value does not match its cited source")
+            try:
+                expected_decimal = Decimal(str(expected))
+            except (InvalidOperation, TypeError, ValueError):
+                raise ValueError(f"{role_id} cited source does not expose a finite numeric value for {field_name!r}") from None
+            if not expected_decimal.is_finite():
+                raise ValueError(f"{role_id} cited source does not expose a finite numeric value for {field_name!r}")
+            if observation_decimal != expected_decimal:
+                raise ValueError(
+                    f"{role_id} structured observation value does not match its cited source "
+                    "under exact Decimal equality"
+                )
             available_at = source.get("available_at")
             validated = dict(observation)
             validated.update({
