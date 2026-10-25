@@ -295,6 +295,36 @@ def _bm25(
     return sorted(scored, key=lambda item: (-item[1], str(item[0].get("block_id"))))[:limit]
 
 
+def _matches_exact_table_row_query(plan: QueryPlan, block: Mapping[str, object]) -> bool:
+    """Recognize a table row whose source label and column header match the query."""
+    if block.get("block_type") != "table_row_group":
+        return False
+    metrics = {
+        item.metric for item in requested_metric_specs(plan.query)
+        if item.match_status == "exact"
+    }
+    if not metrics:
+        return False
+    text = str(block.get("text", ""))
+    header, separator, data = text.partition("\n")
+    if not separator or "数据行：" not in data:
+        return False
+    row_label = data.split("数据行：", 1)[1].split("|", 1)[0].strip()
+    if metric_for_source_label(row_label) not in metrics:
+        return False
+    periods = requested_periods(plan.query, plan.report_periods)
+    if not periods:
+        return True
+    source_periods = {
+        normalize_period(part.strip())
+        for part in re.split(r"[|\n/]+", header.partition("列头：")[2])
+    }
+    source_periods.discard(None)
+    requested = {normalize_period(period) for period in periods}
+    requested.discard(None)
+    return bool(source_periods.intersection(requested))
+
+
 def reciprocal_rank_fusion(
     channels: Mapping[str, Sequence[EvidenceResult]], *, rank_constant: int = 60, limit: int = 50
 ) -> tuple[list[EvidenceResult], dict[str, object]]:
@@ -1288,7 +1318,24 @@ class IndustrialRagService:
         if control is not None:
             control.check()
         scoped = [dict(row) | {"text": str(row["text"])} for row in blocks if row["version_id"] in versions]
-        ranked = _bm25(plan.query + " " + " ".join(plan.aliases), scoped, limit=plan.top_k * 5, control=control)
+        broad_ranked = _bm25(plan.query + " " + " ".join(plan.aliases), scoped, limit=plan.top_k * 5, control=control)
+        exact_table_rows = [row for row in scoped if _matches_exact_table_row_query(plan, row)]
+        focused_ranked: list[tuple[Mapping[str, object], float]] = []
+        if exact_table_rows:
+            exact_metrics = [
+                item.label for item in requested_metric_specs(plan.query)
+                if item.match_status == "exact"
+            ]
+            exact_periods = requested_periods(plan.query, plan.report_periods)
+            focused_query = " ".join((*exact_metrics, *exact_periods, *plan.aliases))
+            focused_ranked = _bm25(
+                focused_query, exact_table_rows, limit=plan.top_k * 5, control=control,
+            )
+        focused_ids = {str(row.get("block_id")) for row, _ in focused_ranked}
+        ranked = focused_ranked + [
+            (row, score) for row, score in broad_ranked
+            if str(row.get("block_id")) not in focused_ids
+        ]
         return [
             EvidenceResult(
                 evidence_id=f"ev-block-{row['block_id']}", channel="bm25",

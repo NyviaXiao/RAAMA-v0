@@ -85,6 +85,32 @@ def test_docling_unit_and_period_are_kept_as_explicit_source_labels() -> None:
     assert document_ai._period_header("累计收入") is None
 
 
+def test_docling_propagates_units_written_on_metric_rows() -> None:
+    cells = [
+        SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=0, text="项目", column_header=True),
+        SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=1, text="2024年", column_header=True),
+        SimpleNamespace(start_row_offset_idx=1, start_col_offset_idx=0, text="单位", column_header=True),
+        SimpleNamespace(start_row_offset_idx=1, start_col_offset_idx=1, text="本期", column_header=True),
+        SimpleNamespace(start_row_offset_idx=2, start_col_offset_idx=0, text="营业收入（千元）", column_header=False),
+        SimpleNamespace(start_row_offset_idx=2, start_col_offset_idx=1, text="362,012,554", column_header=False),
+        SimpleNamespace(start_row_offset_idx=3, start_col_offset_idx=0, text="基本每股收益（元/股）", column_header=False),
+        SimpleNamespace(start_row_offset_idx=3, start_col_offset_idx=1, text="11.58", column_header=False),
+    ]
+    segment = document_ai._docling_table_segments(cells)[0]
+    table, records = document_ai._docling_segment_records(
+        segment,
+        table_id="catl-table",
+        page_number=9,
+        title_parts=[],
+        unit_context=[],
+    )
+
+    assert segment["header_rows"] == 2
+    assert table["unit_text"] is None
+    assert [cell["unit"] for cell in records if cell["row_index"] == 2] == ["千元", "千元"]
+    assert [cell["unit"] for cell in records if cell["row_index"] == 3] == ["元/股", "元/股"]
+
+
 def test_docling_splits_a_merged_table_at_a_repeated_statement_heading() -> None:
     cells = [
         SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=0, text="项目", column_header=True),

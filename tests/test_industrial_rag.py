@@ -414,6 +414,55 @@ def test_strict_time_requires_capture_and_ingestion_by_cutoff_but_proxy_is_label
     assert any("retrospective source timing" in item for item in diagnostic["warnings"])
 
 
+def test_late_document_does_not_change_an_existing_as_of_search_result(tmp_path) -> None:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=2)
+    early = _bundle(
+        source_id="cninfo-early", version_id="version-early", document_id="document-early",
+        payload=b"2024 annual report revenue 100 CNY million",
+        first_available_at=cutoff - timedelta(days=2),
+        captured_at=cutoff - timedelta(minutes=1),
+        ingested_at=cutoff - timedelta(seconds=30),
+    )
+    store.ingest_bundle(early)
+    _consume_all(store)
+    _publish(store, [early.version.version_id], "release-before-late-source")
+    plan = replace(
+        _plan(as_of=cutoff, release_id="release-before-late-source"),
+        query="2024年度营业收入是多少",
+        channels=("structured_facts", "bm25"),
+    )
+    before = IndustrialRagService(store).search(plan, use_cache=False)
+    before_signature = [
+        (item["evidence_id"], item["source_id"], item["text"], item["rank_score"])
+        for item in before["retrieved"]
+    ]
+    assert before_signature
+
+    late = _bundle(
+        source_id="cninfo-late", version_id="version-late", document_id="document-late",
+        payload=b"2024 annual report revenue 999 CNY million",
+        first_available_at=cutoff - timedelta(days=2),
+        captured_at=cutoff + timedelta(minutes=1),
+        ingested_at=cutoff + timedelta(minutes=2),
+    )
+    store.ingest_bundle(late)
+    _consume_all(store)
+    _publish(store, [early.version.version_id, late.version.version_id], "release-after-late-source")
+    after = IndustrialRagService(store).search(
+        replace(plan, release_id="release-after-late-source"),
+        use_cache=False,
+    )
+    after_signature = [
+        (item["evidence_id"], item["source_id"], item["text"], item["rank_score"])
+        for item in after["retrieved"]
+    ]
+
+    assert after_signature == before_signature
+    assert all(item["source_id"] != late.version.source_id for item in after["retrieved"])
+
+
 def test_timezone_fields_are_normalized_and_bad_timestamp_order_is_rejected() -> None:
     now = datetime.now(timezone.utc)
     version = _bundle(
@@ -736,6 +785,55 @@ def test_table_row_expansion_rechecks_access_and_returns_exact_cell_citations(tm
             int(row_hit["citation"]["row_start"]),
             int(row_hit["citation"]["row_end"]),
         )
+
+
+def test_search_prioritizes_exact_metric_period_table_row_over_noisy_page_text(tmp_path) -> None:
+    source = "指标,2024年,2023年\r\n营业收入（千元）,100,90\r\n".encode()
+    parsed = parse_isolated(source, "financial.csv", scratch_root=tmp_path / "scratch")
+    base = _bundle(payload=source)
+    version = replace(
+        base.version,
+        parser_name=str(parsed["parser_name"]),
+        parser_version=str(parsed["parser_version"]),
+        parser_confidence=float(parsed["parser_confidence"]),
+    )
+    records = records_from_parse(parsed, version.version_id)
+    noisy_blocks = tuple(
+        Block(
+            block_id=f"noise-query-{index}", version_id=version.version_id,
+            text="宁德时代2024年年度报告第二节主要会计数据表列示的2024年营业收入是多少",
+            block_type="paragraph", page_number=2,
+        )
+        for index in range(20)
+    )
+    bundle = replace(
+        base,
+        version=version,
+        document=replace(base.document, title="Test 2024 annual report", entity_name="Test issuer"),
+        sections=records["sections"],
+        spans=records["spans"],
+        blocks=records["blocks"] + noisy_blocks,
+        tables=records["tables"],
+        cells=records["cells"],
+        facts=(),
+    )
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, [version.version_id], "release-1")
+    plan = replace(
+        _plan(release_id="release-1", channels=("bm25",)),
+        query="宁德时代2024年年度报告第二节主要会计数据表列示的2024年营业收入是多少",
+        task_type="table",
+        top_k=10,
+    )
+
+    result = IndustrialRagService(store).search(plan)
+
+    assert result["retrieved"]
+    first = result["retrieved"][0]
+    assert first["citation"]["table_id"] == f"tbl-{version.version_id}-{parsed['tables'][0]['table_id']}"
+    assert first["citation"]["row_start"] == first["citation"]["row_end"] == 1
 
 
 def test_cross_page_merge_is_not_automatic_without_matching_basis_and_header() -> None:

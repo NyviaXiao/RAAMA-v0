@@ -555,23 +555,22 @@
           "content_sha256": "b4f1713d7b821eb076c102711d177fe942ccc2bc8dd171ae5d7a95799a65b0ad",
           "page_number": 9,
           "evidence_type": "cell",
-          "metric": "营业收入",
+          "metric": "营业收入（千元）",
           "raw_value": "362,012,554",
           "normalized_value": "362012554",
           "unit": "千元",
           "multiplier": "1",
-          "currency": "CNY",
-          "report_period": "2024",
+          "report_period": "2024年",
           "accounting_basis": null,
-          "table_id": "annual-report-p9-key-financial-indicators",
-          "row_index": 1,
+          "table_id": "tbl-v-b4f1713d7b821eb076c10271-docling-table-10-p9",
+          "row_index": 2,
           "column_index": 1,
-          "cell_reference": "r1c1",
-          "annotation_note": "PDF page 9, printed page 9. Zero-based visible table row/column: row 0 is the header, row 1 is 营业收入, and column 1 is 2024. Unit is 千元; group/parent accounting basis is not separately labeled in this table."
+          "cell_reference": "r2c1",
+          "annotation_note": "PDF physical page 9, printed page 9. The Docling table has two header rows; row 1 contains the 2022 adjustment subheaders. Row 2 is 营业收入（千元） and column 1 is 2024. Unit is explicitly 千元; currency and accounting basis are not stated in this table."
         }
       ],
       "expected_claims": [
-        "2024年年度报告主要会计数据表列示营业收入为人民币362,012,554千元。"
+        "2024年年度报告主要会计数据表列示营业收入为362,012,554千元。"
       ],
       "allowed_calculations": [],
       "expected_refusal_reason": null,
@@ -582,7 +581,7 @@
         "annotated_at": "2026-10-26T04:41:07+08:00",
         "reviewer": null,
         "review_status": "single_review",
-        "review_note": "Visually checked the complete physical PDF page 9 and exact annual-indicator table cell. Viewed development diagnostic only; this issuer/report family is not an independent holdout."
+        "review_note": "Visually checked the complete physical PDF page 9 and exact annual-indicator table cell. Counted both header rows in the parser coordinates. Viewed development diagnostic only; this issuer/report family is not an independent holdout."
       },
       "schema_version": "adaptive-mas.financial-qa-case.v1",
       "source_records": [
@@ -614,23 +613,22 @@
           "content_sha256": "b4f1713d7b821eb076c102711d177fe942ccc2bc8dd171ae5d7a95799a65b0ad",
           "page_number": 9,
           "evidence_type": "cell",
-          "metric": "经营活动产生的现金流量净额",
+          "metric": "经营活动产生的现金流量净额（千元）",
           "raw_value": "96,990,345",
           "normalized_value": "96990345",
           "unit": "千元",
           "multiplier": "1",
-          "currency": "CNY",
-          "report_period": "2024",
+          "report_period": "2024年",
           "accounting_basis": null,
-          "table_id": "annual-report-p9-key-financial-indicators",
-          "row_index": 4,
+          "table_id": "tbl-v-b4f1713d7b821eb076c10271-docling-table-10-p9",
+          "row_index": 5,
           "column_index": 1,
-          "cell_reference": "r4c1",
-          "annotation_note": "PDF page 9, printed page 9. Zero-based visible table row/column: row 0 is the header, row 4 is 经营活动产生的现金流量净额, and column 1 is 2024. Unit is 千元; group/parent accounting basis is not separately labeled in this table."
+          "cell_reference": "r5c1",
+          "annotation_note": "PDF physical page 9, printed page 9. The Docling table has two header rows. Row 5 is 经营活动产生的现金流量净额（千元） and column 1 is 2024. Unit is explicitly 千元; currency and accounting basis are not stated in this table."
         }
       ],
       "expected_claims": [
-        "2024年年度报告主要会计数据表列示经营活动产生的现金流量净额为人民币96,990,345千元。"
+        "2024年年度报告主要会计数据表列示经营活动产生的现金流量净额为96,990,345千元。"
       ],
       "allowed_calculations": [],
       "expected_refusal_reason": null,
@@ -641,7 +639,7 @@
         "annotated_at": "2026-10-26T04:41:07+08:00",
         "reviewer": null,
         "review_status": "single_review",
-        "review_note": "Visually checked the complete physical PDF page 9 and exact annual-indicator table cell. Viewed development diagnostic only; this issuer/report family is not an independent holdout."
+        "review_note": "Visually checked the complete physical PDF page 9 and exact annual-indicator table cell. Counted both header rows in the parser coordinates. Viewed development diagnostic only; this issuer/report family is not an independent holdout."
       },
       "schema_version": "adaptive-mas.financial-qa-case.v1",
       "source_records": [
@@ -806,5 +804,5 @@
     "reason": "At authorized baseline 420cc4f, the existing fundamental source search did not expose an immutable document/page retrieval index or complete evidence-set labels; no pre-change retrieval metric was recorded.",
     "metrics": null
   },
-  "last_updated_at": "2026-10-26T04:41:07+08:00"
+  "last_updated_at": "2026-10-26T04:48:46+08:00"
 }

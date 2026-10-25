@@ -76,6 +76,7 @@ _UNIT_PATTERNS = (
     (r"人民币\s*百万元|百万元", "人民币百万元"),
     (r"人民币\s*亿元|亿元", "人民币亿元"),
     (r"人民币\s*万元|万元", "人民币万元"),
+    (r"千元", "千元"),
     (r"人民币\s*元\s*/\s*股|元\s*/\s*股", "人民币元/股"),
     (r"百分比|百分数|%", "%"),
     (r"基点|\bbps?\b", "基点"),
@@ -102,7 +103,12 @@ class RequestedMetric:
 
 
 def _normalized_label(value: str) -> str:
-    return re.sub(r"[\s:：,，。()（）]", "", value).casefold()
+    text = re.sub(
+        r"[（(]\s*(?:人民币\s*)?(?:百万元|亿元|万元|千元|元\s*/\s*股|元|%)\s*[）)]\s*$",
+        "",
+        value,
+    )
+    return re.sub(r"[\s:：,，。()（）]", "", text).casefold()
 
 
 def metric_for_source_label(value: object) -> str | None:
@@ -170,6 +176,7 @@ def unit_signature(value: object, multiplier: object = "1") -> str | None:
         "百万元": ("CNY", Decimal("1000000")),
         "人民币万元": ("CNY", Decimal("10000")),
         "万元": ("CNY", Decimal("10000")),
+        "千元": ("unspecified_currency", Decimal("1000")),
         "人民币亿元": ("CNY", Decimal("100000000")),
         "亿元": ("CNY", Decimal("100000000")),
         "人民币元": ("CNY", Decimal("1")),

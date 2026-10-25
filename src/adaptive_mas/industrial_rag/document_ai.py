@@ -139,7 +139,7 @@ def _explicit_unit_text(parts: list[str]) -> str | None:
     lines = [line.strip() for part in parts for line in str(part).splitlines()]
     for index, line in enumerate(lines):
         bracketed_unit = re.fullmatch(
-            r"[（(]\s*(人民币\s*)?(百万元|亿元|万元|元\s*/\s*股|元|%)\s*(?:[，,][^）)]*)?[）)]",
+            r"[（(]\s*(人民币\s*)?(百万元|亿元|万元|千元|元\s*/\s*股|元|%)\s*(?:[，,][^）)]*)?[）)]",
             line,
         )
         if bracketed_unit is not None:
@@ -159,6 +159,22 @@ def _explicit_unit_text(parts: list[str]) -> str | None:
                 return None
             return following
         return None
+    return None
+
+
+def _row_explicit_unit_text(parts: list[str]) -> str | None:
+    """Read a unit written directly in a row label, without inferring currency."""
+    for part in parts:
+        line = str(part).strip()
+        match = re.fullmatch(
+            r".*?[（(]\s*(人民币\s*)?(百万元|亿元|万元|千元|元\s*/\s*股|元|%)\s*[）)]\s*",
+            line,
+        )
+        if match is None:
+            continue
+        prefix = "人民币" if match.group(1) else ""
+        unit = re.sub(r"\s+", "", match.group(2))
+        return prefix + unit
     return None
 
 
@@ -377,6 +393,15 @@ def _docling_segment_records(
     title = " · ".join(dict.fromkeys(title_values)) or None
     unit_parts = unit_context + title_values + [str(getattr(cell, "text", "")) for cell in source_cells]
     unit_text = _explicit_unit_text(unit_parts)
+    row_parts: dict[int, list[str]] = {}
+    for cell in source_cells:
+        row_index = int(cell.start_row_offset_idx) - row_offset
+        row_parts.setdefault(row_index, []).append(str(getattr(cell, "text", "")))
+    row_units = {
+        row_index: unit
+        for row_index, parts in row_parts.items()
+        if (unit := _row_explicit_unit_text(parts)) is not None
+    }
     table_cells: list[dict[str, Any]] = []
     for cell in source_cells:
         row_index = int(cell.start_row_offset_idx) - row_offset
@@ -395,7 +420,7 @@ def _docling_segment_records(
             "normalized_value": normalized.get("normalized_value"),
             "value_kind": kind,
             "page_number": page_number,
-            "unit": unit_text,
+            "unit": row_units.get(row_index, unit_text),
             "multiplier": normalized.get("multiplier"),
             "currency": None,
             "accounting_basis": None,

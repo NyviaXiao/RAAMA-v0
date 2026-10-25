@@ -78,6 +78,10 @@ def test_unit_basis_and_q1_labels_are_preserved_for_coverage() -> None:
 
     assert requested_periods("2024年1-3月营业收入", ()) == ("2024年1-3月",)
     assert requested_unit("以人民币百万元列示2024年营业收入") == "人民币百万元"
+    assert requested_unit("以千元列示2024年营业收入") == "千元"
+    assert unit_signature("千元") == "unspecified_currency:1000"
+    from adaptive_mas.industrial_rag.planning import metric_for_source_label
+    assert metric_for_source_label("营业收入（千元）") == "operating_revenue"
     assert unit_signature("人民币元", "1000000") == unit_signature("人民币百万元")
     assert requested_accounting_basis("合并归母净利润") == "consolidated"
     assert accounting_basis_signature("本集团") == "consolidated"
