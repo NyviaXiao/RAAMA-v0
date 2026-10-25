@@ -16,6 +16,7 @@ from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
 from adaptive_mas.industrial_rag.web import LocalRagHTTPServer, RagRequestHandler
+from adaptive_mas.runtime_limits import http_thread_limit
 
 
 def _cli(repo_root: Path, env: dict[str, str], *arguments: str) -> dict[str, object]:
@@ -100,6 +101,9 @@ def test_cli_ingest_release_status_and_live_local_api_flow(tmp_path) -> None:
 
     store = IndustrialRagStore(database, LocalContentAddressedStore(objects))
     server = LocalRagHTTPServer(("127.0.0.1", 0), RagRequestHandler)
+    assert server._ordinary_worker_limit == max(1, http_thread_limit() - 1)
+    assert server._cancel_worker_limit == 1
+    assert server._total_worker_limit == max(2, http_thread_limit())
     server.context = {
         "store": store,
         "service": IndustrialRagService(store),
@@ -293,61 +297,46 @@ def test_cli_ingest_release_status_and_live_local_api_flow(tmp_path) -> None:
         server.context["service"].channel_adapters["dense"] = BlockingDenseAdapter()
         server._request_slots = threading.BoundedSemaphore(1)
         blocking_query = {**query_scope, "channels": ["dense"]}
+        cancel_request_id = "synthetic-cancel-request-1"
         background_response: dict[str, object] = {}
 
         def send_blocked_request() -> None:
-            background_response.update(_request_json(base_url + "/api/search", blocking_query))
+            try:
+                background_response["status"] = _request_json(base_url + "/api/search", {
+                    **blocking_query,
+                    "request_id": cancel_request_id,
+                })["status"]
+            except HTTPError as error:
+                background_response["status"] = error.code
 
         background_request = threading.Thread(target=send_blocked_request)
         background_request.start()
         assert request_started.wait(2)
-        class RecordingSocket:
-            def __init__(self):
-                self.response = b""
-                self.closed = False
-
-            def sendall(self, value):
-                self.response += value
-
-            def close(self):
-                self.closed = True
-
-        overflow_request = RecordingSocket()
         try:
-            server.process_request(overflow_request, ("127.0.0.1", 1))
-            assert overflow_request.response.startswith(b"HTTP/1.1 503 Service Unavailable\r\n")
-            assert overflow_request.closed
+            for _ in range(3):
+                try:
+                    _request_json(base_url + "/api/search", blocking_query)
+                except HTTPError as error:
+                    assert error.code == 503
+                else:
+                    raise AssertionError("saturated ordinary requests must receive bounded 503 backpressure")
+            assert server._cancel_slots.acquire(timeout=2)
+            try:
+                try:
+                    _request_json(base_url + "/api/search", blocking_query)
+                except HTTPError as error:
+                    assert error.code == 503
+                else:
+                    raise AssertionError("requests beyond the ordinary and reserved pools must receive 503")
+            finally:
+                server._cancel_slots.release()
+            cancel_ack = _request_json(base_url + "/api/cancel", {"request_id": cancel_request_id})
+            assert cancel_ack["status"] == "cancellation_requested"
         finally:
             release_request.set()
         background_request.join(timeout=5)
         assert not background_request.is_alive()
-        assert background_response.get("status") == "no_evidence"
-
-        server._request_slots = threading.BoundedSemaphore(2)
-        request_started.clear()
-        release_request.clear()
-        cancel_request_id = "synthetic-cancel-request-1"
-        cancellation_response: dict[str, object] = {}
-
-        def send_cancellable_request() -> None:
-            try:
-                _request_json(base_url + "/api/search", {
-                    **blocking_query,
-                    "query": "cancellation contract query",
-                    "request_id": cancel_request_id,
-                })
-            except HTTPError as error:
-                cancellation_response["status"] = error.code
-
-        cancellable_request = threading.Thread(target=send_cancellable_request)
-        cancellable_request.start()
-        assert request_started.wait(2)
-        cancel_ack = _request_json(base_url + "/api/cancel", {"request_id": cancel_request_id})
-        assert cancel_ack["status"] == "cancellation_requested"
-        cancellable_request.join(timeout=5)
-        assert not cancellable_request.is_alive()
-        assert cancellation_response.get("status") == 409
-        release_request.set()
+        assert background_response.get("status") == 409
 
         acl_page = _request_json(base_url + "/api/search/page", {**query_scope, "page_size": 1})
         acl_cursor = acl_page["pagination"]["next_cursor"]

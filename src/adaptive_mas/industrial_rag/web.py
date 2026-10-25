@@ -140,6 +140,9 @@ class RagRequestHandler(BaseHTTPRequestHandler):
         if not self._local_only():
             self._send(403, {"error": "loopback clients only"})
             return
+        if self.server.is_control_request(self.connection):  # type: ignore[attr-defined]
+            self._send(503, {"error": "request capacity is reserved for cancellation control"})
+            return
         path = urlparse(self.path).path
         context = self._context()
         if path == "/":
@@ -184,6 +187,12 @@ class RagRequestHandler(BaseHTTPRequestHandler):
             self._send(403, {"error": "loopback clients only"})
             return
         path = urlparse(self.path).path
+        if (
+            self.server.is_control_request(self.connection)  # type: ignore[attr-defined]
+            and path != "/api/cancel"
+        ):
+            self._send(503, {"error": "request capacity is reserved for cancellation control"})
+            return
         try:
             payload = self._body()
             if path == "/api/cancel":
@@ -289,32 +298,102 @@ class LocalRagHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler]):
         self.address_family = socket.AF_INET6 if ":" in server_address[0] else socket.AF_INET
-        self._request_slots = threading.BoundedSemaphore(http_thread_limit())
+        configured_thread_limit = http_thread_limit()
+        self._ordinary_worker_limit = max(1, configured_thread_limit - 1)
+        self._cancel_worker_limit = 1
+        self._total_worker_limit = self._ordinary_worker_limit + self._cancel_worker_limit
+        self._request_slots = threading.BoundedSemaphore(self._ordinary_worker_limit)
+        self._cancel_slots = threading.BoundedSemaphore(self._cancel_worker_limit)
+        self._control_request_ids: set[int] = set()
+        self._control_request_lock = threading.Lock()
         super().__init__(server_address, handler_class)
 
-    def process_request(self, request: socket.socket, client_address: tuple[str, int]) -> None:
-        if not self._request_slots.acquire(blocking=False):
+    def is_control_request(self, request: socket.socket) -> bool:
+        with self._control_request_lock:
+            return id(request) in self._control_request_ids
+
+    @staticmethod
+    def _discard_saturated_request_input(request: socket.socket) -> None:
+        deadline = time.monotonic() + 0.25
+        request_data = bytearray()
+        header_end = -1
+        expected_body_length: int | None = None
+        while time.monotonic() < deadline and len(request_data) < 1_065_536:
+            request.settimeout(min(0.05, max(0.001, deadline - time.monotonic())))
             try:
-                request.sendall(
-                    b"HTTP/1.1 503 Service Unavailable\r\n"
-                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
-                )
+                chunk = request.recv(min(65_536, 1_065_536 - len(request_data)))
+            except socket.timeout:
+                continue
             except OSError:
-                pass
-            finally:
-                request.close()
-            return
+                return
+            if not chunk:
+                return
+            request_data.extend(chunk)
+            if header_end < 0:
+                header_end = request_data.find(b"\r\n\r\n")
+                if header_end < 0:
+                    if len(request_data) > 65_536:
+                        return
+                    continue
+                headers = bytes(request_data[:header_end]).split(b"\r\n")[1:]
+                for line in headers:
+                    name, separator, value = line.partition(b":")
+                    if separator and name.strip().lower() == b"content-length":
+                        try:
+                            parsed_length = int(value.strip())
+                        except ValueError:
+                            parsed_length = -1
+                        expected_body_length = parsed_length if 0 <= parsed_length <= 1_000_000 else None
+                        break
+                if expected_body_length is None:
+                    return
+            if len(request_data) >= header_end + 4 + expected_body_length:
+                return
+
+    def process_request(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        control_request = False
+        if not self._request_slots.acquire(blocking=False):
+            if self._cancel_slots.acquire(blocking=False):
+                control_request = True
+                with self._control_request_lock:
+                    self._control_request_ids.add(id(request))
+            else:
+                self._discard_saturated_request_input(request)
+                try:
+                    request.sendall(
+                        b"HTTP/1.1 503 Service Unavailable\r\n"
+                        b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                    )
+                except OSError:
+                    pass
+                finally:
+                    request.close()
+                return
         try:
+            if control_request:
+                # The reserved worker only handles cancellation and has a finite
+                # socket read bound so a stalled local client cannot hold it forever.
+                request.settimeout(5.0)
             super().process_request(request, client_address)
         except BaseException:
-            self._request_slots.release()
+            if control_request:
+                with self._control_request_lock:
+                    self._control_request_ids.discard(id(request))
+                self._cancel_slots.release()
+            else:
+                self._request_slots.release()
             raise
 
     def process_request_thread(self, request: socket.socket, client_address: tuple[str, int]) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._request_slots.release()
+            if self.is_control_request(request):
+                with self._control_request_lock:
+                    self._control_request_ids.discard(id(request))
+                self._cancel_slots.release()
+            else:
+                self._request_slots.release()
 
 
 def serve(

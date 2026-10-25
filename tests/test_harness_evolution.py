@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from adaptive_mas.agents.harness import (
     SUBMIT_REPORT,
     _accept_report,
     _compact_tool_message,
+    _financial_calculation,
     _fundamental_handlers,
     _run_tool_agent,
     _validate_report,
@@ -731,6 +733,484 @@ def test_runtime_fact_gate_labels_verified_observations_and_keeps_semantics_sepa
     assert finding["observations"][0]["structured_validation"] == "exact_source_value_unit_period_match"
     assert finding["numeric_candidate_eligibility"]["expected_returns_changed"] is False
     assert finding["semantic_claim_support"]["status"] == "citations_present_semantic_entailment_not_automatically_verified"
+
+
+def test_runtime_fact_gate_rejects_unsupported_numeric_claim_literals() -> None:
+    source = _synthetic_result()["evidence_catalog"]["public-evidence-1"]
+    report = {
+        "summary": "A cited report.",
+        "findings": [{
+            "symbol": source["symbol"],
+            "conclusion": "Revenue grew 99% in 2026Q2.",
+            "claim_type": "source_fact",
+            "evidence_ids": [source["evidence_id"]],
+            "observations": [{
+                "evidence_id": source["evidence_id"],
+                "field": "revenue_yoy_pct",
+                "value": 12.5,
+                "unit": "percent",
+                "report_period": "2026Q2",
+                "period_start": None,
+                "period_end": None,
+            }],
+            "uncertainties": [],
+        }],
+        "unresolved_items": [],
+    }
+
+    with pytest.raises(ValueError, match="unsupported numeric literal 99"):
+        _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+
+    report["findings"][0]["conclusion"] = "Revenue grew 12.5% in 2026Q2 for stock code 600000."
+    accepted = _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+    assert accepted["findings"][0]["claim_type"] == "source_fact"
+
+    report["findings"][0]["conclusion"] = "收入同比增长百分之十二点五。"
+    _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+    report["findings"][0]["conclusion"] = "Revenue grew 1.25e1% in 2026Q2."
+    _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+    report["summary"] = "As of 2026-08-30, security code 600000 reported 12.5%."
+    _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+
+    report["findings"][0]["conclusion"] = "Revenue grew 12.5% for 600000."
+    with pytest.raises(ValueError, match="unsupported numeric literal 600000"):
+        _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+
+    report["findings"][0]["conclusion"] = "Revenue increased."
+    report["summary"] = "Net profit increased 25%."
+    with pytest.raises(ValueError, match="unsupported numeric literal 25%"):
+        _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+    report["summary"] = "A cited report."
+    report["findings"][0]["conclusion"] = "收入同比增长百分之二十五。"
+    with pytest.raises(ValueError, match="unsupported numeric literal 二十五percent"):
+        _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+
+    report["findings"][0]["conclusion"] = "Revenue grew 25%."
+    report["findings"][0]["observations"] = []
+    report["findings"][0]["claim_type"] = "inference"
+    with pytest.raises(ValueError, match="unsupported numeric literal 25%"):
+        _validate_report(report, {source["evidence_id"]: source}, "fundamental")
+
+    date_source = json.loads(json.dumps(source))
+    date_source["available_at"] = "2026-10-25T18:00:00+08:00"
+    date_source["published_at"] = "2026-10-25T18:00:00+08:00"
+    with pytest.raises(ValueError, match="unsupported numeric literal 25%"):
+        _validate_report(report, {date_source["evidence_id"]: date_source}, "fundamental")
+
+    unit_source = json.loads(json.dumps(source))
+    unit_source["facts"] = {"revenue_cny": 25}
+    unit_source["facts_units"] = {"revenue_cny": "CNY"}
+    report["findings"][0]["evidence_ids"] = [unit_source["evidence_id"]]
+    report["findings"][0]["observations"] = [{
+        "evidence_id": unit_source["evidence_id"],
+        "field": "revenue_cny",
+        "value": 25,
+        "unit": "CNY",
+        "report_period": "2026Q2",
+        "period_start": None,
+        "period_end": None,
+    }]
+    with pytest.raises(ValueError, match="unsupported numeric literal 25%"):
+        _validate_report(report, {unit_source["evidence_id"]: unit_source}, "fundamental")
+
+
+def test_runtime_fact_gate_flags_conflicting_same_period_financial_sources() -> None:
+    first = _synthetic_result()["evidence_catalog"]["public-evidence-1"]
+    second = json.loads(json.dumps(first))
+    second.update({
+        "evidence_id": "public-evidence-2",
+        "source_record_id": "public-record-2",
+        "title": "A second captured report",
+        "facts": {"revenue_yoy_pct": 15.5},
+    })
+    catalog = {first["evidence_id"]: first, second["evidence_id"]: second}
+    finding = {
+        "symbol": first["symbol"],
+        "conclusion": "Revenue grew 12.5%.",
+        "claim_type": "source_fact",
+        "evidence_ids": [first["evidence_id"], second["evidence_id"]],
+        "observations": [{
+            "evidence_id": source["evidence_id"],
+            "field": "revenue_yoy_pct",
+            "value": value,
+            "unit": "percent",
+            "report_period": "2026Q2",
+            "period_start": None,
+            "period_end": None,
+        } for source, value in ((first, 12.5), (second, 15.5))],
+        "uncertainties": [],
+    }
+    report = {"summary": "Conflicting source captures.", "findings": [finding], "unresolved_items": []}
+
+    with pytest.raises(ValueError, match="conflicting financial source values"):
+        _validate_report(report, catalog, "fundamental")
+
+    finding["claim_type"] = "unknown"
+    finding["conclusion"] = "The captures report 12.5% and 15.5%."
+    accepted = _validate_report(report, catalog, "fundamental")
+    claim_validation = accepted["findings"][0]["claim_validation"]
+    assert claim_validation["status"] == "source_conflict_requires_review"
+    assert claim_validation["conflicting_sources"][0]["values"] == ["12.5", "15.5"]
+
+
+def test_fundamental_calculator_creates_recomputable_decimal_evidence() -> None:
+    def source(source_id: str, period: str, value: float, available: str) -> dict[str, object]:
+        return {
+            "source_record_id": source_id,
+            "dataset": "financial_statement",
+            "title": f"Revenue growth {period}",
+            "report_period": period,
+            "published_at": available,
+            "available_at": available,
+            "fetched_at": available,
+            "content_sha256": f"fixture-{source_id}",
+            "revenue_yoy_pct": value,
+            "facts_metadata": {
+                "revenue_yoy_pct": {
+                    "numeric_eligible": True,
+                    "unit": "percent",
+                    "report_period": period,
+                    "accounting_basis": "consolidated",
+                    "currency": None,
+                },
+            },
+            "vintage_status": "captured_fixture",
+            "vintage_verified": True,
+        }
+
+    snapshot = {
+        "p9_outputs": [{
+            "expert": "fundamental_rule_v1",
+            "symbol": "sh.600000",
+            "evidence": [
+                source("revenue-q1", "2026Q1", 10, "2026-05-01T18:00:00+08:00"),
+                source("revenue-q2", "2026Q2", 12, "2026-08-30T18:00:00+08:00"),
+            ],
+        }],
+    }
+    decision_time = datetime.fromisoformat("2026-09-01T16:00:00+08:00")
+    _, handlers, catalog = _fundamental_handlers(snapshot, decision_time)
+    searched = handlers["search_financial_facts_and_announcements"]({
+        "question": "revenue growth",
+        "symbols": ["600000"],
+        "limit": 1,
+    })
+    source_ids = {
+        str(reference["report_period"]): str(reference["evidence_id"])
+        for reference in searched["evidence_refs"]
+    }
+
+    calculated = handlers["calculate_financial_metric"]({
+        "operation": "growth_percent",
+        "operands": [
+            {"evidence_id": source_ids["2026Q1"], "field": "revenue_yoy_pct"},
+            {"evidence_id": source_ids["2026Q2"], "field": "revenue_yoy_pct"},
+        ],
+    })
+    derived_id = calculated["evidence_id"]
+    assert calculated["value"] == "20"
+    assert calculated["unit"] == "percent"
+    assert calculated["operand_evidence_ids"] == [source_ids["2026Q1"], source_ids["2026Q2"]]
+    with pytest.raises(ValueError, match="baseline period must precede the current period"):
+        handlers["calculate_financial_metric"]({
+            "operation": "growth_percent",
+            "operands": [
+                {"evidence_id": source_ids["2026Q2"], "field": "revenue_yoy_pct"},
+                {"evidence_id": source_ids["2026Q1"], "field": "revenue_yoy_pct"},
+            ],
+        })
+
+    report = {
+        "summary": "The reported revenue growth rate rose.",
+        "findings": [{
+            "symbol": "600000",
+            "conclusion": "The reported rate rose from 10% to 12%, a 20% relative increase.",
+            "claim_type": "calculation",
+            "evidence_ids": [source_ids["2026Q1"], source_ids["2026Q2"], derived_id],
+            "observations": [
+                {
+                    "evidence_id": source_ids[period],
+                    "field": "revenue_yoy_pct",
+                    "value": value,
+                    "unit": "percent",
+                    "report_period": period,
+                    "period_start": None,
+                    "period_end": None,
+                }
+                for period, value in (("2026Q1", 10), ("2026Q2", 12))
+            ] + [{
+                "evidence_id": derived_id,
+                "field": catalog[derived_id]["metric"],
+                "value": 20,
+                "unit": "percent",
+                "report_period": "2026Q2",
+                "period_start": None,
+                "period_end": None,
+            }],
+            "uncertainties": [],
+        }],
+        "unresolved_items": [],
+    }
+    accepted = _validate_report(
+        report,
+        catalog,
+        "fundamental",
+        visible_evidence_ids=set(catalog),
+        decision_time=decision_time,
+    )
+    finding = accepted["findings"][0]
+    assert finding["claim_validation"]["status"] == "calculation_recomputed_decimal_50_half_even_semantics_unverified"
+    assert finding["observations"][-1]["structured_validation"] == "exact_source_value_unit_period_match"
+
+    catalog[derived_id]["facts"][calculated["metric"]] = "21"
+    tampered_report = json.loads(json.dumps(report))
+    tampered_report["findings"][0]["observations"][-1]["value"] = 21
+    with pytest.raises(ValueError, match="fact card does not match its recomputed result"):
+        _validate_report(
+            tampered_report,
+            catalog,
+            "fundamental",
+            visible_evidence_ids=set(catalog),
+            decision_time=decision_time,
+        )
+
+    unreviewed_snapshot = json.loads(json.dumps(snapshot))
+    for source in unreviewed_snapshot["p9_outputs"][0]["evidence"]:
+        source.pop("facts_metadata")
+    _, unreviewed_handlers, _ = _fundamental_handlers(unreviewed_snapshot, decision_time)
+    unreviewed_search = unreviewed_handlers["search_financial_facts_and_announcements"]({
+        "question": "revenue growth",
+        "symbols": ["600000"],
+        "limit": 1,
+    })
+    unreviewed_ids = {
+        str(reference["report_period"]): str(reference["evidence_id"])
+        for reference in unreviewed_search["evidence_refs"]
+    }
+    with pytest.raises(ValueError, match="not numeric-eligible"):
+        unreviewed_handlers["calculate_financial_metric"]({
+            "operation": "growth_percent",
+            "operands": [
+                {"evidence_id": unreviewed_ids["2026Q1"], "field": "revenue_yoy_pct"},
+                {"evidence_id": unreviewed_ids["2026Q2"], "field": "revenue_yoy_pct"},
+            ],
+        })
+
+
+def test_fundamental_margin_serializes_nonterminating_decimal_without_precision_loss() -> None:
+    available = "2026-08-30T18:00:00+08:00"
+    basis = "consolidated"
+    metadata = {
+        "numeric_eligible": True,
+        "unit": "CNY",
+        "report_period": "2026Q2",
+        "accounting_basis": basis,
+        "currency": "CNY",
+    }
+    snapshot = {
+        "p9_outputs": [{
+            "expert": "fundamental_rule_v1",
+            "symbol": "sh.600000",
+            "evidence": [{
+                "source_record_id": "margin-source-q2",
+                "dataset": "financial_statement",
+                "title": "净利润与营业收入",
+                "report_period": "2026Q2",
+                "published_at": available,
+                "available_at": available,
+                "fetched_at": available,
+                "content_sha256": "margin-source-vintage",
+                "parent_net_profit_cny": 1,
+                "revenue_cny": 3,
+                "facts_units": {"parent_net_profit_cny": "CNY", "revenue_cny": "CNY"},
+                "facts_metadata": {
+                    "parent_net_profit_cny": dict(metadata),
+                    "revenue_cny": dict(metadata),
+                },
+                "accounting_basis": basis,
+                "currency": "CNY",
+                "vintage_status": "captured_fixture",
+                "vintage_verified": True,
+            }],
+        }],
+    }
+    decision_time = datetime.fromisoformat("2026-09-01T16:00:00+08:00")
+    _, handlers, catalog = _fundamental_handlers(snapshot, decision_time)
+    searched = handlers["search_financial_facts_and_announcements"]({
+        "question": "profit revenue",
+        "symbols": ["600000"],
+        "limit": 1,
+    })
+    source_id = str(searched["evidence_refs"][0]["evidence_id"])
+    calculated = handlers["calculate_financial_metric"]({
+        "operation": "margin_percent",
+        "operands": [
+            {"evidence_id": source_id, "field": "parent_net_profit_cny"},
+            {"evidence_id": source_id, "field": "revenue_cny"},
+        ],
+    })
+    with localcontext() as context:
+        context.prec = 50
+        context.rounding = ROUND_HALF_EVEN
+        expected = Decimal(1) / Decimal(3) * Decimal(100)
+    assert Decimal(calculated["value"]) == expected
+    assert len(Decimal(calculated["value"]).as_tuple().digits) == 50
+
+    derived_id = str(calculated["evidence_id"])
+    report = {
+        "summary": "A source-derived profit margin.",
+        "findings": [{
+            "symbol": "600000",
+            "conclusion": "Profit margin was computed from the cited net profit and revenue amounts.",
+            "claim_type": "calculation",
+            "evidence_ids": [source_id, derived_id],
+            "observations": [
+                {
+                    "evidence_id": source_id,
+                    "field": "parent_net_profit_cny",
+                    "value": 1,
+                    "unit": "CNY",
+                    "report_period": "2026Q2",
+                    "period_start": None,
+                    "period_end": None,
+                },
+                {
+                    "evidence_id": source_id,
+                    "field": "revenue_cny",
+                    "value": 3,
+                    "unit": "CNY",
+                    "report_period": "2026Q2",
+                    "period_start": None,
+                    "period_end": None,
+                },
+                {
+                    "evidence_id": derived_id,
+                    "field": calculated["metric"],
+                    "value": calculated["value"],
+                    "unit": "percent",
+                    "report_period": "2026Q2",
+                    "period_start": None,
+                    "period_end": None,
+                },
+            ],
+            "uncertainties": [],
+        }],
+        "unresolved_items": [],
+    }
+    accepted = _validate_report(
+        report,
+        catalog,
+        "fundamental",
+        visible_evidence_ids=set(catalog),
+        decision_time=decision_time,
+    )
+    assert accepted["findings"][0]["observations"][-1]["value"] == calculated["value"]
+
+    invalid_operands = [
+        {
+            "symbol": "600000",
+            "field": "earnings_per_share",
+            "value": Decimal(1),
+            "unit": "CNY",
+            "report_period": "2026Q2",
+            "accounting_basis": basis,
+            "currency": "CNY",
+        },
+        {
+            "symbol": "600000",
+            "field": "revenue_cny",
+            "value": Decimal(3),
+            "unit": "CNY",
+            "report_period": "2026Q2",
+            "accounting_basis": basis,
+            "currency": "CNY",
+        },
+    ]
+    with pytest.raises(ValueError, match="profit numerator and revenue denominator"):
+        _financial_calculation("margin_percent", invalid_operands)
+
+
+def test_manager_directed_calculator_cannot_use_hidden_specialist_evidence() -> None:
+    available = "2026-08-30T18:00:00+08:00"
+    snapshot = {
+        "p9_outputs": [{
+            "expert": "fundamental_rule_v1",
+            "symbol": "sh.600000",
+            "evidence": [{
+                "source_record_id": "hidden-calculation-source",
+                "dataset": "financial_statement",
+                "title": "Revenue Q2",
+                "report_period": "2026Q2",
+                "published_at": available,
+                "available_at": available,
+                "fetched_at": available,
+                "content_sha256": "hidden-calculation-vintage",
+                "revenue_yoy_pct": 12.5,
+                "vintage_verified": True,
+            }],
+        }],
+    }
+    fundamental_tools, handlers, catalog = _fundamental_handlers(
+        snapshot,
+        datetime.fromisoformat("2026-09-01T16:00:00+08:00"),
+    )
+    evidence_id = next(iter(catalog))
+    calculator_calls = []
+    real_calculator = handlers["calculate_financial_metric"]
+
+    def record_calculator_call(arguments):
+        calculator_calls.append(arguments)
+        return real_calculator(arguments)
+
+    handlers["calculate_financial_metric"] = record_calculator_call
+    handlers["submit_report"] = lambda arguments: {
+        "accepted_report": {
+            "summary": "No evidence exposed to this directed query.",
+            "findings": [],
+            "unresolved_items": [],
+        },
+    }
+
+    class HiddenEvidenceClient:
+        model = "fixture-only"
+
+        def __init__(self) -> None:
+            self.turn = 0
+
+        def complete(self, messages, tools, **kwargs):
+            self.turn += 1
+            if self.turn == 1:
+                name = "calculate_financial_metric"
+                arguments = {
+                    "operation": "growth_percent",
+                    "operands": [
+                        {"evidence_id": evidence_id, "field": "revenue_yoy_pct"},
+                        {"evidence_id": evidence_id, "field": "revenue_yoy_pct"},
+                    ],
+                }
+            else:
+                name = "submit_report"
+                arguments = {"summary": "No evidence.", "findings": [], "unresolved_items": []}
+            return {"choices": [{"message": {"tool_calls": [{
+                "id": f"hidden-call-{self.turn}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }]}}]}
+
+    result = _run_tool_agent(
+        role_id="fundamental_directed_query_1",
+        system_prompt="fixture prompt",
+        task={"symbol": "600000"},
+        tools=fundamental_tools,
+        handlers=handlers,
+        client=HiddenEvidenceClient(),
+        budget=CallBudget(max_calls=10),
+        max_turns=2,
+        visible_evidence_ids=set(),
+    )
+    assert result["report"]["findings"] == []
+    assert calculator_calls == []
+    assert result["tool_trace"][0]["status"] == "correctable_rejection"
 
 
 def test_runtime_fact_gate_rejects_symbol_mismatch_and_unknown_report_period() -> None:

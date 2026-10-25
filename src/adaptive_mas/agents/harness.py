@@ -11,9 +11,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -599,7 +599,9 @@ def _compact_tool_message(message: dict[str, object]) -> dict[str, object]:
         "retrospective_backfill_proxy", "fetched_at",
         "observations", "count", "selected_source_count", "point_in_time_cutoff",
         "metric", "value", "dataset", "published_at", "available_at", "locator", "signal_group",
-        "conclusion", "uncertainties", "period_start", "period_end", "content_scope",
+        "conclusion", "uncertainties", "period_start", "period_end", "content_scope", "field", "operation",
+        "claim_type", "claim_validation", "calculation", "operands", "operand_evidence_ids",
+        "formula", "facts_metadata", "accounting_basis", "decimal_precision", "decimal_rounding",
         "context_messages", "role", "decision_time", "question", "role_task",
         "prior_role_summaries", "public_evidence", "evidence_budgets", "generation_budget",
         "recall_audit", "symbol_selection", "selection_reason", "relevance_terms_matched",
@@ -612,7 +614,7 @@ def _compact_tool_message(message: dict[str, object]) -> dict[str, object]:
         if isinstance(value, dict):
             if parent_key in {
                 "facts", "facts_units", "reopen_ref", "arguments", "recall_audit",
-                "symbol_selection", "excluded_counts", "dropped_source_refs", "input_budget",
+                "symbol_selection", "excluded_counts", "dropped_source_refs", "input_budget", "calculation",
             }:
                 return {key: project(item, key) for key, item in value.items()}
             if parent_key == "context_messages":
@@ -652,7 +654,7 @@ def _structured_context_records(value: object) -> list[dict[str, object]]:
         "available_at", "fetched_at", "vintage", "vintage_status", "vintage_verified",
         "retrospective_backfill_proxy", "locator", "content_scope", "citation",
         "page_number", "raw_value", "normalized_value", "multiplier", "currency",
-        "accounting_basis", "review_status", "numeric_eligible", "release_id",
+        "accounting_basis", "review_status", "numeric_eligible", "release_id", "facts_metadata",
     }
     records: list[dict[str, object]] = []
 
@@ -816,6 +818,7 @@ SUBMIT_REPORT = _tool(
                 "properties": {
                     "symbol": {"type": "string", "pattern": "^[0-9]{6}$"},
                     "conclusion": {"type": "string"},
+                    "claim_type": {"type": "string", "enum": ["source_fact", "calculation", "inference", "unknown"]},
                     "evidence_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                     "observations": {
                         "type": "array",
@@ -839,7 +842,7 @@ SUBMIT_REPORT = _tool(
                     },
                     "uncertainties": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["symbol", "conclusion", "evidence_ids", "observations", "uncertainties"],
+                "required": ["symbol", "conclusion", "claim_type", "evidence_ids", "observations", "uncertainties"],
                 "additionalProperties": False,
             },
         },
@@ -870,7 +873,8 @@ def _run_tool_agent(
             "Submission contract: call submit_report with findings as a direct JSON array of objects, "
             "never as a string containing JSON. Provide a complete, readable report and include every "
             "supported exact observation with the exact value, unit, source citation, and report period "
-            "or market period boundaries. Keep the report "
+            "or market period boundaries. Classify each conclusion as source_fact, calculation, inference, or unknown. "
+            "Use calculate_financial_metric for deterministic financial arithmetic and cite both operand sources plus its derived evidence. Keep the report "
             "focused; completeness, concision, and tool efficiency are evaluated as soft scores. "
             "Provide unresolved_items as a separate top-level array.",
         ))
@@ -995,6 +999,18 @@ def _run_tool_agent(
                     continue
                 raise InvalidResearchOutput(role_id, "malformed_tool_arguments", str(exc)) from None
             try:
+                if name == "calculate_financial_metric":
+                    operand_refs = arguments.get("operands")
+                    operand_ids = [
+                        reference.get("evidence_id")
+                        for reference in operand_refs
+                        if isinstance(reference, dict)
+                    ] if isinstance(operand_refs, list) else []
+                    if len(operand_ids) != 2 or any(
+                        not isinstance(evidence_id, str) or evidence_id not in visible_ids
+                        for evidence_id in operand_ids
+                    ):
+                        raise InvalidToolInput("calculation operands must already be visible to this specialist")
                 result = handlers[name](arguments)
             except InvalidResearchOutput as exc:
                 exc.context_compression = list(context_compression)
@@ -1234,6 +1250,17 @@ def _fundamental_handlers(
                 field: str(source.get("facts_units", {}).get(field, FINANCIAL_FACT_UNITS[field]))
                 for field in safe_facts
             }
+            raw_facts_metadata = source.get("facts_metadata", {})
+            facts_metadata = {}
+            if isinstance(raw_facts_metadata, Mapping):
+                for field in safe_facts:
+                    metadata = raw_facts_metadata.get(field)
+                    if isinstance(metadata, Mapping):
+                        facts_metadata[field] = {
+                            key: metadata[key]
+                            for key in ("numeric_eligible", "unit", "report_period", "accounting_basis", "currency")
+                            if key in metadata
+                        }
             reopen_ref = {
                 "tool": "read_cached_source",
                 "arguments": {"evidence_id": evidence_id},
@@ -1256,7 +1283,10 @@ def _fundamental_handlers(
                 **({"body_text": full_text} if full_text else {}),
                 "facts": safe_facts,
                 "facts_units": facts_units,
+                "facts_metadata": facts_metadata,
                 "reopen_ref": reopen_ref,
+                "accounting_basis": source.get("accounting_basis"),
+                "currency": source.get("currency"),
                 "report_period": source.get("report_period"),
                 "published_at": source.get("published_at"),
                 "available_at": source.get("available_at"),
@@ -1281,6 +1311,9 @@ def _fundamental_handlers(
                 "report_period": source.get("report_period"),
                 "facts": safe_facts,
                 "facts_units": facts_units,
+                "facts_metadata": facts_metadata,
+                "accounting_basis": source.get("accounting_basis"),
+                "currency": source.get("currency"),
                 "reopen_ref": reopen_ref,
                 "title": title,
                 "full_text": full_text,
@@ -1304,6 +1337,9 @@ def _fundamental_handlers(
             "retrospective_backfill_proxy": bool(row.get("retrospective_backfill_proxy", False)),
             "facts": row.get("facts", {}),
             "facts_units": row.get("facts_units", {}),
+            "facts_metadata": row.get("facts_metadata", {}),
+            "accounting_basis": row.get("accounting_basis"),
+            "currency": row.get("currency"),
             "reopen_ref": row.get("reopen_ref"),
             "vintage_verified": bool(row.get("vintage_verified", False)),
             "content_scope": row.get("content_scope"),
@@ -1312,6 +1348,7 @@ def _fundamental_handlers(
         for evidence_id, row in source_records.items()
     }
     industrial_rag_evidence: dict[str, dict[str, object]] = {}
+    calculation_visible_source_ids: set[str] = set()
 
     def search_sources(arguments: dict[str, object]) -> dict[str, object]:
         question = arguments.get("question", "财报与公告的重要证据及其报告期")
@@ -1414,11 +1451,15 @@ def _fundamental_handlers(
                     "retrospective_backfill_proxy": source.get("retrospective_backfill_proxy"),
                     "facts": source.get("facts", {}),
                     "facts_units": source.get("facts_units", {}),
+                    "facts_metadata": source.get("facts_metadata", {}),
+                    "accounting_basis": source.get("accounting_basis"),
+                    "currency": source.get("currency"),
                     "reopen_ref": {
                         "tool": "read_cached_source",
                         "arguments": {"evidence_id": evidence_id},
                     },
                 })
+                calculation_visible_source_ids.add(evidence_id)
         return {
             "context_messages": contexts,
             "evidence_refs": references,
@@ -1460,6 +1501,9 @@ def _fundamental_handlers(
                 "vintage": source.get("vintage"),
                 "vintage_status": source.get("vintage_status"),
                 "facts_units": source.get("facts_units", {}),
+                "facts_metadata": source.get("facts_metadata", {}),
+                "accounting_basis": source.get("accounting_basis"),
+                "currency": source.get("currency"),
                 "reopen_ref": source.get("reopen_ref"),
                 "retrospective_backfill_proxy": bool(source.get("retrospective_backfill_proxy", False)),
                 "content_scope": "title_only",
@@ -1483,6 +1527,9 @@ def _fundamental_handlers(
             "retrospective_backfill_proxy": bool(source.get("retrospective_backfill_proxy", False)),
             "facts": source.get("facts", {}),
             "facts_units": source.get("facts_units", {}),
+            "facts_metadata": source.get("facts_metadata", {}),
+            "accounting_basis": source.get("accounting_basis"),
+            "currency": source.get("currency"),
             "reopen_ref": source.get("reopen_ref"),
             "text_excerpt": excerpt,
             "offset": offset,
@@ -1511,11 +1558,36 @@ def _fundamental_handlers(
             },
             ["evidence_id"],
         ),
+        _tool(
+            "calculate_financial_metric",
+            "Calculate a difference, same-metric growth percentage, or profit margin from two searched, numerically eligible, point-in-time financial facts. Values are taken from source records; raw model-provided numbers are not accepted.",
+            {
+                "operation": {"type": "string", "enum": ["difference", "growth_percent", "margin_percent"]},
+                "operands": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "evidence_id": {"type": "string"},
+                            "field": {"type": "string"},
+                        },
+                        "required": ["evidence_id", "field"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            ["operation", "operands"],
+        ),
         SUBMIT_REPORT,
     ]
     handlers: dict[str, object] = {
         "search_financial_facts_and_announcements": search_sources,
         "read_cached_source": read_source,
+        "calculate_financial_metric": lambda arguments: _calculate_financial_metric(
+            arguments, evidence_catalog, calculation_visible_source_ids, decision_time,
+        ),
     }
     if industrial_rag_service is not None:
         if not industrial_rag_principal_id.strip():
@@ -1620,10 +1692,18 @@ def _fundamental_handlers(
                     basis_tag = str(item.get("source_time_basis", "unknown"))
                     fact_values = {}
                     fact_units = {}
+                    fact_metadata = {}
                     if item.get("fact_id") and citation.get("numeric_eligible"):
                         metric = str(citation["metric"])
                         fact_values[metric] = citation["normalized_value"]
                         fact_units[metric] = citation["unit"]
+                        fact_metadata[metric] = {
+                            "numeric_eligible": True,
+                            "unit": citation.get("unit"),
+                            "report_period": citation.get("report_period"),
+                            "accounting_basis": citation.get("accounting_basis"),
+                            "currency": citation.get("currency"),
+                        }
                     title = str(citation.get("title") or "")
                     source_ref = {
                         "evidence_id": evidence_id,
@@ -1641,6 +1721,9 @@ def _fundamental_handlers(
                         "retrospective_backfill_proxy": basis_tag == "retrospective_proxy",
                         "facts": fact_values,
                         "facts_units": fact_units,
+                        "facts_metadata": fact_metadata,
+                        "accounting_basis": citation.get("accounting_basis"),
+                        "currency": citation.get("currency"),
                         "reopen_ref": reference,
                         "content_scope": "table_row_group" if citation.get("table_id") is not None else "page_span_excerpt",
                         "citation": citation,
@@ -1689,6 +1772,8 @@ def _fundamental_handlers(
                             "review_status": item.get("counter_review_status", "candidate_requires_source_and_claim_review"),
                             "duplicate_of_supporting_evidence": bool(item.get("duplicate_of_supporting_evidence", False)),
                         })
+                    elif fact_metadata and citation.get("numeric_eligible") is True:
+                        calculation_visible_source_ids.add(evidence_id)
             return {
                 "status": (
                     "available" if any(item.get("research_role") == "supporting_evidence" for item in retrieved)
@@ -2051,6 +2136,578 @@ def _attention_handlers(
     }, evidence_catalog
 
 
+CLAIM_TYPES = {"source_fact", "calculation", "inference", "unknown"}
+CALCULATION_DECIMAL_PRECISION = 50
+CALCULATION_DECIMAL_ROUNDING = "ROUND_HALF_EVEN"
+_CLAIM_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<number>[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?)(?P<unit>\s*(?:%|％|percent(?:age)?(?:\s+points?)?|percentage\s+points?|basis\s+points?|百分点|百分比|亿元|万元|千元|元|人民币|CNY|RMB|美元|港元|万股|股|倍))?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CLAIM_CHINESE_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<number>负?[零〇一二两三四五六七八九十百千万亿点]+)(?P<unit>个百分点|%|％|percent(?:age)?|百分点|百分比|亿元|万元|千元|元|人民币|CNY|RMB|美元|港元|万股|股|倍|basis\s+points?)?",
+    re.IGNORECASE,
+)
+_CLAIM_PREFIXED_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<unit>CNY|RMB|USD|HKD)\s*(?P<number>[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?)(?P<suffix_unit>\s*(?:%|％))?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_CHINESE_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _canonical_decimal(value: Decimal) -> str:
+    if not value.is_finite():
+        raise ValueError("cannot serialize a non-finite Decimal value")
+    if value == 0:
+        return "0"
+    if len(value.as_tuple().digits) > 256 or abs(value.as_tuple().exponent) > 256:
+        raise ValueError("Decimal value exceeds the bounded serialization precision")
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered
+
+
+def _calculation_operand(
+    catalog: Mapping[str, Mapping[str, object]],
+    reference: Mapping[str, object],
+    decision_time: datetime,
+) -> dict[str, object]:
+    evidence_id = reference.get("evidence_id")
+    field_name = reference.get("field")
+    if not isinstance(evidence_id, str) or not isinstance(field_name, str):
+        raise ValueError("calculation operands require evidence_id and field")
+    source = catalog.get(evidence_id)
+    if source is None or source.get("calculation") is not None:
+        raise ValueError("calculation operands must reference original source facts")
+    facts = source.get("facts")
+    if not isinstance(facts, Mapping) or field_name not in facts:
+        raise ValueError(f"source {evidence_id} does not expose financial fact {field_name!r}")
+    fact_metadata = source.get("facts_metadata", {})
+    metadata = fact_metadata.get(field_name, {}) if isinstance(fact_metadata, Mapping) else {}
+    if not isinstance(metadata, Mapping) or metadata.get("numeric_eligible") is not True:
+        raise ValueError(f"source fact {field_name!r} is not numeric-eligible")
+    report_period = metadata.get("report_period") or source.get("report_period")
+    unit = metadata.get("unit") or (source.get("facts_units", {}) or {}).get(field_name)
+    accounting_basis = metadata.get("accounting_basis") or source.get("accounting_basis")
+    currency = metadata.get("currency") or source.get("currency")
+    if not isinstance(report_period, str) or not report_period.strip():
+        raise ValueError(f"source fact {field_name!r} has no report period")
+    if not isinstance(unit, str) or not unit.strip():
+        raise ValueError(f"source fact {field_name!r} has no verified unit")
+    if not isinstance(accounting_basis, str) or not accounting_basis.strip():
+        raise ValueError(f"source fact {field_name!r} has no verified accounting basis")
+    source_period = source.get("report_period")
+    if source_period is not None and report_period != source_period:
+        raise ValueError(f"source fact {field_name!r} report period conflicts with its source")
+    declared_unit = (source.get("facts_units") or {}).get(field_name)
+    if declared_unit is not None and unit != declared_unit:
+        raise ValueError(f"source fact {field_name!r} unit conflicts with its source")
+    symbol = source.get("symbol")
+    if not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit():
+        raise ValueError("financial calculation source has no verified six-digit issuer")
+    if not isinstance(source.get("vintage"), str) or not source["vintage"].strip():
+        raise ValueError(f"source fact {field_name!r} has no verified source vintage identity")
+    unit_key = _numeric_unit_key(unit)
+    currency_key = _numeric_unit_key(currency)
+    if unit_key not in {"percent", "percentage_point", "CNY", "USD", "HKD"}:
+        raise ValueError(f"source fact {field_name!r} uses a unit outside the calculator's financial unit contract")
+    if unit_key in {"CNY", "USD", "HKD"} and currency_key != unit_key:
+        raise ValueError(f"source fact {field_name!r} has no matching verified currency")
+    try:
+        value = Decimal(str(facts[field_name]))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"source fact {field_name!r} is not a finite decimal") from None
+    if not value.is_finite():
+        raise ValueError(f"source fact {field_name!r} is not a finite decimal")
+    timing = _citation_timing_status(dict(source), decision_time)
+    if timing != "captured_by_decision_time" or source.get("vintage_verified") is not True:
+        raise ValueError(f"source fact {field_name!r} lacks a verified captured point-in-time vintage")
+    return {
+        "evidence_id": evidence_id,
+        "field": field_name,
+        "value": value,
+        "unit": unit,
+        "report_period": report_period,
+        "accounting_basis": accounting_basis,
+        "currency": currency,
+        "symbol": symbol,
+        "available_at": source.get("available_at"),
+        "published_at": source.get("published_at"),
+        "fetched_at": source.get("fetched_at"),
+        "vintage_verified": bool(source.get("vintage_verified", False)),
+        "retrospective_backfill_proxy": bool(source.get("retrospective_backfill_proxy", False)),
+        "source_timing_status": timing,
+    }
+
+
+def _report_period_order_key(period: str) -> tuple[int, str, int] | None:
+    value = re.sub(r"\s+", "", period).upper()
+    match = re.fullmatch(r"((?:19|20)\d{2})Q([1-4])", value)
+    if match:
+        return int(match.group(1)), "quarter", int(match.group(2))
+    match = re.fullmatch(r"((?:19|20)\d{2})H([12])", value)
+    if match:
+        return int(match.group(1)), "half", int(match.group(2))
+    match = re.fullmatch(r"((?:19|20)\d{2})(?:FY|年度)?", value)
+    if match:
+        return int(match.group(1)), "year", 1
+    match = re.fullmatch(r"((?:19|20)\d{2})-(0[1-9]|1[0-2])", value)
+    if match:
+        return int(match.group(1)), "month", int(match.group(2))
+    match = re.fullmatch(r"((?:19|20)\d{2})-(\d{2})-(\d{2})", value)
+    if match:
+        return int(match.group(1)), "day", int(f"{match.group(2)}{match.group(3)}")
+    return None
+
+
+def _financial_calculation(
+    operation: str,
+    operands: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    if len(operands) != 2:
+        raise ValueError("financial calculation requires exactly two cited source operands")
+    left, right = operands
+    for key in ("symbol", "unit", "accounting_basis", "currency"):
+        if left.get(key) != right.get(key):
+            raise ValueError(f"financial calculation operands have incompatible {key}")
+    if not left.get("symbol"):
+        raise ValueError("financial calculation operands have no verified issuer")
+    left_value = left["value"]
+    right_value = right["value"]
+    if not isinstance(left_value, Decimal) or not isinstance(right_value, Decimal):
+        raise ValueError("financial calculation operands must be validated Decimal values")
+    left_period = str(left["report_period"])
+    right_period = str(right["report_period"])
+    left_field = str(left["field"])
+    right_field = str(right["field"])
+    unit = str(left["unit"])
+    if operation == "difference":
+        if left_period != right_period:
+            raise ValueError("difference operands must use the same report period")
+        if left_field == right_field:
+            raise ValueError("difference operands must be distinct financial fields, not competing source captures")
+        with localcontext() as context:
+            context.prec = CALCULATION_DECIMAL_PRECISION
+            context.rounding = ROUND_HALF_EVEN
+            result = left_value - right_value
+        metric = "calculated_difference"
+        report_period = left_period
+        formula = "operand_1 - operand_2"
+        result_unit = unit
+    elif operation == "growth_percent":
+        if left_field != right_field:
+            raise ValueError("growth operands must reference the same source metric")
+        if left_period == right_period:
+            raise ValueError("growth operands must use distinct report periods")
+        baseline_order = _report_period_order_key(left_period)
+        current_order = _report_period_order_key(right_period)
+        if baseline_order is None or current_order is None or baseline_order[1] != current_order[1]:
+            raise ValueError("growth operands must use supported comparable report periods")
+        if (baseline_order[0], baseline_order[2]) >= (current_order[0], current_order[2]):
+            raise ValueError("growth baseline period must precede the current period")
+        if left_value <= 0:
+            raise ValueError("growth baseline value must be positive")
+        with localcontext() as context:
+            context.prec = CALCULATION_DECIMAL_PRECISION
+            context.rounding = ROUND_HALF_EVEN
+            result = (right_value - left_value) / left_value * Decimal(100)
+        metric = f"calculated_{left_field}_growth_pct"
+        report_period = right_period
+        formula = "(current - baseline) / baseline * 100"
+        result_unit = "percent"
+    elif operation == "margin_percent":
+        if left_period != right_period:
+            raise ValueError("margin operands must use the same report period")
+        left_label = left_field.casefold()
+        right_label = right_field.casefold()
+        profit_amount_fields = {
+            "net_profit_cny", "parent_net_profit_cny", "income_statement_parent_profit_cny",
+            "income_statement_net_profit_cny", "net_profit_attributable_to_parent_cny",
+            "operating_profit_cny", "total_profit_cny", "profit_cny",
+            "净利润", "归母净利润", "归属于母公司股东的净利润", "营业利润", "利润总额",
+        }
+        revenue_amount_fields = {
+            "revenue_cny", "income_statement_revenue_cny", "operating_revenue_cny", "total_revenue_cny",
+            "营业收入", "主营业务收入", "营收",
+        }
+        is_profit_amount = left_label in profit_amount_fields
+        is_revenue_amount = right_label in revenue_amount_fields
+        if not is_profit_amount or not is_revenue_amount:
+            raise ValueError("margin requires a profit numerator and revenue denominator")
+        if _numeric_unit_key(unit) not in {"CNY", "USD", "HKD"}:
+            raise ValueError("margin operands must use an absolute currency unit")
+        if right_value <= 0:
+            raise ValueError("margin revenue denominator must be positive")
+        with localcontext() as context:
+            context.prec = CALCULATION_DECIMAL_PRECISION
+            context.rounding = ROUND_HALF_EVEN
+            result = left_value / right_value * Decimal(100)
+        metric = "calculated_profit_margin_pct"
+        report_period = left_period
+        formula = "profit / revenue * 100"
+        result_unit = "percent"
+    else:
+        raise ValueError("operation must be difference, growth_percent, or margin_percent")
+    if not result.is_finite():
+        raise ValueError("financial calculation did not produce a finite Decimal result")
+    return {
+        "value": result,
+        "value_text": _canonical_decimal(result),
+        "metric": metric,
+        "unit": result_unit,
+        "report_period": report_period,
+        "accounting_basis": str(left["accounting_basis"]),
+        "currency": None if result_unit == "percent" else left.get("currency"),
+        "formula": formula,
+        "decimal_precision": CALCULATION_DECIMAL_PRECISION,
+        "decimal_rounding": CALCULATION_DECIMAL_ROUNDING,
+    }
+
+
+def _calculate_financial_metric(
+    arguments: dict[str, object],
+    evidence_catalog: dict[str, dict[str, object]],
+    calculation_visible_source_ids: set[str],
+    decision_time: datetime,
+) -> dict[str, object]:
+    operation = arguments.get("operation")
+    operand_refs = arguments.get("operands")
+    if operation not in {"difference", "growth_percent", "margin_percent"}:
+        raise InvalidToolInput("operation must be difference, growth_percent, or margin_percent")
+    if not isinstance(operand_refs, list) or len(operand_refs) != 2 or any(
+        not isinstance(reference, dict) for reference in operand_refs
+    ):
+        raise InvalidToolInput("operands must contain exactly two evidence_id and field references")
+    evidence_ids = [reference.get("evidence_id") for reference in operand_refs]
+    if any(
+        not isinstance(evidence_id, str)
+        or evidence_id not in calculation_visible_source_ids
+        or evidence_id not in evidence_catalog
+        for evidence_id in evidence_ids
+    ):
+        raise InvalidToolInput("calculation operands must be source evidence returned by this agent's search")
+    try:
+        operands = [
+            _calculation_operand(evidence_catalog, reference, decision_time)
+            for reference in operand_refs
+        ]
+        result = _financial_calculation(str(operation), operands)
+    except ValueError as exc:
+        raise InvalidToolInput(str(exc)) from None
+    calculation_identity = _json({
+        "operation": operation,
+        "operands": [
+            {"evidence_id": item["evidence_id"], "field": item["field"]}
+            for item in operands
+        ],
+        "result": result["value_text"],
+    })
+    evidence_id = _opaque_id("financial_calculation", calculation_identity)
+    available_at = max(_source_datetime(str(item["available_at"])) for item in operands).isoformat()
+    published_values = [item["published_at"] for item in operands if item.get("published_at")]
+    fetched_values = [item["fetched_at"] for item in operands if item.get("fetched_at")]
+    source_vintages = [
+        str(evidence_catalog[str(item["evidence_id"])].get("vintage") or "")
+        for item in operands
+    ]
+    derived = {
+        "evidence_id": evidence_id,
+        "source_record_id": evidence_id,
+        "symbol": str(operands[0]["symbol"]),
+        "source_type": "financial_calculation",
+        "dataset": "derived_from_cited_public_financial_facts",
+        "title": str(result["metric"]),
+        "metric": result["metric"],
+        "value": result["value_text"],
+        "unit": result["unit"],
+        "report_period": result["report_period"],
+        "accounting_basis": result["accounting_basis"],
+        "currency": result["currency"],
+        "available_at": available_at,
+        "published_at": max(published_values, key=_source_datetime) if published_values else None,
+        "fetched_at": max(fetched_values, key=_source_datetime) if fetched_values else None,
+        "vintage": hashlib.sha256(_json(source_vintages).encode("utf-8")).hexdigest(),
+        "vintage_status": "derived_from_verified_captured_operands",
+        "vintage_verified": all(bool(item["vintage_verified"]) for item in operands),
+        "retrospective_backfill_proxy": False,
+        "facts": {str(result["metric"]): result["value_text"]},
+        "facts_units": {str(result["metric"]): str(result["unit"])},
+        "facts_metadata": {str(result["metric"]): {"numeric_eligible": False}},
+        "calculation": {
+            "operation": operation,
+            "formula": result["formula"],
+            "decimal_precision": result["decimal_precision"],
+            "decimal_rounding": result["decimal_rounding"],
+            "operands": [
+                {"evidence_id": item["evidence_id"], "field": item["field"]}
+                for item in operands
+            ],
+        },
+        "operand_evidence_ids": [item["evidence_id"] for item in operands],
+    }
+    evidence_catalog[evidence_id] = derived
+    return {
+        "status": "calculated",
+        "evidence_id": evidence_id,
+        "symbol": derived["symbol"],
+        "metric": derived["metric"],
+        "value": derived["value"],
+        "unit": derived["unit"],
+        "report_period": derived["report_period"],
+        "accounting_basis": derived["accounting_basis"],
+        "currency": derived["currency"],
+        "formula": result["formula"],
+        "decimal_precision": result["decimal_precision"],
+        "decimal_rounding": result["decimal_rounding"],
+        "operands": derived["calculation"]["operands"],
+        "operand_evidence_ids": derived["operand_evidence_ids"],
+        "source_timing_status": sorted({str(item["source_timing_status"]) for item in operands}),
+    }
+
+
+def _recompute_calculation_record(
+    source: Mapping[str, object],
+    catalog: Mapping[str, Mapping[str, object]],
+    decision_time: datetime,
+) -> dict[str, object]:
+    calculation = source.get("calculation")
+    if not isinstance(calculation, Mapping):
+        raise ValueError("calculation evidence has no deterministic calculation record")
+    operation = calculation.get("operation")
+    operand_refs = calculation.get("operands")
+    if not isinstance(operation, str) or not isinstance(operand_refs, list):
+        raise ValueError("calculation evidence has malformed operand references")
+    operands = [
+        _calculation_operand(catalog, reference, decision_time)
+        for reference in operand_refs
+        if isinstance(reference, Mapping)
+    ]
+    if len(operands) != len(operand_refs):
+        raise ValueError("calculation evidence has malformed operand references")
+    recomputed = _financial_calculation(operation, operands)
+    for key, source_key in (("metric", "metric"), ("unit", "unit"), ("report_period", "report_period"),
+                            ("accounting_basis", "accounting_basis"), ("currency", "currency")):
+        if source.get(source_key) != recomputed[key]:
+            raise ValueError(f"calculation evidence {source_key} does not match its cited operands")
+    try:
+        stored_value = Decimal(str(source.get("value")))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("calculation evidence has a malformed result value") from None
+    if not stored_value.is_finite() or stored_value != recomputed["value"]:
+        raise ValueError("calculation evidence result does not reproduce under its Decimal precision/rounding contract")
+    facts = source.get("facts")
+    facts_units = source.get("facts_units")
+    if facts != {recomputed["metric"]: recomputed["value_text"]}:
+        raise ValueError("calculation evidence fact card does not match its recomputed result")
+    if facts_units != {recomputed["metric"]: recomputed["unit"]}:
+        raise ValueError("calculation evidence fact unit does not match its recomputed result")
+    if calculation.get("formula") != recomputed["formula"]:
+        raise ValueError("calculation evidence formula does not match the allowed operation")
+    if calculation.get("decimal_precision") != recomputed["decimal_precision"]:
+        raise ValueError("calculation evidence Decimal precision does not match the calculation contract")
+    if calculation.get("decimal_rounding") != recomputed["decimal_rounding"]:
+        raise ValueError("calculation evidence Decimal rounding does not match the calculation contract")
+    return recomputed
+
+
+def _parse_chinese_decimal(token: str) -> Decimal:
+    negative = token.startswith("负")
+    if negative:
+        token = token[1:]
+    if "点" in token:
+        whole, fractional = token.split("点", 1)
+        if not fractional or any(character not in _CHINESE_DIGITS for character in fractional):
+            raise ValueError("invalid Chinese decimal literal")
+        whole_value = _parse_chinese_integer(whole) if whole else 0
+        result = Decimal(f"{whole_value}.{''.join(str(_CHINESE_DIGITS[character]) for character in fractional)}")
+    else:
+        result = Decimal(_parse_chinese_integer(token))
+    return -result if negative else result
+
+
+def _parse_chinese_integer(token: str) -> int:
+    if not token:
+        return 0
+    if all(character in _CHINESE_DIGITS for character in token):
+        return int("".join(str(_CHINESE_DIGITS[character]) for character in token))
+    total = 0
+    section = 0
+    digit_run = ""
+    for character in token:
+        if character in _CHINESE_DIGITS:
+            digit_run += str(_CHINESE_DIGITS[character])
+        elif character in {"十", "百", "千"}:
+            number = int(digit_run) if digit_run else 1
+            digit_run = ""
+            section += number * {"十": 10, "百": 100, "千": 1_000}[character]
+        elif character in {"万", "亿"}:
+            number = int(digit_run) if digit_run else 0
+            digit_run = ""
+            section += number
+            total += (section or 1) * (10_000 if character == "万" else 100_000_000)
+            section = 0
+        else:
+            raise ValueError("invalid Chinese integer literal")
+    if digit_run:
+        section += int(digit_run)
+    return total + section
+
+
+def _numeric_unit_key(unit: object) -> str | None:
+    if not isinstance(unit, str) or not unit.strip():
+        return None
+    normalized = re.sub(r"\s+", "", unit).casefold()
+    if normalized in {"%", "％", "percent", "percentage"}:
+        return "percent"
+    if normalized in {"百分点", "个百分点", "percentagepoint", "percentagepoints", "basispoint", "basispoints", "bp", "bps"}:
+        return "percentage_point"
+    if normalized in {"cny", "rmb", "元", "人民币"}:
+        return "CNY"
+    if normalized in {"usd", "美元"}:
+        return "USD"
+    if normalized in {"hkd", "港元"}:
+        return "HKD"
+    if normalized == "股":
+        return "shares"
+    if normalized == "倍":
+        return "multiple"
+    if normalized == "万元":
+        return "CNY_10000"
+    if normalized == "亿元":
+        return "CNY_100000000"
+    if normalized == "千元":
+        return "CNY_1000"
+    if normalized == "万股":
+        return "shares_10000"
+    return normalized
+
+
+def _allowed_calendar_spans(
+    text: str,
+    cited_sources: Sequence[Mapping[str, object]],
+) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for source in cited_sources:
+        period = str(source.get("report_period") or "").strip()
+        quarter = re.fullmatch(r"((?:19|20)\d{2})\s*Q\s*([1-4])", period, re.IGNORECASE)
+        half = re.fullmatch(r"((?:19|20)\d{2})\s*H\s*([12])", period, re.IGNORECASE)
+        fiscal_year = re.fullmatch(r"((?:19|20)\d{2})\s*(?:FY|年度)", period, re.IGNORECASE)
+        if quarter:
+            patterns = [rf"(?<![A-Za-z0-9]){quarter.group(1)}\s*Q\s*{quarter.group(2)}(?![A-Za-z0-9])"]
+        elif half:
+            patterns = [rf"(?<![A-Za-z0-9]){half.group(1)}\s*H\s*{half.group(2)}(?![A-Za-z0-9])"]
+        elif fiscal_year:
+            patterns = [rf"(?<![A-Za-z0-9]){fiscal_year.group(1)}\s*(?:FY|年度)(?![A-Za-z0-9])"]
+        else:
+            patterns = []
+        for pattern in patterns:
+            spans.extend(match.span() for match in re.finditer(pattern, text, re.IGNORECASE))
+
+        date_values = []
+        for field_name in ("report_period", "period_start", "period_end", "published_at", "available_at", "fetched_at"):
+            raw = str(source.get(field_name) or "")
+            date_match = re.match(r"((?:19|20)\d{2})-(\d{2})-(\d{2})", raw)
+            if date_match:
+                year, month, day = date_match.groups()
+                date_values.extend((
+                    rf"(?<!\d){year}[-/.]0?{int(month)}[-/.]0?{int(day)}(?!\d)",
+                    rf"(?<!\d){year}年0?{int(month)}月0?{int(day)}日?(?!\d)",
+                    rf"(?<!\d){year}年(?!\d)",
+                ))
+            year_match = re.match(r"((?:19|20)\d{2})", raw)
+            if year_match:
+                date_values.append(rf"(?<!\d){year_match.group(1)}年(?!\d)")
+        for pattern in date_values:
+            spans.extend(match.span() for match in re.finditer(pattern, text))
+    return spans
+
+
+def _is_contextual_security_code(text: str, start: int, end: int) -> bool:
+    prefix = text[max(0, start - 32):start]
+    suffix = text[end:end + 20]
+    prefix_label = re.search(
+        r"(?:symbol|ticker|security(?:\s+code)?|stock\s+code|issuer\s+code|股票代码|证券代码|代码)\s*(?:(?:is|为|:|#)\s*)?$",
+        prefix,
+        re.IGNORECASE,
+    )
+    suffix_label = re.match(r"\s*(?:号\s*)?(?:symbol|ticker|security|stock|股票|证券|代码)", suffix, re.IGNORECASE)
+    return prefix_label is not None or suffix_label is not None
+
+
+def _validate_numeric_claim_text(
+    text: str,
+    *,
+    symbols: set[str],
+    cited_sources: Sequence[Mapping[str, object]],
+    observations: Sequence[Mapping[str, object]],
+    role_id: str,
+) -> None:
+    allowed_values: dict[Decimal, set[str | None]] = {}
+    for observation in observations:
+        try:
+            value = Decimal(str(observation.get("value")))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if value.is_finite():
+            allowed_values.setdefault(value, set()).add(_numeric_unit_key(observation.get("unit")))
+
+    calendar_spans = _allowed_calendar_spans(text, cited_sources)
+    literals: list[tuple[int, int, str, str | None, bool]] = []
+    for match in _CLAIM_NUMBER.finditer(text):
+        literals.append((
+            match.start("number"), match.end("number"), match.group("number"),
+            match.group("unit").strip() if match.group("unit") else None, False,
+        ))
+    for match in _CLAIM_CHINESE_NUMBER.finditer(text):
+        token = match.group("number")
+        unit = match.group("unit")
+        if len(token) == 1 and not unit:
+            continue
+        preceding = text[max(0, match.start("number") - 4):match.start("number")]
+        if preceding.endswith("百分之"):
+            unit = "percent"
+        if preceding.endswith("负百分之"):
+            token = f"负{token}"
+        literals.append((match.start("number"), match.end("number"), token, unit, True))
+    for match in _CLAIM_PREFIXED_NUMBER.finditer(text):
+        literals.append((
+            match.start("number"), match.end("number"), match.group("number"),
+            f"{match.group('unit')}{match.group('suffix_unit') or ''}", False,
+        ))
+    literals.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    seen_spans: set[tuple[int, int]] = set()
+    for start, end, token, unit, chinese in literals:
+        if (start, end) in seen_spans:
+            continue
+        seen_spans.add((start, end))
+        try:
+            value = _parse_chinese_decimal(token) if chinese else Decimal(token.replace(",", ""))
+        except (InvalidOperation, ValueError):
+            raise ValueError(f"{role_id} claim contains an invalid numeric literal {token}") from None
+        if not value.is_finite():
+            raise ValueError(f"{role_id} claim contains a non-finite numeric literal {token}")
+        literal_unit = _numeric_unit_key(unit)
+        prefix = text[max(0, start - 12):start]
+        prefix_match = re.search(r"(?:CNY|RMB|USD|HKD|人民币|美元|港元)\s*$", prefix, re.IGNORECASE)
+        if prefix_match:
+            prefix_unit = _numeric_unit_key(prefix_match.group(0))
+            if unit is not None and literal_unit != prefix_unit:
+                raise ValueError(f"{role_id} claim combines incompatible numeric units at {token}")
+            literal_unit = prefix_unit
+        if (
+            unit is None
+            and not prefix_match
+            and any(start >= span_start and end <= span_end for span_start, span_end in calendar_spans)
+        ):
+            continue
+        if token in symbols and unit is None and not prefix_match and _is_contextual_security_code(text, start, end):
+            continue
+        matching_units = allowed_values.get(value)
+        if matching_units is not None and (literal_unit is None or literal_unit in matching_units):
+            continue
+        raise ValueError(f"{role_id} claim contains unsupported numeric literal {token}{unit or ''}")
+
+
 def _validate_report(
     report: dict[str, object],
     catalog: dict[str, dict[str, object]],
@@ -2073,6 +2730,9 @@ def _validate_report(
     ):
         raise TypeError(f"{role_id} unresolved_items must be an array of strings")
     findings = []
+    report_cited_sources: list[Mapping[str, object]] = []
+    report_observations: list[Mapping[str, object]] = []
+    report_symbols: set[str] = set()
     visible_ids = set(catalog) if visible_evidence_ids is None else visible_evidence_ids
     for finding in findings_input:
         if not isinstance(finding, dict):
@@ -2112,7 +2772,34 @@ def _validate_report(
                 raise ValueError(
                     f"{role_id} citation {evidence_id} failed timing validation: {exc}"
                 ) from None
+        calculation_evidence_ids = []
+        for evidence_id in evidence_ids:
+            source = catalog[evidence_id]
+            if source.get("calculation") is None:
+                continue
+            calculation = source.get("calculation")
+            operand_refs = calculation.get("operands") if isinstance(calculation, Mapping) else None
+            operand_ids = [
+                reference.get("evidence_id")
+                for reference in operand_refs
+                if isinstance(reference, Mapping)
+            ] if isinstance(operand_refs, list) else []
+            if len(operand_ids) != 2 or any(
+                not isinstance(operand_id, str) or operand_id not in evidence_ids
+                for operand_id in operand_ids
+            ):
+                raise ValueError(f"{role_id} calculation evidence must be cited with both original operand sources")
+            if source.get("operand_evidence_ids") != operand_ids:
+                raise ValueError(f"{role_id} calculation evidence operand index does not match its formula record")
+            try:
+                _recompute_calculation_record(source, catalog, decision_time)
+            except ValueError as exc:
+                raise ValueError(f"{role_id} calculation evidence failed Decimal recomputation: {exc}") from None
+            calculation_evidence_ids.append(evidence_id)
         observations = []
+        financial_observation_groups: dict[
+            tuple[str, str, str, str, str, str], list[tuple[str, Decimal]]
+        ] = {}
         for observation in finding.get("observations", []):
             if not isinstance(observation, dict) or not all(
                 isinstance(observation.get(key), str)
@@ -2127,7 +2814,10 @@ def _validate_report(
             source = catalog[evidence_id]
             field_name = observation["field"]
             value = observation.get("value")
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            exact_financial_text_value = isinstance(value, str) and "facts" in source and value.strip()
+            if isinstance(value, bool) or not (
+                isinstance(value, (int, float)) or exact_financial_text_value
+            ):
                 raise ValueError(f"{role_id} structured observation value must be a finite number")
             try:
                 observation_decimal = Decimal(str(value))
@@ -2187,6 +2877,23 @@ def _validate_report(
                     f"{role_id} structured observation value does not match its cited source "
                     + ("within market observation tolerance" if market_observation else "under exact Decimal equality")
                 )
+            if "facts" in source:
+                source_metadata = source.get("facts_metadata", {})
+                field_metadata = (
+                    source_metadata.get(field_name, {})
+                    if isinstance(source_metadata, Mapping) else {}
+                )
+                if not isinstance(field_metadata, Mapping):
+                    field_metadata = {}
+                conflict_key = (
+                    symbol,
+                    field_name,
+                    str(report_period),
+                    str(expected_unit),
+                    str(field_metadata.get("accounting_basis") or source.get("accounting_basis") or ""),
+                    str(field_metadata.get("currency") or source.get("currency") or ""),
+                )
+                financial_observation_groups.setdefault(conflict_key, []).append((evidence_id, expected_decimal))
             available_at = source.get("available_at")
             validated = dict(observation)
             validated.update({
@@ -2194,12 +2901,62 @@ def _validate_report(
                 "source_available_at": str(available_at),
                 "source_vintage_verified": bool(source.get("vintage_verified", False)),
                 "source_timing_status": citation_timing[evidence_id],
+                "source_accounting_basis": (
+                    field_metadata.get("accounting_basis") or source.get("accounting_basis")
+                    if "facts" in source else None
+                ),
+                "source_currency": (
+                    field_metadata.get("currency") or source.get("currency")
+                    if "facts" in source else None
+                ),
                 "numeric_candidate_eligible": False,
                 "numeric_candidate_ineligibility_reason": "requires a mature frozen calibration mapping; exact observation is not an expected return",
             })
             observations.append(validated)
+        claim_type = finding.get("claim_type", "unknown")
+        if not isinstance(claim_type, str) or claim_type not in CLAIM_TYPES:
+            raise ValueError(f"{role_id} claim_type must be source_fact, calculation, inference, or unknown")
+        conflicting_sources = [
+            {
+                "field": key[1],
+                "report_period": key[2],
+                "accounting_basis": key[4] or None,
+                "currency": key[5] or None,
+                "evidence_ids": [evidence_id for evidence_id, _ in rows],
+                "values": sorted({_canonical_decimal(value) for _, value in rows}),
+            }
+            for key, rows in financial_observation_groups.items()
+            if len({value for _, value in rows}) > 1
+        ]
+        if conflicting_sources and claim_type in {"source_fact", "calculation"}:
+            raise ValueError(f"{role_id} source_fact/calculation claim cites conflicting financial source values")
+        if claim_type == "calculation" and not calculation_evidence_ids:
+            raise ValueError(f"{role_id} calculation claim must cite deterministic calculation evidence")
+        if claim_type == "source_fact" and calculation_evidence_ids:
+            raise ValueError(f"{role_id} source_fact claim cannot cite a derived calculation as its claim source")
+        _validate_numeric_claim_text(
+            str(finding["conclusion"]),
+            symbols={symbol},
+            cited_sources=[catalog[evidence_id] for evidence_id in evidence_ids],
+            observations=observations,
+            role_id=role_id,
+        )
+        claim_validation = {
+            "claim_type": claim_type,
+            "status": (
+                "source_conflict_requires_review" if conflicting_sources else
+                "calculation_recomputed_decimal_50_half_even_semantics_unverified" if claim_type == "calculation" else
+                "source_observations_validated_semantics_unverified" if claim_type == "source_fact" else
+                "citations_validated_claim_semantics_unverified" if claim_type == "inference" else
+                "citations_validated_claim_unclassified"
+            ),
+            "calculation_evidence_ids": calculation_evidence_ids,
+            "conflicting_sources": conflicting_sources,
+        }
         findings.append({
             **finding,
+            "claim_type": claim_type,
+            "claim_validation": claim_validation,
             "agent_id": role_id,
             "evidence": [catalog[evidence_id] for evidence_id in evidence_ids],
             "citation_validation": [
@@ -2224,6 +2981,16 @@ def _validate_report(
                 "expected_returns_changed": False,
             },
         })
+        report_cited_sources.extend(catalog[evidence_id] for evidence_id in evidence_ids)
+        report_observations.extend(observations)
+        report_symbols.add(symbol)
+    _validate_numeric_claim_text(
+        str(report["summary"]),
+        symbols=report_symbols,
+        cited_sources=report_cited_sources,
+        observations=report_observations,
+        role_id=role_id,
+    )
     return {
         "agent_id": role_id,
         "summary": report["summary"],
