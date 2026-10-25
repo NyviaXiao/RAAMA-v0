@@ -56,15 +56,26 @@ def _source_case(manifest_path: Path, case_id: str) -> tuple[dict[str, Any], dic
     return manifest, case, dict(source_metadata) | dict(case_sources[0])
 
 
-def _make_page_prefix(payload: bytes, page_count: int) -> bytes:
+def _parse_page_range(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", value.strip())
+    if match is None:
+        raise ValueError("targeted-page-range must be N or N-M using 1-based physical page numbers")
+    start = int(match.group(1))
+    end = int(match.group(2) or start)
+    if start < 1 or end < start:
+        raise ValueError("targeted-page-range must be an ordered positive page range")
+    return start, end
+
+
+def _make_page_subset(payload: bytes, first_page: int, last_page: int) -> bytes:
     from io import BytesIO
     from pypdf import PdfReader, PdfWriter
 
     reader = PdfReader(BytesIO(payload))
-    if page_count < 1 or page_count > len(reader.pages):
-        raise ValueError("targeted page must be within the source PDF")
+    if first_page < 1 or last_page < first_page or last_page > len(reader.pages):
+        raise ValueError("targeted page range must be within the source PDF")
     writer = PdfWriter()
-    for page in reader.pages[:page_count]:
+    for page in reader.pages[first_page - 1:last_page]:
         writer.add_page(page)
     output = BytesIO()
     writer.write(output)
@@ -122,7 +133,7 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--case-id", default="catl2024_annual_revenue")
     parser.add_argument("--source", type=Path, help="Override the source record's local_path")
-    parser.add_argument("--targeted-page", type=int, default=9, help="Physical source page for bounded Docling table parsing")
+    parser.add_argument("--targeted-page-range", default="1-9", help="Bounded physical source pages for Docling parsing, as N or N-M")
     parser.add_argument("--parser-table-id", default="docling-table-10-p9", help="Manually reviewed raw ID from targeted Docling output")
     parser.add_argument(
         "--docling-assets",
@@ -147,6 +158,7 @@ def main() -> None:
     output_dir.mkdir(parents=True)
 
     manifest, case, source_record = _source_case(args.manifest.resolve(), args.case_id)
+    target_first_page, target_last_page = _parse_page_range(args.targeted_page_range)
     source_path = args.source.resolve() if args.source else (ROOT / source_record["local_path"]).resolve()
     payload = source_path.read_bytes()
     content_sha256 = hashlib.sha256(payload).hexdigest()
@@ -157,8 +169,8 @@ def main() -> None:
     from pypdf import PdfReader
 
     source_page_count = len(PdfReader(BytesIO(payload)).pages)
-    if args.targeted_page > source_page_count:
-        raise ValueError("targeted page exceeds the original source page count")
+    if target_last_page > source_page_count:
+        raise ValueError("targeted page range exceeds the original source page count")
 
     full_parse = parse_isolated(
         payload,
@@ -172,8 +184,8 @@ def main() -> None:
     _write_json(output_dir / "full_source_pypdf_parse.json", full_parse)
 
     targeted_parse = parse_isolated(
-        _make_page_prefix(payload, args.targeted_page),
-        f"{source_path.stem}-pages001-{args.targeted_page:03d}.pdf",
+        _make_page_subset(payload, target_first_page, target_last_page),
+        f"{source_path.stem}-pages{target_first_page:03d}-{target_last_page:03d}.pdf",
         scratch_root=output_dir / "parser_scratch",
         timeout_seconds=args.parse_timeout_seconds,
         pdf_backend="docling",
@@ -184,26 +196,43 @@ def main() -> None:
         raise RuntimeError("targeted Docling parse did not complete")
     _write_json(output_dir / "targeted_docling_parse.json", targeted_parse)
 
-    selected_tables = [
+    parser_tables = [
         table for table in targeted_parse.get("tables", [])
         if table.get("table_id") == args.parser_table_id
-        and table.get("page_start") == args.targeted_page
     ]
-    if len(selected_tables) != 1:
-        raise ValueError(
-            f"expected one manually selected table {args.parser_table_id!r} on physical page {args.targeted_page}"
-        )
-    selected_table = selected_tables[0]
+    if len(parser_tables) != 1:
+        raise ValueError(f"expected one manually selected parser table {args.parser_table_id!r}")
+    parser_table = parser_tables[0]
+    parser_page = int(parser_table["page_start"])
+    original_page = target_first_page + parser_page - 1
+    if original_page > target_last_page:
+        raise ValueError("selected parser table falls outside the explicitly targeted physical page range")
+    selected_table = dict(parser_table)
+    canonical_raw_table_id = re.sub(r"-p\d+$", f"-p{original_page}", args.parser_table_id)
+    selected_table.update({
+        "table_id": canonical_raw_table_id,
+        "page_start": original_page,
+        "page_end": original_page,
+    })
     selected_cells = [
         cell for cell in targeted_parse.get("cells", [])
         if cell.get("table_id") == args.parser_table_id
-        and cell.get("page_number") == args.targeted_page
+        and cell.get("page_number") == parser_page
     ]
     if not selected_cells:
         raise ValueError("selected Docling table has no cells on the requested source page")
+    mapped_cells = []
+    for raw_cell in selected_cells:
+        cell = dict(raw_cell)
+        cell["cell_id"] = str(cell["cell_id"]).replace(args.parser_table_id, canonical_raw_table_id, 1)
+        cell["table_id"] = canonical_raw_table_id
+        cell["page_number"] = original_page
+        mapped_cells.append(cell)
+    selected_cells = mapped_cells
+    selected_tables = [selected_table]
 
     version_id = f"v-{content_sha256[:24]}"
-    canonical_table_id = f"tbl-{version_id}-{args.parser_table_id}"
+    canonical_table_id = f"tbl-{version_id}-{canonical_raw_table_id}"
     merged_parse = dict(full_parse)
     merged_parse["tables"] = [selected_table]
     merged_parse["cells"] = selected_cells
@@ -221,9 +250,11 @@ def main() -> None:
         "full_docling_parse": False,
         "targeted_backend": targeted_parse.get("parser_name"),
         "targeted_parser_version": targeted_parse.get("parser_version"),
-        "targeted_physical_pages": list(range(1, args.targeted_page + 1)),
-        "selected_original_physical_page": args.targeted_page,
+        "targeted_physical_pages": list(range(target_first_page, target_last_page + 1)),
+        "selected_parser_page_index": parser_page,
+        "selected_original_physical_page": original_page,
         "selected_raw_parser_table_id": args.parser_table_id,
+        "mapped_physical_parser_table_id": canonical_raw_table_id,
         "canonical_version_scoped_table_id": canonical_table_id,
         "table_header_rows": selected_table.get("header_rows"),
     }
@@ -349,15 +380,19 @@ def main() -> None:
             "configured_artifact_manifest_sha256": (
                 hashlib.sha256(asset_manifest.read_bytes()).hexdigest() if asset_manifest.is_file() else None
             ),
-            "bounded_prefix_pages": args.targeted_page,
-            "selected_original_physical_page": args.targeted_page,
+            "targeted_source_page_range": [target_first_page, target_last_page],
+            "selected_parser_page_index": parser_page,
+            "selected_original_physical_page": original_page,
             "selected_raw_table_id": args.parser_table_id,
+            "mapped_physical_table_id": canonical_raw_table_id,
             "oracle_page_selection": {
-                "physical_page": args.targeted_page,
+                "physical_page": original_page,
+                "targeted_source_page_range": [target_first_page, target_last_page],
                 "selection_basis": "explicit CLI diagnostic scope; not passed to retrieval",
             },
             "oracle_table_selection": {
                 "raw_parser_table_id": args.parser_table_id,
+                "mapped_physical_table_id": canonical_raw_table_id,
                 "selection_basis": "explicit manually reviewed CLI mapping; not passed to retrieval",
             },
             "table_header_rows": selected_table.get("header_rows"),
@@ -385,6 +420,7 @@ def main() -> None:
         "source_page_count": source_page_count,
         "full_source_parser": full_parse.get("parser_name"),
         "targeted_parser_table_id": args.parser_table_id,
+        "targeted_original_physical_page": original_page,
         "canonical_table_id": canonical_table_id,
         "search_status": search.get("status"),
         "retrieved_count": len(retrieved),

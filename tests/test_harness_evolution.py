@@ -219,8 +219,17 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
     def fake_optimizer(*, seed_candidate, evaluator, dataset, config, **_kwargs):
         optimizer_calls.append(True)
         examples = list(dataset)
-        for example in examples:
+        trace_path = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "evaluation_action_traces.json"
+        initial_trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        assert initial_trace["checkpoint_status"] == "recording"
+        assert initial_trace["evaluation_count"] == 0
+        for index, example in enumerate(examples):
             evaluator(seed_candidate, example)
+            if index == 0:
+                partial_trace = json.loads(trace_path.read_text(encoding="utf-8"))
+                assert partial_trace["checkpoint_status"] == "recording"
+                assert partial_trace["evaluation_count"] == 1
+                assert partial_trace["evaluations"][0]["phase"] == "exploration"
             evaluator(proposal, example)
         dates_by_text = {example["as_of"]: 0.5 for example in examples}
         proposal_scores = {example["as_of"]: 0.8 for example in examples}
@@ -289,6 +298,8 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
     assert len(evaluation_calls) == 15
     trace_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "evaluation_action_traces.json"
     trace_payload = json.loads(trace_file.read_text(encoding="utf-8"))
+    assert trace_payload["checkpoint_status"] == "complete"
+    assert trace_payload["evaluation_count"] == len(trace_payload["evaluations"]) == 15
     input_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "case_inputs.json"
     assert len(json.loads(input_file.read_text(encoding="utf-8"))["cases"]) == 8
     assert {entry["phase"] for entry in trace_payload["evaluations"]} == {

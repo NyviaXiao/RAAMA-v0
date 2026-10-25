@@ -1564,6 +1564,18 @@ def run_gepa_evolution(
         _write_json(case_manifest_path, case_manifest)
     reflection_payloads: list[dict[str, object]] = []
     evaluation_action_traces: list[dict[str, object]] = []
+    action_trace_file = "evaluation_action_traces.json"
+
+    def checkpoint_action_traces(status: str) -> None:
+        _write_json(run_dir / action_trace_file, {
+            "schema_version": "adaptive-mas.gepa-action-traces.v1",
+            "case_manifest_sha256": case_manifest_sha256,
+            "checkpoint_status": status,
+            "evaluation_count": len(evaluation_action_traces),
+            "evaluations": evaluation_action_traces,
+        })
+
+    checkpoint_action_traces("recording")
 
     def reflection_lm(prompt, **kwargs):
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else list(prompt)
@@ -1658,6 +1670,7 @@ def run_gepa_evolution(
             "task_model_usage": side_info.get("task_model_usage"),
             "actions": trace_sink,
         })
+        checkpoint_action_traces("recording")
         evaluation_cache[key] = (score, side_info)
         return score, side_info
 
@@ -1812,6 +1825,7 @@ def run_gepa_evolution(
                     "task_model_usage": info["task_model_usage"],
                     "actions": trace_sink,
                 })
+                checkpoint_action_traces("recording")
                 selection_rows[name].append({
                     "as_of": case.as_of.isoformat(),
                     "score": score,
@@ -1883,6 +1897,7 @@ def run_gepa_evolution(
                 "task_model_usage": info["task_model_usage"],
                 "actions": trace_sink,
             })
+            checkpoint_action_traces("recording")
             frozen_rows[label].append({
                 "as_of": case.as_of.isoformat(),
                 "score": score,
@@ -1923,6 +1938,7 @@ def run_gepa_evolution(
             "task_model_usage": info["task_model_usage"],
             "actions": reuse_trace,
         })
+        checkpoint_action_traces("recording")
         reuse_result_file = "reuse_demo_research.json"
         _write_json(run_dir / reuse_result_file, reuse_trace[0])
         reuse_demo_result = {
@@ -1941,12 +1957,7 @@ def run_gepa_evolution(
 
     run_calls = budget.calls[run_call_start:]
     run_logical_calls = budget.logical_calls[run_logical_start:]
-    action_trace_file = "evaluation_action_traces.json"
-    _write_json(run_dir / action_trace_file, {
-        "schema_version": "adaptive-mas.gepa-action-traces.v1",
-        "case_manifest_sha256": case_manifest_sha256,
-        "evaluations": evaluation_action_traces,
-    })
+    checkpoint_action_traces("complete")
     output = {
         "schema_version": "adaptive-mas.gepa-evolution.v1",
         "evaluator_version": EVALUATOR_VERSION,

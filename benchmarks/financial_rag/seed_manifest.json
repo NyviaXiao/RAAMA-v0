@@ -83,9 +83,11 @@
       "rights_note": "CNINFO public disclosure; path date is used only as a retrospective publication-time proxy; actual historical first-capture time is unknown. Local engineering diagnosis only; no redistribution license asserted.",
       "local_path": ".tmp/industrial_rag_supervision_20261025/parent_public_corpus/catl2024full.pdf",
       "reviewed_pages": [
-        9
+        9,
+        114,
+        115
       ],
-      "page_number_note": "reviewed_pages and case page_number use 1-based physical PDF page numbers; printed page number is 9."
+      "page_number_note": "reviewed_pages and case page_number use 1-based physical PDF page numbers; printed page numbers are 9, 114, and 115."
     }
   ],
   "cases": [
@@ -654,6 +656,71 @@
           "time_basis": "retrospective_proxy"
         }
       ]
+    },
+    {
+      "case_id": "catl2024_continued_balance_sheet_total_assets",
+      "dataset_group": "public_report_diagnostic",
+      "question": "宁德时代2024年年报第115页续表中的合并资产负债表资产总计是多少千元？",
+      "security_code": "300750",
+      "report_periods": [
+        "2024"
+      ],
+      "as_of": "2026-10-26T04:41:07+08:00",
+      "answerability": "answerable",
+      "required_evidence": [
+        {
+          "source_id": "cninfo-1222806982",
+          "content_sha256": "b4f1713d7b821eb076c102711d177fe942ccc2bc8dd171ae5d7a95799a65b0ad",
+          "page_number": 114,
+          "evidence_type": "span",
+          "span_id": "span-v-b4f1713d7b821eb076c10271-page-114",
+          "char_start": 0,
+          "char_end": 2435,
+          "annotation_note": "The exact physical page 114 source span contains the consolidated balance-sheet heading, date 2024年12月31日, unit 千元, and the 期末余额/期初余额 column headers. Physical page 115 immediately continues this statement without repeating those headers; the continuation interpretation was visually reviewed and is manually annotated.",
+          "metric": null
+        },
+        {
+          "source_id": "cninfo-1222806982",
+          "content_sha256": "b4f1713d7b821eb076c102711d177fe942ccc2bc8dd171ae5d7a95799a65b0ad",
+          "page_number": 115,
+          "evidence_type": "cell",
+          "table_id": "tbl-v-b4f1713d7b821eb076c10271-docling-table-2-p115",
+          "metric": "资产总计",
+          "raw_value": "786,658,123",
+          "normalized_value": "786658123",
+          "row_index": 15,
+          "column_index": 1,
+          "cell_reference": "r15c1",
+          "annotation_note": "Targeted Docling extraction of physical page 115 maps parser subset raw table docling-table-2-p2 to physical-page table docling-table-2-p115. Zero-based row 15, column 1 is 资产总计 786,658,123. Page 115 does not repeat the date, unit, or column headers; those are supported by the separately labeled page 114 span above. No automatic table continuation join is claimed."
+        }
+      ],
+      "expected_claims": [
+        "宁德时代2024年12月31日合并资产负债表列示资产总计为786,658,123千元。"
+      ],
+      "allowed_calculations": [],
+      "expected_refusal_reason": null,
+      "data_partition": "development",
+      "view_status": "public_viewed_diagnostic",
+      "annotation": {
+        "annotator": "Luna",
+        "annotated_at": "2026-10-26T05:40:00+08:00",
+        "reviewer": null,
+        "review_status": "single_review",
+        "review_note": "Visually reviewed original physical PDF pages 114 and 115. Page 114 supplies the statement title, date, unit, and column headers; page 115 continues the adjacent table and does not repeat them. The page-pair relation is manually reviewed for this development diagnostic; automatic cross-page linking remains unverified."
+      },
+      "schema_version": "adaptive-mas.financial-qa-case.v1",
+      "source_records": [
+        {
+          "source_id": "cninfo-1222806982",
+          "source_url": "https://static.cninfo.com.cn/finalpage/2025-03-15/1222806982.PDF",
+          "content_sha256": "b4f1713d7b821eb076c102711d177fe942ccc2bc8dd171ae5d7a95799a65b0ad",
+          "rights_note": "CNINFO public disclosure; path date is used only as a retrospective publication-time proxy; actual historical first-capture time is unknown. Local engineering diagnosis only; no redistribution license asserted.",
+          "published_at": "2025-03-15T00:00:00+08:00",
+          "first_available_at": "2025-03-15T00:00:00+08:00",
+          "captured_at": "2026-10-26T04:39:51+08:00",
+          "time_basis": "retrospective_proxy"
+        }
+      ]
     }
   ],
   "synthetic_adversarial_cases": [
@@ -779,10 +846,11 @@
       "retrospective_time_boundary",
       "second_issuer_annual_report",
       "third_nonbank_issuer_annual_report",
-      "unit_and_reporting_basis"
+      "unit_and_reporting_basis",
+      "manually_reviewed_cross_page_header_and_cell_evidence_pair"
     ],
     "public_source_not_covered": [
-      "true_cross_page_table_continuation",
+      "automated_and_general_cross_page_table_continuation_linking",
       "verified_restated_report_conflict",
       "hundreds_of_independently_annotated_cases",
       "unseen_independent_issuer_holdout"
@@ -794,7 +862,7 @@
       "restatement_conflict_negative"
     ],
     "public_case_partitions": {
-      "development": "All ten public cases from three issuers and three annual-report families were viewed and annotated; no public case is independent acceptance.",
+      "development": "All eleven public cases from three issuers and three annual-report families were viewed and annotated; no public case is independent acceptance.",
       "selection": "empty",
       "independent_acceptance": "empty"
     }
@@ -804,5 +872,5 @@
     "reason": "At authorized baseline 420cc4f, the existing fundamental source search did not expose an immutable document/page retrieval index or complete evidence-set labels; no pre-change retrieval metric was recorded.",
     "metrics": null
   },
-  "last_updated_at": "2026-10-26T04:48:46+08:00"
+  "last_updated_at": "2026-10-26T05:46:37+08:00"
 }
