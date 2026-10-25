@@ -444,6 +444,56 @@ def test_isolated_office_parser_rejects_external_relationships(tmp_path) -> None
     assert "external relationships" in result["error"]
 
 
+def _office_package(extension: str, macro_entry: str | None = None) -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        if extension == ".docx":
+            archive.writestr(
+                "word/document.xml",
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:body><w:p><w:r><w:t>Annual report</w:t></w:r></w:p></w:body></w:document>',
+            )
+        elif extension == ".pptx":
+            archive.writestr(
+                "ppt/slides/slide1.xml",
+                '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                '<p:spTree><a:t>Annual report</a:t></p:spTree></p:sld>',
+            )
+        else:
+            archive.writestr(
+                "xl/worksheets/sheet1.xml",
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Revenue</t></is></c></row>'
+                '</sheetData></worksheet>',
+            )
+        if macro_entry is not None:
+            archive.writestr(macro_entry, b"marker only; never executed")
+    return payload.getvalue()
+
+
+@pytest.mark.parametrize("extension", [".docx", ".pptx", ".xlsx"])
+@pytest.mark.parametrize("macro_entry", ["word/vbaProject.bin", "xl/VBAproject.BIN"])
+def test_isolated_office_parser_rejects_case_insensitive_macro_markers(tmp_path, extension, macro_entry) -> None:
+    result = parse_isolated(
+        _office_package(extension, macro_entry),
+        f"macro-marker{extension}",
+        scratch_root=tmp_path / "scratch",
+    )
+    assert result["status"] == "quarantined"
+    assert "VBA macros" in result["error"]
+
+
+@pytest.mark.parametrize("extension", [".docx", ".pptx", ".xlsx"])
+def test_isolated_office_parser_keeps_macro_free_documents_parseable(tmp_path, extension) -> None:
+    result = parse_isolated(
+        _office_package(extension),
+        f"regular{extension}",
+        scratch_root=tmp_path / "scratch",
+    )
+    assert result["status"] == "parsed"
+
+
 def test_table_row_expansion_rechecks_access_and_returns_exact_cell_citations(tmp_path) -> None:
     source = b"Metric,2024,2023\nRevenue,100,90\n"
     parsed = parse_isolated(source, "financial.csv", scratch_root=tmp_path / "scratch")

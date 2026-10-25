@@ -414,7 +414,7 @@ def _parse_bytes(payload: bytes, filename: str) -> dict[str, Any]:
                     raise ParseError("Office archive exceeds the configured entry limit")
                 if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
                     raise ParseError("Office archive exceeds the configured uncompressed size limit")
-                if any(info.filename.lower().endswith("vbaProject.bin") for info in infos):
+                if any(info.filename.casefold().endswith("vbaproject.bin") for info in infos):
                     raise ParseError("Office archive containing VBA macros is rejected")
                 for info in infos:
                     if info.filename.lower().endswith(".rels"):
