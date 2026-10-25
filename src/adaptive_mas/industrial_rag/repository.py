@@ -462,6 +462,23 @@ class IndustrialRagStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _read_table_row(self, table_id: str, row_start: int, row_end: int) -> dict[str, object] | None:
+        with closing(self._connect()) as connection:
+            table = connection.execute(
+                "SELECT t.table_id,t.version_id,t.title AS table_title,t.header_rows,t.unit_text,t.accounting_basis AS table_accounting_basis,t.report_period AS table_report_period,t.page_start,t.page_end,t.payload_json AS table_payload_json,"
+                "v.source_id,v.source_url,v.published_at,v.first_available_at,v.captured_at,v.ingested_at,v.content_sha256,v.time_basis,"
+                "d.document_id,d.title AS document_title,d.security_code "
+                "FROM rag_tables t JOIN rag_document_versions v USING(version_id) JOIN rag_documents d USING(document_id) WHERE t.table_id=?",
+                (table_id,),
+            ).fetchone()
+            if table is None:
+                return None
+            cells = connection.execute(
+                "SELECT * FROM rag_cells WHERE table_id=? AND (row_index<? OR row_index BETWEEN ? AND ?) ORDER BY row_index,column_index",
+                (table_id, int(table["header_rows"]), row_start, row_end),
+            ).fetchall()
+        return {"table": dict(table), "cells": [dict(row) for row in cells]}
+
     def _get_document_bytes(self, document_id: str, version_id: str, principal_id: str) -> bytes:
         with closing(self._connect()) as connection:
             row = connection.execute(

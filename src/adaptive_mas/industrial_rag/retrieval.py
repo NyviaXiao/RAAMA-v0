@@ -299,6 +299,113 @@ class IndustrialRagService:
             "permission_revision": self.store.permission_revision(),
         }
 
+    def read_table_row(self, plan: QueryPlan, table_id: str, row_start: int, row_end: int) -> dict[str, object]:
+        """Expand a table row group from stored cells after rechecking access, release, and time scope."""
+        if not isinstance(table_id, str) or not table_id or len(table_id) > 256:
+            raise ValueError("table_id must be a nonempty bounded string")
+        if (
+            isinstance(row_start, bool) or isinstance(row_end, bool)
+            or not isinstance(row_start, int) or not isinstance(row_end, int)
+            or row_start < 0 or row_end < row_start or row_end - row_start >= 20
+        ):
+            raise ValueError("table row range must contain one to twenty nonnegative rows")
+        release_id = plan.release_id or self.store.active_release_id()
+        if release_id is None:
+            raise PermissionError("table evidence is not currently available to this query")
+        if plan.time_mode == "retrospective_diagnostic" and not self.allow_retrospective_diagnostic:
+            raise PermissionError("retrospective diagnostic queries are disabled by server policy")
+        as_of = parse_datetime(plan.as_of, "as_of", required=True)
+        if as_of > datetime.now(timezone.utc):
+            raise ValueError("as_of cannot be in the future")
+        versions = self.store.permitted_versions(
+            plan.principal_id, plan.security_code, as_of, time_mode=plan.time_mode,
+            report_periods=plan.report_periods, accounting_basis=plan.accounting_basis,
+            release_id=release_id,
+        )
+        record = self.store._read_table_row(table_id, row_start, row_end)
+        if record is None or str(record["table"]["version_id"]) not in {str(row["version_id"]) for row in versions}:
+            raise PermissionError("table evidence is not currently available to this query")
+        table = record["table"]
+        cells = record["cells"]
+        header_rows = int(table["header_rows"])
+        headers: dict[int, list[str]] = {}
+        data: dict[int, list[dict[str, object]]] = {}
+        for cell in cells:
+            row_index, column_index = int(cell["row_index"]), int(cell["column_index"])
+            raw_text = str(cell["raw_text"])
+            if row_index < header_rows:
+                headers.setdefault(column_index, []).append(raw_text)
+            elif row_start <= row_index <= row_end:
+                data.setdefault(row_index, []).append(cell)
+        if not data:
+            raise FileNotFoundError("requested table row group is absent")
+        ordered_headers = {
+            column: " / ".join(value for value in values if value.strip())
+            for column, values in headers.items()
+        }
+        output_rows = []
+        used_cells = [cell for cell in cells if int(cell["row_index"]) < header_rows]
+        for row_index in sorted(data):
+            ordered_cells = sorted(data[row_index], key=lambda cell: int(cell["column_index"]))
+            used_cells.extend(ordered_cells)
+            output_rows.append({
+                "row_index": row_index,
+                "values": [
+                    {
+                        "cell_id": json.loads(str(cell["payload_json"])).get("cell_id"),
+                        "column_index": int(cell["column_index"]),
+                        "column_header": ordered_headers.get(int(cell["column_index"])),
+                        "raw_text": str(cell["raw_text"]),
+                        "normalized_value": cell["normalized_value"],
+                        "value_kind": str(cell["value_kind"]),
+                        "unit": cell["unit"] or table["unit_text"],
+                        "multiplier": cell["multiplier"],
+                        "currency": cell["currency"],
+                    }
+                    for cell in ordered_cells
+                ],
+            })
+        header_text = " | ".join(
+            f"{column}:{label}" for column, label in sorted(ordered_headers.items())
+        )
+        row_texts = [
+            " | ".join(
+                f"{ordered_headers.get(int(cell['column_index']), str(cell['column_index']))}: {cell['raw_text']}"
+                for cell in sorted(row_cells, key=lambda cell: int(cell["column_index"]))
+            )
+            for _, row_cells in sorted(data.items())
+        ]
+        pages = [int(cell["page_number"]) for cell in used_cells if cell["page_number"] is not None]
+        citation = {
+            "document_id": table["document_id"], "version_id": table["version_id"],
+            "source_id": table["source_id"], "source_url": table["source_url"],
+            "published_at": table["published_at"], "first_available_at": table["first_available_at"],
+            "captured_at": table["captured_at"], "ingested_at": table["ingested_at"],
+            "content_sha256": table["content_sha256"], "time_basis": table["time_basis"],
+            "page_number": min(pages) if pages else table["page_start"],
+            "table_id": table_id, "row_start": row_start, "row_end": row_end,
+            "unit": table["unit_text"], "accounting_basis": table["table_accounting_basis"],
+            "report_period": table["table_report_period"], "as_of": as_of.isoformat(),
+            "release_id": release_id,
+            "supporting_cells": [
+                {
+                    "cell_id": json.loads(str(cell["payload_json"])).get("cell_id"),
+                    "row_index": int(cell["row_index"]),
+                    "column_index": int(cell["column_index"]),
+                    "page_number": cell["page_number"],
+                    "raw_text": str(cell["raw_text"]),
+                }
+                for cell in used_cells
+            ],
+        }
+        text = f"列头：{header_text}\n" + "\n".join(row_texts)
+        return {
+            "table_id": table_id, "row_start": row_start, "row_end": row_end,
+            "title": table["table_title"], "header_rows": header_rows,
+            "rows": output_rows, "text": text, "citation": citation,
+            "permission_revision": self.store.permission_revision(),
+        }
+
     def download_original(self, plan: QueryPlan, document_id: str, version_id: str) -> bytes:
         """Download is bound to the same current grant, release and temporal policy as search."""
         release_id = plan.release_id or self.store.active_release_id()

@@ -1523,7 +1523,7 @@ def _fundamental_handlers(
         def search_indexed_documents(arguments: dict[str, object]) -> dict[str, object]:
             question = arguments.get("question")
             symbols = arguments.get("symbols")
-            limit = arguments.get("limit", 4)
+            limit = arguments.get("limit", 2)
             periods = arguments.get("report_periods", [])
             basis = arguments.get("accounting_basis")
             task_type = arguments.get("task_type", "fact")
@@ -1548,6 +1548,7 @@ def _fundamental_handlers(
                 return {"status": "unavailable", "reason": "no published industrial RAG snapshot was active at task start", "retrieved": []}
 
             retrieved: list[dict[str, object]] = []
+            reused_evidence_ids: list[str] = []
             channel_status: list[dict[str, object]] = []
             warnings: list[str] = []
             for symbol in dict.fromkeys(symbols):
@@ -1572,7 +1573,7 @@ def _fundamental_handlers(
                     citation = dict(item["citation"])
                     evidence_id = _opaque_id(
                         "industrial-rag",
-                        f"{industrial_rag_release_id}:{symbol}:{plan.query}:{item['evidence_id']}",
+                        f"{industrial_rag_release_id}:{symbol}:{item['evidence_id']}",
                     )
                     reference = {
                         "tool": "read_indexed_financial_evidence",
@@ -1604,10 +1605,13 @@ def _fundamental_handlers(
                         "facts": fact_values,
                         "facts_units": fact_units,
                         "reopen_ref": reference,
-                        "content_scope": "page_span_excerpt",
+                        "content_scope": "table_row_group" if citation.get("table_id") is not None else "page_span_excerpt",
                     }
+                    if evidence_id in industrial_rag_evidence:
+                        reused_evidence_ids.append(evidence_id)
+                        continue
                     if evidence_id in evidence_catalog:
-                        raise InvalidResearchOutput("fundamental", "duplicate_evidence_identity")
+                        raise InvalidResearchOutput("fundamental", "evidence_identity_conflicts_with_existing_source")
                     evidence_catalog[evidence_id] = source_ref
                     industrial_rag_evidence[evidence_id] = {
                         "plan": plan,
@@ -1630,9 +1634,10 @@ def _fundamental_handlers(
                         "citation": citation,
                     })
             return {
-                "status": "available" if retrieved else "no_evidence",
+                "status": "available" if retrieved else "no_new_evidence" if reused_evidence_ids else "no_evidence",
                 "release_id": industrial_rag_release_id,
                 "retrieved": retrieved,
+                "reused_evidence_ids": reused_evidence_ids,
                 "channels": channel_status,
                 "warnings": sorted(set(warnings)),
                 "scores_are_confidence": False,
@@ -1644,15 +1649,34 @@ def _fundamental_handlers(
                 raise InvalidToolInput("evidence_id must identify a document result returned in this task")
             record = industrial_rag_evidence[evidence_id]
             span_id = record.get("span_id")
-            if not isinstance(span_id, str):
-                raise InvalidToolInput("indexed evidence does not have a reopenable page span")
-            expanded = industrial_rag_service.read_span(record["plan"], span_id)
+            if isinstance(span_id, str):
+                expanded = industrial_rag_service.read_span(record["plan"], span_id)
+                text = str(expanded["text"])
+                citation = expanded["citation"]
+                content_scope = "reopened_source_span"
+            else:
+                source_citation = record["search_result"].get("citation", {})
+                table_id = source_citation.get("table_id")
+                row_start = source_citation.get("row_start")
+                row_end = source_citation.get("row_end")
+                if (
+                    not isinstance(table_id, str)
+                    or isinstance(row_start, bool) or not isinstance(row_start, int)
+                    or isinstance(row_end, bool) or not isinstance(row_end, int)
+                ):
+                    raise InvalidToolInput("indexed evidence does not have a reopenable source span or table row")
+                expanded = industrial_rag_service.read_table_row(
+                    record["plan"], table_id, row_start, row_end,
+                )
+                text = str(expanded["text"])
+                citation = expanded["citation"]
+                content_scope = "reopened_source_table_row"
             return {
                 "evidence_id": evidence_id,
-                "text_excerpt": expanded["text"][:2_400],
-                "citation": expanded["citation"],
+                "text_excerpt": text[:2_400],
+                "citation": citation,
                 "next_offset": None,
-                "content_scope": "reopened_source_span",
+                "content_scope": content_scope,
             }
 
         tools.extend([
@@ -1671,7 +1695,7 @@ def _fundamental_handlers(
             ),
             _tool(
                 "read_indexed_financial_evidence",
-                "Reopen the exact source page span returned by the indexed-document search; current permissions and time scope are checked again.",
+                "Reopen the exact cited page span or table row returned by the indexed-document search; current permissions and time scope are checked again.",
                 {"evidence_id": {"type": "string", "minLength": 1}},
                 ["evidence_id"],
             ),

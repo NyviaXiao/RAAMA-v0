@@ -46,7 +46,7 @@ Import a source file and its metadata:
 uv run raama-rag ingest --source .\report.pdf --metadata .\report.metadata.json
 ```
 
-The current local parser can extract text from PDF text layers, TXT/Markdown, HTML, CSV, JSON, XBRL/XML, DOCX, PPTX, and XLSX. Image-only files and scanned PDFs are quarantined because OCR is not configured; XLSM and legacy XLS are rejected. Parser page coverage is a structural signal, not an accuracy score. Parsed content does not automatically become reviewed financial facts.
+The current local parser can extract text from PDF text layers, TXT/Markdown, HTML, CSV, JSON, XBRL/XML, DOCX, PPTX, and XLSX. CSV, XLSX, and Markdown tables keep row/cell boundaries and repeat table headers in retrieval row groups; reopening a row checks current permission and time scope. Image-only files and scanned PDFs are quarantined because OCR is not configured; XLSM, external Office relationships, and legacy XLS are rejected. Parser page coverage is a structural signal, not an accuracy score. Parsed content does not automatically become reviewed financial facts.
 
 ## Build and publish a local corpus snapshot
 

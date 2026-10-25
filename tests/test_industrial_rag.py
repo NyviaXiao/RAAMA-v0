@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -29,6 +31,7 @@ from adaptive_mas.industrial_rag.parser import (
     UnsupportedFormat,
     normalize_financial_cell,
     parse_isolated,
+    records_from_parse,
     validate_cross_page_table_continuation,
 )
 from adaptive_mas.industrial_rag.postgres import _row_factory, translate_sqlite_contract
@@ -386,6 +389,111 @@ def test_isolated_parser_supports_safe_text_csv_and_rejects_unsupported_or_entit
     assert "prohibited DTD/entity" in blocked_xml["error"]
 
 
+def test_table_row_groups_keep_headers_cells_and_exact_source_spans_distinct(tmp_path) -> None:
+    source = '指标,2024,2023\r\n营业收入,"(1,234.50%)",0\r\n净利润,—,25bp\r\n'.encode()
+    parsed = parse_isolated(source, "financial.csv", scratch_root=tmp_path / "scratch")
+    assert parsed["status"] == "parsed"
+    table = parsed["tables"][0]
+    cells = parsed["cells"]
+    negative_percent = next(cell for cell in cells if cell["row_index"] == 1 and cell["column_index"] == 1)
+    assert negative_percent["value_kind"] == "percent"
+    assert negative_percent["normalized_value"] == "-1234.50"
+    zero = next(cell for cell in cells if cell["row_index"] == 1 and cell["column_index"] == 2)
+    assert zero["value_kind"] == "zero"
+    dash = next(cell for cell in cells if cell["row_index"] == 2 and cell["column_index"] == 1)
+    assert dash["value_kind"] == "dash"
+    basis_points = next(cell for cell in cells if cell["row_index"] == 2 and cell["column_index"] == 2)
+    assert basis_points["value_kind"] == "basis_points"
+
+    row_groups = [block for block in parsed["blocks"] if block["block_type"] == "table_row_group"]
+    assert len(row_groups) == 2
+    assert all("列头：指标 | 2024 | 2023" in block["text"] for block in row_groups)
+    assert row_groups[0]["row_start"] == row_groups[0]["row_end"] == 1
+    assert row_groups[0]["next_block_id"] == row_groups[1]["block_id"]
+    records = records_from_parse(parsed, "version-rows")
+    stored_row = next(block for block in records["blocks"] if block.block_type == "table_row_group")
+    assert stored_row.table_id == f"tbl-version-rows-{table['table_id']}"
+    assert stored_row.span_id is None
+    assert stored_row.char_start is None and stored_row.char_end is None
+
+    markdown = parse_isolated(
+        "| 指标 | 2024 | 2023 |\n| --- | ---: | ---: |\n| 营业收入 | 100 | 90 |\n".encode(),
+        "financial.md",
+        scratch_root=tmp_path / "scratch",
+    )
+    assert markdown["tables"] and len(markdown["cells"]) == 6
+    markdown_group = next(block for block in markdown["blocks"] if block["block_type"] == "table_row_group")
+    assert "数据行：营业收入 | 100 | 90" in markdown_group["text"]
+
+
+def test_isolated_office_parser_rejects_external_relationships(tmp_path) -> None:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(
+            "word/_rels/document.xml.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="external" Target="https://example.invalid/" TargetMode="External"/>'
+            '</Relationships>',
+        )
+        archive.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>',
+        )
+    result = parse_isolated(payload.getvalue(), "external.docx", scratch_root=tmp_path / "scratch")
+    assert result["status"] == "quarantined"
+    assert "external relationships" in result["error"]
+
+
+def test_table_row_expansion_rechecks_access_and_returns_exact_cell_citations(tmp_path) -> None:
+    source = b"Metric,2024,2023\nRevenue,100,90\n"
+    parsed = parse_isolated(source, "financial.csv", scratch_root=tmp_path / "scratch")
+    base = _bundle(payload=source)
+    version = replace(
+        base.version,
+        parser_name=str(parsed["parser_name"]),
+        parser_version=str(parsed["parser_version"]),
+        parser_confidence=float(parsed["parser_confidence"]),
+    )
+    records = records_from_parse(parsed, version.version_id)
+    bundle = replace(
+        base,
+        version=version,
+        sections=records["sections"],
+        spans=records["spans"],
+        blocks=records["blocks"],
+        tables=records["tables"],
+        cells=records["cells"],
+        facts=(),
+    )
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, [version.version_id], "release-1")
+    service = IndustrialRagService(store)
+    plan = replace(_plan(release_id="release-1"), query="Revenue 2024", top_k=10)
+    result = service.search(plan)
+    row_hit = next(item for item in result["retrieved"] if item["citation"].get("table_id"))
+    expanded = service.read_table_row(
+        plan,
+        str(row_hit["citation"]["table_id"]),
+        int(row_hit["citation"]["row_start"]),
+        int(row_hit["citation"]["row_end"]),
+    )
+    assert "2024: 100" in expanded["text"]
+    assert "2023: 90" in expanded["text"]
+    assert expanded["citation"]["source_id"] == version.source_id
+    assert expanded["citation"]["supporting_cells"]
+
+    store.set_access("analyst", "document-1", can_read=False)
+    with pytest.raises(PermissionError):
+        service.read_table_row(
+            plan,
+            str(row_hit["citation"]["table_id"]),
+            int(row_hit["citation"]["row_start"]),
+            int(row_hit["citation"]["row_end"]),
+        )
+
+
 def test_cross_page_merge_is_not_automatic_without_matching_basis_and_header() -> None:
     prior = {"title": "财务指标", "header": ["2024", "2023"], "security_code": "600036", "report_period": "2024", "unit": "人民币百万元", "page_end": 3}
     next_page = {"title": "财务指标", "header": ["2024", "2023"], "security_code": "600036", "report_period": "2024", "unit": "人民币百万元", "page_start": 4, "continued_marker": True}
@@ -474,7 +582,6 @@ def test_harness_fundamental_tools_search_and_reopen_pinned_rag_evidence(tmp_pat
         "symbols": ["600036"],
         "report_periods": ["2024"],
         "task_type": "fact",
-        "limit": 2,
     })
     assert result["status"] == "available"
     evidence = next(item for item in result["retrieved"] if item["financial_fact"].get("fact_id"))
@@ -484,6 +591,16 @@ def test_harness_fundamental_tools_search_and_reopen_pinned_rag_evidence(tmp_pat
     reopened = handlers["read_indexed_financial_evidence"]({"evidence_id": evidence_id})
     assert reopened["text_excerpt"] == _bundle().payload.decode()
     assert reopened["citation"]["release_id"] == "release-1"
+
+    repeated = handlers["search_indexed_financial_documents"]({
+        "question": "2024年度营业收入是多少",
+        "symbols": ["600036"],
+        "report_periods": ["2024"],
+        "task_type": "fact",
+    })
+    assert repeated["status"] == "no_new_evidence"
+    assert repeated["retrieved"] == []
+    assert repeated["reused_evidence_ids"]
 
     store.set_access("analyst", "document-1", can_read=False)
     with pytest.raises(PermissionError):
