@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import re
 import socket
 import threading
+import time
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 from urllib.parse import parse_qs, urlparse
 
-from adaptive_mas.industrial_rag.models import QueryPlan
+from adaptive_mas.industrial_rag.models import QueryPlan, SearchCancelled, SearchControl, SearchDeadlineExceeded
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore, ReleaseNotReady
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
 from adaptive_mas.runtime_limits import http_thread_limit
@@ -88,6 +90,52 @@ class RagRequestHandler(BaseHTTPRequestHandler):
             time_mode=str(self._context()["time_mode"]),  # type: ignore[arg-type]
         )
 
+    def _search_control(self, request_id: object = None) -> tuple[SearchControl, Callable[[], None]]:
+        context = self._context()
+        seconds = context.get("search_timeout_seconds", 30.0)
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            raise RuntimeError("local search timeout is not configured")
+        timeout = float(seconds)
+        if not math.isfinite(timeout) or timeout < 0:
+            raise RuntimeError("local search timeout must be finite and nonnegative")
+        deadline = time.monotonic() + timeout
+        cancellation_event = None
+        cleanup: Callable[[], None] = lambda: None
+        if request_id is not None:
+            if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", request_id):
+                raise ValueError("request_id must be a 1..128 character safe identifier")
+            lock = context.setdefault("search_cancel_lock", threading.Lock())
+            events = context.setdefault("search_cancel_events", {})
+            cancellation_event = threading.Event()
+            with lock:  # type: ignore[attr-defined]
+                if request_id in events:  # type: ignore[operator]
+                    raise ValueError("request_id is already active")
+                events[request_id] = cancellation_event  # type: ignore[index]
+
+            def cleanup_request() -> None:
+                with lock:  # type: ignore[attr-defined]
+                    if events.get(request_id) is cancellation_event:  # type: ignore[union-attr]
+                        events.pop(request_id, None)  # type: ignore[union-attr]
+
+            cleanup = cleanup_request
+        return SearchControl(
+            deadline_monotonic=deadline,
+            cancellation_event=cancellation_event,
+        ), cleanup
+
+    def _cancel_search(self, request_id: object) -> bool:
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", request_id):
+            raise ValueError("request_id must be a 1..128 character safe identifier")
+        context = self._context()
+        lock = context.setdefault("search_cancel_lock", threading.Lock())
+        events = context.setdefault("search_cancel_events", {})
+        with lock:  # type: ignore[attr-defined]
+            event = events.get(request_id)  # type: ignore[union-attr]
+            if event is None:
+                return False
+            event.set()
+            return True
+
     def do_GET(self) -> None:
         if not self._local_only():
             self._send(403, {"error": "loopback clients only"})
@@ -138,14 +186,54 @@ class RagRequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self._body()
+            if path == "/api/cancel":
+                if set(payload) != {"request_id"}:
+                    raise ValueError("cancellation requires the active request_id")
+                if not self._cancel_search(payload["request_id"]):
+                    self._send(404, {"error": "active search was not found"})
+                    return
+                self._send(202, {"status": "cancellation_requested"})
+                return
+            request_id = payload.pop("request_id", None) if path in {
+                "/api/search/page", "/api/search", "/api/research",
+            } else None
+            if path == "/api/search/page":
+                page_size = payload.get("page_size")
+                cursor = payload.get("cursor")
+                if page_size is not None and type(page_size) is not int:
+                    raise ValueError("page_size must be an integer")
+                if cursor is not None and not isinstance(cursor, str):
+                    raise ValueError("cursor must be a string")
+                plan_payload = {
+                    key: value for key, value in payload.items()
+                    if key not in {"page_size", "cursor"}
+                }
+                plan = self._plan(plan_payload)
+                control, cleanup = self._search_control(request_id)
+                try:
+                    result = self._context()["service"].search_page(
+                        plan, page_size=page_size, cursor=cursor, control=control,
+                    )  # type: ignore[union-attr]
+                finally:
+                    cleanup()
+                self._send(200, result)
+                return
             if path == "/api/search":
                 plan = self._plan(payload)
-                result = self._context()["service"].search(plan)  # type: ignore[union-attr]
+                control, cleanup = self._search_control(request_id)
+                try:
+                    result = self._context()["service"].search(plan, control=control)  # type: ignore[union-attr]
+                finally:
+                    cleanup()
                 self._send(200, result)
                 return
             if path == "/api/research":
                 plan = self._plan(payload)
-                result = self._context()["service"].research(plan)  # type: ignore[union-attr]
+                control, cleanup = self._search_control(request_id)
+                try:
+                    result = self._context()["service"].research(plan, control=control)  # type: ignore[union-attr]
+                finally:
+                    cleanup()
                 self._send(200, result)
                 return
             if path == "/api/evidence":
@@ -179,6 +267,10 @@ class RagRequestHandler(BaseHTTPRequestHandler):
         except PermissionError:
             self._send(403, {"error": "source is not available to the current principal or time policy"})
         except ReleaseNotReady as error:
+            self._send(409, {"error": str(error)})
+        except SearchDeadlineExceeded as error:
+            self._send(504, {"error": str(error)})
+        except SearchCancelled as error:
             self._send(409, {"error": str(error)})
         except FileNotFoundError:
             self._send(404, {"error": "source not found"})
@@ -255,7 +347,13 @@ def serve(
         allow_retrospective_diagnostic=time_mode == "retrospective_diagnostic",
     )
     server = LocalRagHTTPServer((host, port), RagRequestHandler)
-    server.context = {"store": store, "service": service, "principal_id": principal_id, "time_mode": time_mode}
+    server.context = {
+        "store": store,
+        "service": service,
+        "principal_id": principal_id,
+        "time_mode": time_mode,
+        "search_timeout_seconds": 30.0,
+    }
     print(f"RAAMA 金融资料工作台已启动：http://{host}:{port}")
     try:
         server.serve_forever(poll_interval=0.5)

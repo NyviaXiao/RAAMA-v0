@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
+import hmac
 import json
 import math
 import re
+import secrets
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import replace
@@ -13,7 +17,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Mapping, Sequence
 
-from adaptive_mas.industrial_rag.models import EvidenceResult, QueryPlan, parse_datetime
+from adaptive_mas.industrial_rag.models import EvidenceResult, QueryPlan, SearchControl, parse_datetime
 from adaptive_mas.industrial_rag.planning import (
     accounting_basis_signature,
     metric_for_source_label,
@@ -201,11 +205,69 @@ def _component_cache_identity(component: object) -> dict[str, object] | None:
     return serialized
 
 
-def _bm25(query: str, documents: Sequence[Mapping[str, object]], *, limit: int, k1: float = 1.2, b: float = 0.75) -> list[tuple[Mapping[str, object], float]]:
+def _encode_search_cursor(value: Mapping[str, object], signing_key: bytes) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    signature = hmac.new(signing_key, encoded.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _decode_search_cursor(value: object, signing_key: bytes) -> dict[str, object]:
+    if not isinstance(value, str) or len(value) > 4161:
+        raise ValueError("search cursor is malformed")
+    match = re.fullmatch(r"([A-Za-z0-9_-]{1,4096})\.([0-9a-f]{64})", value)
+    if match is None:
+        raise ValueError("search cursor is malformed")
+    encoded, signature = match.groups()
+    expected_signature = hmac.new(signing_key, encoded.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ValueError("search cursor signature is invalid")
+    try:
+        padding = "=" * ((4 - len(encoded) % 4) % 4)
+        decoded = json.loads(base64.b64decode(encoded + padding, altchars=b"-_", validate=True).decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("search cursor is malformed") from None
+    if not isinstance(decoded, dict) or set(decoded) != {
+        "schema", "release_id", "cache_key", "permission_revision", "offset", "page_size",
+    }:
+        raise ValueError("search cursor is malformed")
+    if (
+        decoded.get("schema") != "adaptive-mas.financial-rag-search-cursor.v1"
+        or not isinstance(decoded.get("release_id"), str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", decoded["release_id"])
+        or not isinstance(decoded.get("cache_key"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", decoded["cache_key"])
+        or isinstance(decoded.get("permission_revision"), bool)
+        or not isinstance(decoded.get("permission_revision"), int)
+        or decoded["permission_revision"] < 0
+        or isinstance(decoded.get("offset"), bool)
+        or not isinstance(decoded.get("offset"), int)
+        or decoded["offset"] < 1
+        or isinstance(decoded.get("page_size"), bool)
+        or not isinstance(decoded.get("page_size"), int)
+        or not 1 <= decoded["page_size"] <= 100
+    ):
+        raise ValueError("search cursor is malformed")
+    return decoded
+
+
+def _bm25(
+    query: str,
+    documents: Sequence[Mapping[str, object]],
+    *,
+    limit: int,
+    k1: float = 1.2,
+    b: float = 0.75,
+    control: SearchControl | None = None,
+) -> list[tuple[Mapping[str, object], float]]:
     query_terms = list(dict.fromkeys(financial_tokens(query)))
     if not query_terms or not documents:
         return []
-    tokenized = [financial_tokens(str(document.get("text", ""))) for document in documents]
+    tokenized = []
+    for document in documents:
+        if control is not None:
+            control.check()
+        tokenized.append(financial_tokens(str(document.get("text", ""))))
     lengths = [len(tokens) for tokens in tokenized]
     average_length = sum(lengths) / max(len(lengths), 1)
     document_frequency: Counter[str] = Counter()
@@ -217,6 +279,8 @@ def _bm25(query: str, documents: Sequence[Mapping[str, object]], *, limit: int, 
     scored: list[tuple[Mapping[str, object], float]] = []
     count = len(documents)
     for index, frequency in enumerate(term_frequencies):
+        if control is not None:
+            control.check()
         score = 0.0
         for term in query_terms:
             tf = frequency.get(term, 0)
@@ -284,6 +348,7 @@ class IndustrialRagService:
         self.channel_adapters = dict(channel_adapters or {})
         self.reranker = reranker
         self.allow_retrospective_diagnostic = allow_retrospective_diagnostic
+        self._cursor_signing_key = secrets.token_bytes(32)
 
     @staticmethod
     def route(task_type: str) -> tuple[str, ...]:
@@ -299,7 +364,15 @@ class IndustrialRagService:
             raise ValueError("task_type is unsupported")
         return routes[task_type]
 
-    def search(self, plan: QueryPlan, *, use_cache: bool = True) -> dict[str, object]:
+    def search(
+        self,
+        plan: QueryPlan,
+        *,
+        use_cache: bool = True,
+        control: SearchControl | None = None,
+    ) -> dict[str, object]:
+        if control is not None:
+            control.check()
         if plan.time_mode == "retrospective_diagnostic" and not self.allow_retrospective_diagnostic:
             raise PermissionError("retrospective diagnostic queries are disabled by server policy")
         release_id = plan.release_id or self.store.active_release_id()
@@ -309,6 +382,7 @@ class IndustrialRagService:
         as_of = parse_datetime(plan.as_of, "as_of", required=True)
         if as_of > datetime.now(timezone.utc):
             raise ValueError("as_of cannot be in the future")
+        permission_revision_before = self.store.permission_revision()
         permitted = self.store.permitted_versions(
             plan.principal_id, plan.security_code, as_of, time_mode=plan.time_mode,
             report_periods=plan.report_periods, accounting_basis=plan.accounting_basis,
@@ -316,6 +390,8 @@ class IndustrialRagService:
         )
         version_ids = [str(row["version_id"]) for row in permitted]
         permission_revision = self.store.permission_revision()
+        if permission_revision != permission_revision_before:
+            raise PermissionError("permissions changed while resolving the query scope")
         builtin_channel_identities = {
             "structured_facts": "typed_fact_records_v1",
             "bm25": "local_bm25_chinese_bigrams_v1",
@@ -351,6 +427,10 @@ class IndustrialRagService:
         cache_key = stable_hash(safe_plan)
         cached = self.store.cache_get(cache_key) if use_cache and runtime_cacheable else None
         if cached is not None:
+            if self.store.permission_revision() != permission_revision:
+                raise PermissionError("permissions changed while resolving the cached result")
+            if control is not None:
+                control.check()
             return {
                 **cached,
                 "plan_id": plan.plan_id,
@@ -360,23 +440,40 @@ class IndustrialRagService:
 
         channel_results: dict[str, list[EvidenceResult]] = {}
         channel_status: dict[str, dict[str, object]] = {}
+        if self.store.permission_revision() != permission_revision:
+            raise PermissionError("permissions changed while retrieval was running")
+        if control is not None:
+            control.check()
         blocks = self.store.read_blocks(version_ids)
+        if control is not None:
+            control.check()
         facts = self.store.read_facts(version_ids)
+        if control is not None:
+            control.check()
         version_by_id = {str(row["version_id"]): row for row in permitted}
 
         for channel in plan.channels:
+            if control is not None:
+                control.check()
             if channel == "structured_facts":
-                channel_results[channel] = self._fact_results(plan, facts, version_by_id)
+                channel_results[channel] = self._fact_results(plan, facts, version_by_id, control=control)
                 channel_status[channel] = {"status": "available", "implementation": "typed_fact_records", "candidate_count": len(channel_results[channel])}
             elif channel == "bm25":
-                channel_results[channel] = self._block_results(plan, blocks, version_by_id)
+                channel_results[channel] = self._block_results(plan, blocks, version_by_id, control=control)
                 channel_status[channel] = {"status": "available", "implementation": "local_bm25_reference_chinese_bigram_analyzer", "candidate_count": len(channel_results[channel]), "production_opensearch": "unavailable unless explicitly configured"}
             elif channel == "toc_page":
                 channel_results[channel] = self._toc_results(plan, blocks, version_by_id)
                 channel_status[channel] = {"status": "available", "implementation": "section_and_page_block_reference", "candidate_count": len(channel_results[channel])}
             elif channel in self.channel_adapters:
                 adapter = self.channel_adapters[channel]
-                adapted = list(adapter(plan, version_ids))
+                controlled_search = getattr(adapter, "search_with_control", None)
+                adapted = list(
+                    controlled_search(plan, version_ids, control)
+                    if control is not None and callable(controlled_search)
+                    else adapter(plan, version_ids)
+                )
+                if control is not None:
+                    control.check()
                 channel_results[channel] = adapted[: plan.top_k * 5]
                 channel_status[channel] = {
                     "status": "available",
@@ -390,7 +487,16 @@ class IndustrialRagService:
         fused, fusion_trace = reciprocal_rank_fusion(channel_results, limit=plan.top_k * 5)
         rerank_status: dict[str, object]
         if self.reranker is not None and fused:
-            reranked = list(self.reranker(plan, fused))
+            if control is not None:
+                control.check()
+            controlled_rerank = getattr(self.reranker, "rerank_with_control", None)
+            reranked = list(
+                controlled_rerank(plan, fused, control)
+                if control is not None and callable(controlled_rerank)
+                else self.reranker(plan, fused)
+            )
+            if control is not None:
+                control.check()
             allowed_ids = {item.evidence_id for item in fused}
             if any(item.evidence_id not in allowed_ids for item in reranked):
                 raise ValueError("reranker returned evidence outside the retrieved candidate set")
@@ -426,9 +532,100 @@ class IndustrialRagService:
                 str(value["reason"]) for value in channel_status.values() if value.get("status") == "unavailable"
             ] + (["retrospective source timing is a diagnostic proxy, not verified historical availability"] if any(row["time_basis"] == "retrospective_proxy" for row in permitted) else []),
         }
+        if control is not None:
+            control.check()
         if runtime_cacheable:
             self.store.cache_put(cache_key, response)
+        if self.store.permission_revision() != permission_revision:
+            raise PermissionError("permissions changed before retrieval could return")
         return response
+
+    def search_page(
+        self,
+        plan: QueryPlan,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        control: SearchControl | None = None,
+    ) -> dict[str, object]:
+        """Page through one bounded, cached result set tied to a fixed local release snapshot."""
+        if page_size is None:
+            page_size = min(20, plan.top_k)
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
+            raise ValueError("page_size must be between 1 and 100")
+        if page_size > plan.top_k:
+            raise ValueError("page_size cannot exceed the QueryPlan top_k result limit")
+        release_id = plan.release_id or self.store.active_release_id()
+        if release_id is None:
+            raise ReleaseNotReady("no published corpus release is active")
+        permission_revision = self.store.permission_revision()
+        offset = 0
+        token: dict[str, object] | None = None
+        if cursor is not None:
+            token = _decode_search_cursor(cursor, self._cursor_signing_key)
+            if token["release_id"] != release_id:
+                raise ValueError("search cursor was issued for a different active release")
+            if token["permission_revision"] != permission_revision:
+                raise ValueError("search cursor was invalidated by a permission change")
+            if token["page_size"] != page_size:
+                raise ValueError("page_size must match the first search page")
+            offset = int(token["offset"])
+
+        if control is not None:
+            control.check()
+        result = self.search(replace(plan, release_id=release_id), control=control)
+        if plan.release_id is None and self.store.active_release_id() != release_id:
+            raise ValueError("active corpus release changed while the search page was running")
+        if self.store.permission_revision() != result.get("permission_revision"):
+            raise PermissionError("permissions changed while the search page was running")
+        result_cache = result.get("cache", {})
+        if not isinstance(result_cache, Mapping):
+            raise ValueError("search result does not expose a cache snapshot")
+        if token is not None and (
+            result_cache.get("stored") is not True
+            or result_cache.get("key_sha256") != token["cache_key"]
+            or result.get("permission_revision") != token["permission_revision"]
+        ):
+            raise ValueError("search cursor no longer matches the query snapshot")
+        items = result.get("retrieved")
+        if not isinstance(items, list):
+            raise ValueError("search result does not contain a result list")
+        if token is not None and offset >= len(items):
+            raise ValueError("search cursor is outside the stored result set")
+        end = min(offset + page_size, len(items))
+        has_more = end < len(items)
+        if has_more and result_cache.get("stored") is not True:
+            raise ValueError("stable cursor pagination requires a complete runtime cache identity")
+        if control is not None:
+            control.check()
+        next_cursor = None
+        if has_more:
+            next_cursor = _encode_search_cursor({
+                "schema": "adaptive-mas.financial-rag-search-cursor.v1",
+                "release_id": release_id,
+                "cache_key": result_cache["key_sha256"],
+                "permission_revision": result["permission_revision"],
+                "offset": end,
+                "page_size": page_size,
+            }, self._cursor_signing_key)
+        return {
+            "schema_version": "adaptive-mas.financial-rag-search-page.v1",
+            "plan_id": plan.plan_id,
+            "query_binding": result.get("query_binding"),
+            "status": result.get("status"),
+            "retrieved": items[offset:end],
+            "channels": result.get("channels", {}),
+            "cache": result_cache,
+            "pagination": {
+                "offset": offset,
+                "page_size": page_size,
+                "total_items": len(items),
+                "result_limit": plan.top_k,
+                "result_limit_reached": len(items) == plan.top_k,
+                "next_cursor": next_cursor,
+            },
+            "warnings": result.get("warnings", []),
+        }
 
     def research(
         self,
@@ -437,8 +634,11 @@ class IndustrialRagService:
         max_searches: int = 8,
         evidence_limit: int = 24,
         table_expansion_limit: int = 12,
+        control: SearchControl | None = None,
     ) -> dict[str, object]:
         """Run a fixed-template financial search plan with explicit coverage and stop reasons."""
+        if control is not None:
+            control.check()
         if isinstance(evidence_limit, bool) or not 2 <= evidence_limit <= 64:
             raise ValueError("evidence_limit must be between 2 and 64")
         if isinstance(table_expansion_limit, bool) or not 0 <= table_expansion_limit <= 24:
@@ -465,6 +665,7 @@ class IndustrialRagService:
         channel_status: dict[str, dict[str, object]] = {}
         seen: dict[tuple[object, ...], dict[str, object]] = {}
         table_expansions = 0
+        task_permission_revision = self.store.permission_revision()
 
         def location_key(item: Mapping[str, object]) -> tuple[object, ...]:
             citation = item.get("citation", {})
@@ -483,6 +684,10 @@ class IndustrialRagService:
             )
 
         for index, step in enumerate(searches, start=1):
+            if control is not None:
+                control.check()
+            if self.store.permission_revision() != task_permission_revision:
+                raise PermissionError("permissions changed during financial research")
             counter = step.kind == "counter_evidence_candidate"
             channels = ("bm25",) if counter else pinned_plan.channels
             subplan = replace(
@@ -498,7 +703,9 @@ class IndustrialRagService:
                 channels=channels,
                 top_k=min(pinned_plan.top_k, 10),
             )
-            result = self.search(subplan)
+            result = self.search(subplan, control=control)
+            if self.store.permission_revision() != task_permission_revision:
+                raise PermissionError("permissions changed during financial research")
             for name, status in result.get("channels", {}).items():
                 channel_status[f"{step.step_id}:{name}"] = dict(status)
             warnings.extend(str(value) for value in result.get("warnings", []))
@@ -543,9 +750,13 @@ class IndustrialRagService:
                         ):
                             table_expansions += 1
                             try:
+                                if control is not None:
+                                    control.check()
                                 item["reopened_table_row"] = self.read_table_row(
                                     subplan, table_id, row_start, row_end,
                                 )
+                                if control is not None:
+                                    control.check()
                             except (PermissionError, FileNotFoundError, ValueError) as error:
                                 item["table_reopen_status"] = str(error)
                     support.append(item)
@@ -749,6 +960,10 @@ class IndustrialRagService:
             next_action = "report_coverage_gaps_and_do_not_infer_missing_values"
         if candidate_conflicts:
             next_action = "pause_numeric_claims_until_candidate_conflicts_are_reviewed"
+        if self.store.permission_revision() != task_permission_revision:
+            raise PermissionError("permissions changed before financial research could return")
+        if control is not None:
+            control.check()
         return {
             "schema_version": "adaptive-mas.financial-rag-research.v1",
             "plan_id": plan.plan_id,
@@ -976,7 +1191,14 @@ class IndustrialRagService:
         }
         return reasons.get(channel, "requested channel has no configured backend")
 
-    def _fact_results(self, plan: QueryPlan, facts: Sequence[Mapping[str, object]], versions: Mapping[str, Mapping[str, object]]) -> list[EvidenceResult]:
+    def _fact_results(
+        self,
+        plan: QueryPlan,
+        facts: Sequence[Mapping[str, object]],
+        versions: Mapping[str, Mapping[str, object]],
+        *,
+        control: SearchControl | None = None,
+    ) -> list[EvidenceResult]:
         query_tokens = set(financial_tokens(plan.query + " " + " ".join(plan.aliases)))
         rows: list[tuple[float, EvidenceResult]] = []
         referenced_span_ids = [
@@ -986,6 +1208,8 @@ class IndustrialRagService:
         ]
         span_by_id = {str(row["span_id"]): row for row in self.store.read_spans(referenced_span_ids)}
         for fact in facts:
+            if control is not None:
+                control.check()
             if str(fact["security_code"]) != plan.security_code:
                 continue
             if plan.report_periods and str(fact["report_period"]) not in plan.report_periods:
@@ -1053,9 +1277,18 @@ class IndustrialRagService:
             rows.append((score, result))
         return [item for _, item in sorted(rows, key=lambda row: (-row[0], row[1].evidence_id))[: plan.top_k * 5]]
 
-    def _block_results(self, plan: QueryPlan, blocks: Sequence[Mapping[str, object]], versions: Mapping[str, Mapping[str, object]]) -> list[EvidenceResult]:
+    def _block_results(
+        self,
+        plan: QueryPlan,
+        blocks: Sequence[Mapping[str, object]],
+        versions: Mapping[str, Mapping[str, object]],
+        *,
+        control: SearchControl | None = None,
+    ) -> list[EvidenceResult]:
+        if control is not None:
+            control.check()
         scoped = [dict(row) | {"text": str(row["text"])} for row in blocks if row["version_id"] in versions]
-        ranked = _bm25(plan.query + " " + " ".join(plan.aliases), scoped, limit=plan.top_k * 5)
+        ranked = _bm25(plan.query + " " + " ".join(plan.aliases), scoped, limit=plan.top_k * 5, control=control)
         return [
             EvidenceResult(
                 evidence_id=f"ev-block-{row['block_id']}", channel="bm25",

@@ -8,7 +8,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Sequence
 
-from adaptive_mas.industrial_rag.models import EvidenceResult, QueryPlan
+from adaptive_mas.industrial_rag.models import EvidenceResult, QueryPlan, SearchControl
 from adaptive_mas.runtime_limits import apply_thread_limits, process_thread_limit
 
 
@@ -125,8 +125,18 @@ class Qwen3EmbeddingRuntime:
         indexes = torch.arange(hidden.shape[0], device=hidden.device)
         return hidden[indexes, lengths]
 
-    def embed(self, texts: Sequence[str], *, query: bool = False) -> np.ndarray:
+    def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        query: bool = False,
+        control: SearchControl | None = None,
+    ) -> np.ndarray:
+        if control is not None:
+            control.check()
         self._load()
+        if control is not None:
+            control.check()
         torch, functional = self._torch
         prepared = [
             f"Instruct: {RETRIEVAL_INSTRUCTION}\nQuery:{text}" if query else text
@@ -134,6 +144,8 @@ class Qwen3EmbeddingRuntime:
         ]
         vectors: list[np.ndarray] = []
         for start in range(0, len(prepared), EMBED_BATCH_SIZE):
+            if control is not None:
+                control.check()
             batch = prepared[start:start + EMBED_BATCH_SIZE]
             tokens = self._tokenizer(
                 batch,
@@ -147,6 +159,8 @@ class Qwen3EmbeddingRuntime:
                 pooled = self._last_token_pool(output.last_hidden_state, tokens["attention_mask"], torch)
                 normalized = functional.normalize(pooled, p=2, dim=1)
             vectors.append(normalized.to(dtype=torch.float32, device="cpu").numpy())
+            if control is not None:
+                control.check()
         if not vectors:
             dimension = int(getattr(self._model.config, "hidden_size", 1024))
             return np.empty((0, dimension), dtype=np.float32)
@@ -183,8 +197,18 @@ class Qwen3RerankerRuntime:
             raise RuntimeError("Qwen reranker tokenizer does not expose the expected yes/no tokens")
         self._torch = torch
 
-    def score(self, query: str, documents: Sequence[str]) -> list[float]:
+    def score(
+        self,
+        query: str,
+        documents: Sequence[str],
+        *,
+        control: SearchControl | None = None,
+    ) -> list[float]:
+        if control is not None:
+            control.check()
         self._load()
+        if control is not None:
+            control.check()
         torch = self._torch
         prefix = (
             "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. "
@@ -200,6 +224,8 @@ class Qwen3RerankerRuntime:
         scores: list[float] = []
         max_content = RERANK_MAX_LENGTH - len(prefix_ids) - len(suffix_ids)
         for start in range(0, len(pair_texts), RERANK_BATCH_SIZE):
+            if control is not None:
+                control.check()
             encoded = self._tokenizer(
                 pair_texts[start:start + RERANK_BATCH_SIZE],
                 padding=False,
@@ -214,6 +240,8 @@ class Qwen3RerankerRuntime:
                 logits = self._model(**tokens).logits[:, -1, :]
                 batch_scores = logits[:, self._yes_id] - logits[:, self._no_id]
             scores.extend(float(value) for value in batch_scores.detach().cpu().tolist())
+            if control is not None:
+                control.check()
         return scores
 
 
@@ -242,20 +270,42 @@ class LocalQwenDenseAdapter:
         }
 
     def __call__(self, plan: QueryPlan, version_ids: Sequence[str]) -> Sequence[EvidenceResult]:
+        return self._search(plan, version_ids, None)
+
+    def search_with_control(
+        self,
+        plan: QueryPlan,
+        version_ids: Sequence[str],
+        control: SearchControl,
+    ) -> Sequence[EvidenceResult]:
+        return self._search(plan, version_ids, control)
+
+    def _search(
+        self,
+        plan: QueryPlan,
+        version_ids: Sequence[str],
+        control: SearchControl | None,
+    ) -> Sequence[EvidenceResult]:
+        if control is not None:
+            control.check()
         rows = [
             row for row in self.store.read_blocks(version_ids)
             if str(row["security_code"] or "") == plan.security_code and str(row["text"]).strip()
         ]
+        if control is not None:
+            control.check()
         if not rows:
             return []
         query_text = plan.query + (" " + " ".join(plan.aliases) if plan.aliases else "")
-        query_vector = self.embedding.embed([query_text], query=True)[0]
+        query_vector = self.embedding.embed([query_text], query=True, control=control)[0]
         from adaptive_mas.industrial_rag.retrieval import _citation
 
         ranked = []
         batch_rows: list[Any] = []
         batch_keys: list[str] = []
         for row in rows:
+            if control is not None:
+                control.check()
             text = str(row["text"])
             key = f"{row['version_id']}:{row['block_id']}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
             vector = self._vectors.get(key)
@@ -266,10 +316,10 @@ class LocalQwenDenseAdapter:
             batch_rows.append(row)
             batch_keys.append(key)
             if len(batch_rows) == EMBED_BATCH_SIZE:
-                self._score_missing_batch(batch_rows, batch_keys, query_vector, ranked)
+                self._score_missing_batch(batch_rows, batch_keys, query_vector, ranked, control=control)
                 batch_rows, batch_keys = [], []
         if batch_rows:
-            self._score_missing_batch(batch_rows, batch_keys, query_vector, ranked)
+            self._score_missing_batch(batch_rows, batch_keys, query_vector, ranked, control=control)
         ranked.sort(key=lambda item: (-item[0], str(item[1]["block_id"])))
         return [
             EvidenceResult(
@@ -286,9 +336,21 @@ class LocalQwenDenseAdapter:
             for score, row in ranked[:plan.top_k * 5]
         ]
 
-    def _score_missing_batch(self, rows: list[Any], keys: list[str], query_vector: np.ndarray, ranked: list[Any]) -> None:
-        vectors = self.embedding.embed([str(row["text"]) for row in rows])
+    def _score_missing_batch(
+        self,
+        rows: list[Any],
+        keys: list[str],
+        query_vector: np.ndarray,
+        ranked: list[Any],
+        *,
+        control: SearchControl | None = None,
+    ) -> None:
+        if control is not None:
+            control.check()
+        vectors = self.embedding.embed([str(row["text"]) for row in rows], control=control)
         for row, key, vector in zip(rows, keys, vectors):
+            if control is not None:
+                control.check()
             self._vectors[key] = vector
             self._vectors.move_to_end(key)
             ranked.append((float(np.dot(query_vector, vector)), row))
@@ -316,9 +378,27 @@ class LocalQwenReranker:
         }
 
     def __call__(self, plan: QueryPlan, evidence: Sequence[EvidenceResult]) -> Sequence[EvidenceResult]:
-        scores = self.runtime.score(plan.query, [item.text for item in evidence])
+        return self._rerank(plan, evidence, None)
+
+    def rerank_with_control(
+        self,
+        plan: QueryPlan,
+        evidence: Sequence[EvidenceResult],
+        control: SearchControl,
+    ) -> Sequence[EvidenceResult]:
+        return self._rerank(plan, evidence, control)
+
+    def _rerank(
+        self,
+        plan: QueryPlan,
+        evidence: Sequence[EvidenceResult],
+        control: SearchControl | None,
+    ) -> Sequence[EvidenceResult]:
+        scores = self.runtime.score(plan.query, [item.text for item in evidence], control=control)
         paired = []
         for item, score in zip(evidence, scores):
+            if control is not None:
+                control.check()
             citation = {
                 **item.citation,
                 "reranker_model": RERANKER_REPO,

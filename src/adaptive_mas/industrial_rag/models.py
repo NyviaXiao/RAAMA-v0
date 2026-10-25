@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -11,6 +14,30 @@ from typing import Literal
 
 class ContractError(ValueError):
     """A persisted RAG record does not satisfy its immutable schema contract."""
+
+
+class SearchCancelled(RuntimeError):
+    """A caller cancelled a cooperative retrieval operation."""
+
+
+class SearchDeadlineExceeded(TimeoutError):
+    """A cooperative retrieval operation reached its monotonic deadline."""
+
+
+@dataclass(frozen=True, slots=True)
+class SearchControl:
+    deadline_monotonic: float | None = None
+    cancellation_event: threading.Event | None = None
+
+    def __post_init__(self) -> None:
+        if self.deadline_monotonic is not None and not math.isfinite(self.deadline_monotonic):
+            raise ValueError("search deadline must be a finite monotonic timestamp")
+
+    def check(self) -> None:
+        if self.cancellation_event is not None and self.cancellation_event.is_set():
+            raise SearchCancelled("search was cancelled")
+        if self.deadline_monotonic is not None and time.monotonic() >= self.deadline_monotonic:
+            raise SearchDeadlineExceeded("search deadline was exceeded")
 
 
 def validate_security_code(value: str | None) -> str | None:
