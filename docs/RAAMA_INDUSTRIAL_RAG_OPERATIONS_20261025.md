@@ -46,7 +46,16 @@ Import a source file and its metadata:
 uv run raama-rag ingest --source .\report.pdf --metadata .\report.metadata.json
 ```
 
-The current local parser can extract text from PDF text layers, TXT/Markdown, HTML, CSV, JSON, XBRL/XML, DOCX, PPTX, and XLSX. CSV, XLSX, and Markdown tables keep row/cell boundaries and repeat table headers in retrieval row groups; reopening a row checks current permission and time scope. Image-only files and scanned PDFs are quarantined because OCR is not configured; XLSM, external Office relationships, and legacy XLS are rejected. Parser page coverage is a structural signal, not an accuracy score. Parsed content does not automatically become reviewed financial facts.
+The default parser extracts text from PDF text layers, TXT/Markdown, HTML, CSV, JSON, XBRL/XML, DOCX, PPTX, and XLSX. CSV, XLSX, and Markdown tables keep row/cell boundaries and repeat table headers in retrieval row groups; reopening a row checks current permission and time scope. An opt-in Docling path runs CPU layout analysis, Chinese RapidOCR, and TableFormer against pinned local assets; it records page boxes, structured table cells, and page coverage without inventing exact character spans. Docling counts column-heading rows separately from row-header stubs, retains explicit unit and period labels with cell coordinates, and quarantines a table when heading rows are missing or ambiguous. The synthetic scan now produces two searchable rows that can be reopened with the source row/column, value, unit, and period intact. XLSM, macro-marked Office files, external Office relationships, and legacy XLS are rejected. Parser page coverage is a structural signal, not an accuracy score. Parsed content does not automatically become reviewed financial facts.
+
+Fetch the pinned parser assets explicitly before ingesting scanned PDFs. The model files and generated SHA-256 inventory remain in the ignored `.tmp` directory:
+
+```powershell
+uv run raama-rag fetch-docling-models
+uv run raama-rag ingest --source .\scanned-report.pdf --metadata .\scanned-report.metadata.json --pdf-backend docling
+```
+
+The Docling asset contract pins Docling 2.129.0, RapidOCR 3.9.2, Heron layout commit `8f39ad3c0b4c58e9c2d2c84a38465abf757272d8`, and TableFormer commit `fc0f2d45e2218ea24bce5045f58a389aed16dc23` (tag `v2.3.0`). Inference requires the local asset manifest and checks file paths, sizes, and SHA-256 values; external services and plugins are disabled and Hugging Face is placed in offline mode. A synthetic scanned financial-table PDF has passed the local CPU smoke path. This does not establish OCR accuracy on real filings or cross-page table quality.
 
 ## Build and publish a local corpus snapshot
 
@@ -73,12 +82,33 @@ uv run raama-rag serve --host 127.0.0.1 --port 8877 --principal-id local-public 
 
 Open `http://127.0.0.1:8877/`. The service binds to loopback and the API rejects requests that try to set a principal, release pointer, or time mode. The default is strict forward time. `--time-mode retrospective_diagnostic` is an operator-selected development mode; results carry a warning and cannot be presented as verified historical availability. The workbench has no source-upload route; use the local CLI for ingestion.
 
-Available query channels are the structured-fact table, local BM25 reference channel, section/page reference, and explicit adapter seams. Dense, vision, source-relation, and cross-encoder reranking channels report unavailable until separately configured. The seed manifest and schema are under `benchmarks/financial_rag/` and `schemas/`.
+To opt into the pinned local Qwen CPU embedding and reranker, fetch both immutable revisions and pass the asset directory to the workbench:
+
+```powershell
+uv run raama-rag fetch-qwen-models
+uv run raama-rag serve --host 127.0.0.1 --port 8877 --principal-id local-public --time-mode strict_forward --qwen-models .tmp\industrial_rag_supervision_20261025\qwen-models
+```
+
+Qwen3 Embedding and Reranker 0.6B are Apache-2.0 models pinned to embedding revision `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3` and reranker revision `e61197ed45024b0ed8a2d74b80b4d909f1255473`. They are loaded from local files only; each first load checks the recorded file paths, sizes, and SHA-256 values. The embedding uses last-token pooling and L2 normalization; the cross-encoder records a yes/no logit difference as a ranking score, never as a calibrated probability. Dense retrieval currently scans permission-filtered SQLite blocks and keeps a bounded in-memory vector cache; it is a real model-inference reference, not a persistent Qdrant index. Vision and source-relation channels remain unavailable. The seed manifest and schema are under `benchmarks/financial_rag/` and `schemas/`.
+
+## Offline evaluation
+
+Evaluate an explicit frozen QA manifest against a stored prediction file:
+
+```powershell
+uv run raama-rag evaluate --manifest .\benchmark.json --predictions .\predictions.json --output .\evaluation.json
+```
+
+Evidence labels must identify an exact source hash, page, and original cell/table row, fact, or text span. Numeric evidence compares `Decimal` values; units, multipliers, periods, and accounting basis must match exactly. Missing predictions count as failures, unknown case IDs are rejected, and repeated source locations contribute only once to ranking gain. The report includes Recall@K, complete evidence coverage, MRR, nDCG, answerability/refusal accuracy, source match, duplicates, and latency percentiles, grouped by data partition and view status. It records benchmark and prediction hashes. Evaluation reads labels offline and must not be called from live agents or query paths. The current viewed seed is diagnostic; no independent acceptance evaluation or 95% claim has been run.
 
 ## Current service boundaries
 
 - The local reference implementation uses SQLite and filesystem content storage. PostgreSQL and S3-compatible adapters are not yet verified against live services.
 - PostgreSQL row conversion, SQL translation, and migrations have code-level coverage only; live connection, migration, concurrency, isolation, CRUD, and crash-recovery checks remain pending.
-- OpenSearch, Qdrant, OCR, embedding/reranking models, Temporal, and external observability are not configured.
+- OpenSearch, persistent Qdrant, Temporal, and external observability are not configured. Local Docling and Qwen inference are optional and require their separate fetch commands; neither proves live backend integration.
 - The sample corpus is a viewed, single-issuer public diagnostic set, not an independent acceptance set.
 - Do not place broker credentials, account documents, private research, or restricted source bytes in the public diagnostic store.
+
+## Shared CPU host resource template
+
+`deploy/systemd/raama.slice` caps the slice at 2000% aggregate CPU, sets `MemoryHigh=180000000000`, `MemoryMax=200000000000`, disables additional swap, and sets a separate `TasksMax=4096` process/thread budget. TasksMax is not a CPU count. The host must add an `AllowedCPUs` drop-in containing only the CPUs delegated to RAAMA; no host CPU list is assumed here. `deploy/systemd/raama-cpu.env` sets model and numerical-library threads to one per process and workbench request threads to four. These are templates only: place every RAAMA process in the same delegated slice and confirm effective `cpu.max`, `cpuset.cpus.effective`, memory, and task limits on the target host before starting heavy work. Per-process thread settings do not enforce the aggregate budget by themselves.

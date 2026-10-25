@@ -1,0 +1,150 @@
+# RAAMA：Git 迁移与无上下文 Linux CPU 验收交接
+
+日期：2026-10-25。本文是原工业级金融 RAG / Harness A–G 计划的新增交接要求，不替代原计划。
+
+**当前是准备中的交接契约，不是“本机工作全部完成”的证明。** 最终移交前必须更新本文的版本与证据表，提交、独立审核并核对授权备份分支。新对话不能把本文、旧测试数量或接口存在当作验收通过。
+
+## 1. 目标和必须保留的上下文
+
+产品是 A 股金融投资研究与组合分析 Agent。保留 BaoStock/AKShare 数据主线，市场、基本面、新闻、情绪/关注度专家，方案经理、确定性优化器、风控与执行账本。RAG 是共用的证据工具；投资经理只解释与汇总，不获得风险豁免、生产发布或发单权限。
+
+读取顺序：
+
+1. 仓库及上级适用的 `AGENTS.md`。
+2. `docs/RAAMA_INDUSTRIAL_RAG_IMPLEMENTATION_PLAN_20261025.md`。
+3. `docs/RAAMA_INDUSTRIAL_RAG_HARNESS_REDESIGN_PROPOSAL_20261024.md`。
+4. `docs/RAAMA_INDUSTRIAL_RAG_TRACEABILITY_20261025.md`。
+5. 本文、`docs/RAAMA_INDUSTRIAL_RAG_OPERATIONS_20261025.md`。
+6. 原金融契约 `docs/RAAMA_REQUIREMENTS_TRACEABILITY_20261024.md` 与 `docs/RAAMA_RISK_PROFILE_20261024.md`。
+
+本机聊天记录和 `.tmp` 下监督记录不会随 Git 上传。必须将新对话所需的结论、失败复现、模型/依赖版本和待测项整理进可提交的文档、测试和脱敏报告；不能引用一个远端不存在的 Windows 文件作为唯一证据。
+
+研究代码不得读取 `test.csv`。保留 `experiments/**`、历史冻结记录、用户文件和既有服务。权限、实体、时间点可见性、风险档案、含费现金与账本约束不得因迁移退化。公开文档本次下载时间不等于历史已捕获时间。真实未来收益、专家独立盲标和生产规模效果继续单列待积累。
+
+## 2. 服务器边界
+
+用户提供的是多人共享 CPU 服务器，机器有 128 核、总内存约 515415 MiB；项目授权上限只有 **20 核和 200G 内存**，无 GPU。
+
+保守地把 200G 解释为十进制 **200000000000 字节**，不是 200GiB。所有 RAAMA 进程合计受限：数据库、对象存储、检索、工作流、OCR/模型、解析进程、测试、构建和下载解压均计入。机器显示还有多少空闲内存不扩大授权。
+
+用户提供的 swap 已大量使用是共享机器的观测值，不能据此诊断某个进程，也不能清 swap、关闭主机 swap、重启或杀他人任务。
+
+开始运行前先检查发行版、Python/CPU 架构、磁盘与用户配额、端口、调度器、cgroup 版本和被委派的控制器、容器权限。检查仅针对本用户与项目，不读取其他用户数据。
+
+优先使用管理员已有的调度器/资源分配。例如 Slurm 分配应包括单节点、20 个 CPU，以及不超过上述字节上限的内存申请，并确认站点实际启用内存和 CPU 限制；不能只提交一个资源声明就认定内核已限制。
+
+没有调度器时，使用已获允许的独立项目 cgroup/slice。cgroup v2/systemd 的参考边界是：
+
+| 配置 | 项目总限制 | 含义 |
+|---|---:|---|
+| CPUQuota | 2000% | 合计最多相当于 20 个逻辑 CPU 的时间配额 |
+| MemoryHigh | 180000000000 | 达到此值时提前回收/施压 |
+| MemoryMax | 200000000000 | 项目内存硬上限 |
+| MemorySwapMax | 0 | 不新增使用共享 swap，须检查内核及控制器支持 |
+| CPU affinity / cpuset | 管理员实际分配的 CPU 集合 | 若要求最多使用指定 20 核，还需与 CPUQuota 一起限制 |
+
+上述是待实际验证的资源契约，不是已经部署的配置。CPUQuota 限制 CPU 时间，并不独自保证线程从不在超过 20 个 CPU 上调度。不得擅自选机器的 CPU 0–19 当作自己的独占 CPU。
+
+**必须检查所有服务 PID 的实际 cgroup 和生效值。** 只对终端运行 `systemd-run` 不保证共享 Docker daemon 创建的容器被纳入；每个容器各限 20 核/200G 也会令总量超限。容器与原生进程必须纳入同一受控分配，或使用经核验总和不超限的分配并保留应用/测试预算。无法强制总限制时先处理这一阻塞，再启动重任务。
+
+数值库线程数、解析并发、模型 batch、JVM heap 是第二层保护，不能代替总 cgroup 限制。建议普通测试串行；批处理从少量 worker 开始；单模型 CPU 推理时再使用分配内的线程。禁止 `pytest -n auto` 或根据 `os.cpu_count()==128` 自动满载。多 worker 各自内部 20 线程会造成超订阅。索引/JVM 的堆外内存也要计入。
+
+## 3. Git 传递方式
+
+已授权的仓库和备份分支：
+
+- 仓库：`https://github.com/NyviaXiao/RAAMA-v0.git`
+- 分支：`backup/raama-implementation-20261024`
+
+目前该分支是经 GitHub 连接器创建的代码树快照，本地源码提交 SHA 与远端快照 SHA **不同**。验收要记录二者的映射和文件校验，不可要求两个 SHA 相等。不要直接把本机开发历史强推覆盖备份分支。
+
+最终交接需给出一个已核验远端完整 SHA。以下命令在服务器的本人新目录运行，不覆盖现有 checkout：
+
+```bash
+git clone --single-branch --branch backup/raama-implementation-20261024 \
+  https://github.com/NyviaXiao/RAAMA-v0.git raama-linux-acceptance
+cd raama-linux-acceptance
+git rev-parse HEAD
+git status --short
+git switch -c verify/linux-cpu-20261025
+```
+
+克隆后把 HEAD 与最终交接的远端 SHA 核对。若用户后来需要回到某次移交，先确认工作区干净，再检出明确 SHA；不使用 `reset --hard` 处理未知改动。私有仓库使用本人 SSH 凭据或 Git 凭据管理器，不把 token 放进 URL、聊天或脚本。
+
+Git 仅传源码、配置模板、依赖锁、schema、测试、允许上传的测试标注与脱敏报告/方案。不会传 Windows `.venv`、原文 PDF、模型权重、本地数据库、账户、密钥或 `.tmp`。依赖在 Linux 重新建环境；公开语料与模型按 URL、明确 revision、hash 和使用边界重新获取。运行状态若需迁移，必须有单独审过的导出/导入与兼容性校验，不把复制 SQLite 文件当作完整状态迁移。
+
+## 4. VS Code 与新 Codex 对话
+
+1. 本地 VS Code 使用 Remote–SSH 连接自己的 Linux 用户。
+2. 打开远端 `raama-linux-acceptance` 仓库目录，确认集成终端中的 `pwd`、`hostname` 和 `git rev-parse HEAD` 都是目标服务器及目标版本。
+3. 在扩展视图确认 Codex 对当前 SSH 工作区可用；需要安装到远端的扩展按 VS Code 提示安装，使用本人账号登录。不依赖本机原聊天自动同步上下文。
+4. 把第 8 节的接手提示词发给新对话。要求它先读文件并复述状态/边界，再执行资源探测与分阶段验收。
+5. Web 工作台只绑定服务器 loopback，通过 VS Code Ports/SSH 隧道访问，不公开绑定共享服务器网络。
+
+不要把本机自动恢复许可当成远端新对话的额度授权。此处本机新增两次恢复由父监督计数；远端后续如何持续工作由用户在该对话中明确。
+
+## 5. 当前版本与证据；最终移交前须刷新
+
+| 项目 | 本文初稿时的已核验状态 |
+|---|---|
+| 原金融/风险输入基线 | 本地 `420cc4f4dc26f875d568095da0fa6ed79e35732a`，父独立 302 项通过 |
+| 新 RAG 初始 A/B 检查点 | `d31bcbb5432ce8782799a43eae4b825684a66d43`，父精确归档全 316 项通过，另发现 4 项负例缺陷 |
+| 4 项修复 | `c06a102cccecc4f6748eb6b7fbed4f560a599631`，父精确归档相关 82 项通过，4 项负例均复核修复 |
+| 最新已核验远端快照 | `0258e27b90ee36d447a5e6f9d1cd5defc86e74b4` / tree `b05ffc11101f7648e150d3c1d389bf72f8192dce`，对应本地 57beaa3；7 个改动 blob 核对一致，后续最终交接以新映射为准 |
+| 新的桥接与解析增量 | `57beaa3` 父精确归档相关 85 项通过；独立探针确认省略 limit、重复及改写同证据检索修复；另发现 Office 宏包隔离的大小写缺陷 C-P1-01，已要求修复。该备份是注明缺陷的检查点，不是阶段总验收 |
+| 本机全部无服务工作 | 仍在实施，尚未验收，不应立即把当前 HEAD 当最终移交版 |
+
+测试数量是不同提交上的历史证据，不能相加，也不能替代 Linux 新环境的相关回归。最终还需登记：最终本地源码 SHA、远端快照 SHA/tree、Python/依赖锁 hash、模型 revision/指令 hash、语料 manifest、逐项通过/失败/未执行、失败复现及工件路径。供新对话阅读的证据不能仅存在被忽略的 `.tmp`。
+
+## 6. 服务器验收顺序
+
+下表是任务顺序，不宣称所有对应命令已经实现。新对话按当时提交的 CLI 帮助、操作文档和测试入口执行，不能凭空杜撰成功命令。
+
+1. **版本与资源预检**：Git SHA、工作区状态、资源总限、CPU-only、磁盘/端口/代理与依赖下载可用性。没有隔离资源不得开始模型/索引重任务。
+2. **锁定环境和普通回归**：先在获准环境内安装/验证 uv，Python 参考本机 3.12，使用仓库锁文件。初稿实际存在的基础命令：
+
+   ```bash
+   uv sync --locked --extra dev
+   uv run --locked python -m pytest -p no:cacheprovider -q
+   uv run --locked raama-rag --help
+   uv run --locked raama-rag status
+   ```
+
+   这些是已存在入口的 Linux 待运行命令，本文没有在服务器执行。随后只按实际定义安装 postgres/object-storage/OCR/model 等 extras；禁止 `--all-extras` 盲目装 GPU 运行时。不得为绕过失败临时改锁或吞异常。
+3. **真实解析与模型**：按 manifest 获取公开资料；验证原生、扫描中文、多页表、单位/期间/负数和源坐标；实际 CPU Embedding、cross-encoder、视觉模型逐个记录 revision、输出、延迟、内存。没有 GPU 不表示不能运行 CPU 模型，但 CPU 结果不能声称 GPU 性能验证，GPU-only 算子须明确待替代/待验证。
+4. **真实存储**：PostgreSQL 迁移/CRUD/并发/隔离/outbox 过期 lease；真实 S3 兼容服务内容校验/并发/恢复。先核查独立服务名、数据卷、loopback 端口，不能碰他人资源。
+5. **真实索引与检索**：OpenSearch/Qdrant 实际建索引和物理 receipt；多路融合/重排、权限撤销、时间快照、分页/取消/背压，半建索引不可发布。内存适配或参考 BM25 不能冒充真实后端通过。
+6. **真实持久流程**：Temporal 工作流与独立 worker；杀本项目 worker、超时/重复/恢复/对账/死信；版本不匹配恢复拒绝和完整回滚。确认无重复业务副作用。
+7. **端到端及浏览器**：真实来源→解析→索引→专家/方案经理→证据/计算校验→风险/账本→评价→有界候选→接受或拒绝→回滚；桌面与窄屏、失败与无答案路径，绑定真实 API。
+8. **报告**：按 A01–G05 与 20 模块矩阵登记；七层指标、同题消融、样本量、分组、延迟/内存/故障结果。CPU 单机 20 核结果只代表该环境。未来成熟收益、专家盲标和生产多机规模证据仍保持 pending。
+
+共享机器可能不允许 Docker，服务器上有 Linux 并不等于已有容器权限。优先使用管理员提供的隔离服务或获准 rootless 环境；需要安装系统服务、改主机参数或新增权限时先向用户/管理员交接。不得为了 OpenSearch 等依赖要求直接修改共享主机 sysctl。
+
+## 7. 完成判据和 Git 回传
+
+每项记录代码版本、命令、退出码、输入/模型/索引标识、实际输出和正反例。服务不可用保留 blocked 与脱敏原因；skip 不算 pass。测试发现实现问题时修复并提交，别只修改文档把结果写绿。禁止虚构准确率、收益提升或生产可用性。
+
+服务器在独立验证分支上工作。推回前审查只包含本次源码/配置/测试/锁/脱敏文档；不上传运行库、模型或秘密。用户对现有备份分支的授权不自动扩大成对新分支/目标的上传授权。保留完整回滚点，不触及生产 pointer、真实券商或交易。
+
+## 8. 可直接发给远端新 Codex 的启动提示词
+
+```text
+你正在接手 RAAMA 的 Linux CPU 真实集成与最终测试。本对话没有之前上下文；以仓库文件和实际运行证据为准，不要假定计划已经实现。
+
+先读适用 AGENTS.md，再读 docs/RAAMA_REMOTE_CPU_HANDOFF_20261025.md，按它的读取顺序读工业 RAG/Harness A-G 计划、proposal、追踪矩阵、操作说明和原金融/风险契约。检查 git HEAD 与交接表，先报告当前已核验/仍待测/仍未实现项目，不重复把历史数量当本机通过。
+
+这是多人共享 CPU 服务器：机器128核，但本项目所有应用、测试、数据库、索引、模型、解析及容器合计最多20核、内存200000000000字节，无GPU。先探测发行版/调度器/cgroup委派/磁盘配额/端口，并核验总硬资源限制。不要根据全机空闲内存或os.cpu_count扩大使用；不要只设OMP线程就当限制已生效。无法隔离总资源先说明阻塞，继续轻量只读工作。
+
+保留金融主线、权限/PIT/风险档案/含费现金/优化器/数量账本及发布门禁；研究不读test.csv，不修改历史experiments/冻结记录。原文/模型/数据库不在Git，请按锁定manifest获取。只绑定loopback并通过SSH隧道看工作台。不要改共享主机参数/重启/停他人任务/清理他人容器，系统权限问题交接。
+
+按交接文档分阶段实际执行：Linux回归、真实OCR/Embedding/reranker、PG/S3、OpenSearch/Qdrant、Temporal与杀worker恢复、真实API和浏览器、七层评价与消融。测试暴露代码问题则修复，不能用桩/静态页面或文档代替功能。按逐需求ID保存可重放脱敏证据；未执行/失败/通过分开；未来收益、专家独立盲标和生产规模效果诚实pending。每个稳定阶段提交并更新交接和追踪矩阵。上传新分支或目标前确认我的授权范围，不上传秘密/账户/原文/权重/运行库。
+```
+
+## 9. 核对过的官方说明
+
+- Codex IDE 扩展：https://learn.chatgpt.com/docs/ide
+- Codex AGENTS.md 指令发现：https://learn.chatgpt.com/docs/agent-configuration/agents-md
+- VS Code Remote–SSH、扩展位置与端口转发：https://code.visualstudio.com/docs/remote/ssh
+- systemd/cgroup 资源控制：https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html
+
+服务器 systemd/内核/扩展版本需现场核对；上述资源配置未经目标服务器验证，不能直接认定可执行或已生效。

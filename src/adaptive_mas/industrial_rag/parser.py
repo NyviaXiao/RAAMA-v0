@@ -20,6 +20,10 @@ from typing import Any, Mapping, Sequence
 from xml.etree import ElementTree
 
 from adaptive_mas.industrial_rag.models import Block, Section, Span, Table, TableCell
+from adaptive_mas.runtime_limits import apply_thread_limits, process_thread_limit
+
+
+apply_thread_limits()
 
 
 MAX_INPUT_BYTES = 100 * 1024 * 1024
@@ -211,6 +215,7 @@ def _table_row_group_blocks(tables: Sequence[Mapping[str, Any]], cells: Sequence
                 "table_id": table_id,
                 "row_start": row_index,
                 "row_end": row_index,
+                "quarantine_reason": table.get("row_group_quarantine_reason"),
             }
             if prior is not None:
                 prior["next_block_id"] = block_id
@@ -314,7 +319,14 @@ def _xlsx_rows(zipped: zipfile.ZipFile) -> list[list[list[str]]]:
     return output
 
 
-def _parse_bytes(payload: bytes, filename: str) -> dict[str, Any]:
+def _parse_bytes(
+    payload: bytes,
+    filename: str,
+    *,
+    pdf_backend: str = "pypdf",
+    docling_artifacts_path: str | Path | None = None,
+    parser_timeout_seconds: float = 300,
+) -> dict[str, Any]:
     if not payload:
         raise ParseError("source document is empty")
     if len(payload) > MAX_INPUT_BYTES:
@@ -330,6 +342,19 @@ def _parse_bytes(payload: bytes, filename: str) -> dict[str, Any]:
     parser_confidence = 1.0
 
     if suffix == ".pdf":
+        if pdf_backend not in {"pypdf", "docling"}:
+            raise ValueError("pdf_backend must be 'pypdf' or 'docling'")
+        if pdf_backend == "docling":
+            if docling_artifacts_path is None:
+                raise ParseError("Docling model asset directory is required for the local OCR/layout backend")
+            from adaptive_mas.industrial_rag.document_ai import parse_pdf_with_docling
+
+            return parse_pdf_with_docling(
+                payload,
+                asset_dir=docling_artifacts_path,
+                max_pages=MAX_PDF_PAGES,
+                timeout_seconds=parser_timeout_seconds,
+            )
         try:
             import logging
             logging.getLogger("pypdf").setLevel(logging.ERROR)
@@ -467,9 +492,23 @@ def _parse_bytes(payload: bytes, filename: str) -> dict[str, Any]:
     }
 
 
-def _worker_main(input_path: Path, output_path: Path, filename: str) -> int:
+def _worker_main(
+    input_path: Path,
+    output_path: Path,
+    filename: str,
+    *,
+    pdf_backend: str = "pypdf",
+    docling_artifacts_path: str | None = None,
+    parser_timeout_seconds: float = 300,
+) -> int:
     try:
-        result = _parse_bytes(input_path.read_bytes(), filename)
+        result = _parse_bytes(
+            input_path.read_bytes(),
+            filename,
+            pdf_backend=pdf_backend,
+            docling_artifacts_path=docling_artifacts_path,
+            parser_timeout_seconds=parser_timeout_seconds,
+        )
         output_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
         return 0
     except Exception as error:
@@ -485,11 +524,16 @@ def parse_isolated(
     scratch_root: str | Path,
     timeout_seconds: float = 45,
     max_input_bytes: int = MAX_INPUT_BYTES,
+    pdf_backend: str = "pypdf",
+    docling_artifacts_path: str | Path | None = None,
+    parser_timeout_seconds: float = 300,
 ) -> dict[str, Any]:
     """Run untrusted source parsing in a time-bounded child process with no network API."""
     if not payload or len(payload) > max_input_bytes:
         raise ParseError("source is empty or exceeds the configured byte limit")
     suffix = Path(filename).suffix.lower()
+    if pdf_backend not in {"pypdf", "docling"}:
+        raise ValueError("pdf_backend must be 'pypdf' or 'docling'")
     allowed = {".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md", ".markdown", ".html", ".htm", ".csv", ".json", ".xbrl", ".xml", ".docx", ".pptx", ".xlsx"}
     if suffix not in allowed:
         raise UnsupportedFormat(f"file type {suffix or '(no extension)'} is not supported")
@@ -502,13 +546,27 @@ def parse_isolated(
         module_root = Path(__file__).resolve().parents[3]
         environment = {
             key: os.environ[key]
-            for key in ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP")
+            for key in ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE", "HOME", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "APPDATA")
             if key in os.environ
         }
         environment["PYTHONIOENCODING"] = "utf-8"
+        environment["RAAMA_PROCESS_THREADS"] = str(process_thread_limit())
+        for variable in (
+            "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS",
+        ):
+            environment[variable] = str(process_thread_limit())
+        environment["TOKENIZERS_PARALLELISM"] = "false"
         existing_pythonpath = os.environ.get("PYTHONPATH")
         environment["PYTHONPATH"] = str(module_root) if not existing_pythonpath else str(module_root) + os.pathsep + existing_pythonpath
-        command = [sys.executable, "-m", "adaptive_mas.industrial_rag.parser", "--worker", str(input_path), str(output_path), Path(filename).name]
+        command = [
+            sys.executable, "-m", "adaptive_mas.industrial_rag.parser",
+            "--worker", str(input_path), str(output_path), Path(filename).name,
+            "--pdf-backend", pdf_backend,
+            "--parser-timeout-seconds", str(parser_timeout_seconds),
+        ]
+        if docling_artifacts_path is not None:
+            command.extend(["--docling-artifacts", str(Path(docling_artifacts_path).resolve())])
         try:
             subprocess.run(command, cwd=module_root, env=environment, timeout=timeout_seconds, check=True, capture_output=True)
         except subprocess.TimeoutExpired:
@@ -599,6 +657,12 @@ def records_from_parse(result: Mapping[str, Any], version_id: str) -> dict[str, 
         previous_raw = raw.get("previous_block_id")
         next_raw = raw.get("next_block_id")
         raw_table_id = raw.get("table_id")
+        raw_bbox = raw.get("bbox")
+        bbox = None
+        if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
+            parsed_bbox = tuple(float(value) for value in raw_bbox)
+            if parsed_bbox[2] >= parsed_bbox[0] and parsed_bbox[3] >= parsed_bbox[1]:
+                bbox = parsed_bbox
         if raw_table_id is not None and str(raw_table_id) not in table_ids:
             raise ParseError("parser block references a missing table")
         blocks.append(Block(
@@ -612,6 +676,7 @@ def records_from_parse(result: Mapping[str, Any], version_id: str) -> dict[str, 
             table_id=table_ids.get(str(raw_table_id)) if raw_table_id is not None else None,
             row_start=int(raw["row_start"]) if raw.get("row_start") is not None else None,
             row_end=int(raw["row_end"]) if raw.get("row_end") is not None else None,
+            bbox=bbox,
             parser_confidence=float(raw["parser_confidence"]) if raw.get("parser_confidence") is not None else None,
             quarantine_reason=raw.get("quarantine_reason"),
             span_id=f"span-{safe}-{raw['block_id']}" if text and source_text_exact else None,
@@ -619,7 +684,7 @@ def records_from_parse(result: Mapping[str, Any], version_id: str) -> dict[str, 
         if text and source_text_exact:
             spans.append(Span(
                 span_id=f"span-{safe}-{raw['block_id']}", version_id=version_id,
-                page_number=page_number, char_start=char_start, char_end=char_end, text=text,
+                page_number=page_number, char_start=char_start, char_end=char_end, text=text, bbox=bbox,
             ))
     tables: list[Table] = []
     for raw in result.get("tables", []):
@@ -653,10 +718,18 @@ def records_from_parse(result: Mapping[str, Any], version_id: str) -> dict[str, 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--pdf-backend", choices=["pypdf", "docling"], default="pypdf")
+    parser.add_argument("--docling-artifacts", type=Path)
+    parser.add_argument("--parser-timeout-seconds", type=float, default=300)
     parser.add_argument("input_path", nargs="?")
     parser.add_argument("output_path", nargs="?")
     parser.add_argument("filename", nargs="?")
     arguments = parser.parse_args()
     if not arguments.worker or not arguments.input_path or not arguments.output_path or not arguments.filename:
         raise SystemExit("parser worker arguments are incomplete")
-    raise SystemExit(_worker_main(Path(arguments.input_path), Path(arguments.output_path), arguments.filename))
+    raise SystemExit(_worker_main(
+        Path(arguments.input_path), Path(arguments.output_path), arguments.filename,
+        pdf_backend=arguments.pdf_backend,
+        docling_artifacts_path=str(arguments.docling_artifacts) if arguments.docling_artifacts else None,
+        parser_timeout_seconds=arguments.parser_timeout_seconds,
+    ))

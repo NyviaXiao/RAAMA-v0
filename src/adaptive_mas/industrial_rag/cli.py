@@ -10,8 +10,11 @@ from pathlib import Path
 from typing import Mapping
 
 from adaptive_mas.industrial_rag.models import CorpusReleaseSpec, Document, DocumentBundle, DocumentVersion
+from adaptive_mas.industrial_rag.document_ai import download_docling_assets
+from adaptive_mas.industrial_rag.evaluation import evaluate_manifest
 from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore
 from adaptive_mas.industrial_rag.parser import parse_isolated, records_from_parse
+from adaptive_mas.industrial_rag.qwen_models import download_qwen_models
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore
 from adaptive_mas.industrial_rag.web import serve
 from adaptive_mas.research_provenance import stable_hash
@@ -42,6 +45,8 @@ def ingest_file(
     database_path: str | Path,
     object_root: str | Path,
     scratch_root: str | Path,
+    pdf_backend: str = "pypdf",
+    docling_artifacts_path: str | Path | None = None,
 ) -> dict[str, object]:
     source = Path(source_path).resolve()
     if not source.is_file():
@@ -59,7 +64,15 @@ def ingest_file(
         raise ValueError("source metadata contains unknown or unsupported fields")
     if metadata.get("expected_sha256") and metadata["expected_sha256"] != digest:
         raise ValueError("local source SHA-256 does not match the supplied manifest")
-    parsed = parse_isolated(payload, source.name, scratch_root=scratch_root)
+    parsed = parse_isolated(
+        payload,
+        source.name,
+        scratch_root=scratch_root,
+        pdf_backend=pdf_backend,
+        docling_artifacts_path=docling_artifacts_path,
+        timeout_seconds=330 if pdf_backend == "docling" else 45,
+        parser_timeout_seconds=300,
+    )
     captured_at = _now()
     version_id = str(metadata.get("version_id") or f"v-{digest[:24]}")
     document = Document(
@@ -188,6 +201,7 @@ def main() -> None:
     serve_parser.add_argument("--port", type=int, default=8877)
     serve_parser.add_argument("--principal-id", default="local-public")
     serve_parser.add_argument("--time-mode", choices=["strict_forward", "retrospective_diagnostic"], default="strict_forward")
+    serve_parser.add_argument("--qwen-models", type=Path)
 
     ingest_parser = subparsers.add_parser("ingest", help="parse and register one source with explicit provenance metadata")
     ingest_parser.add_argument("--source", type=Path, required=True)
@@ -195,6 +209,19 @@ def main() -> None:
     ingest_parser.add_argument("--database", type=Path, default=default_supervision / "industrial_rag.sqlite3")
     ingest_parser.add_argument("--objects", type=Path, default=default_supervision / "objects")
     ingest_parser.add_argument("--scratch", type=Path, default=default_supervision / "parser_scratch")
+    ingest_parser.add_argument("--pdf-backend", choices=["pypdf", "docling"], default="pypdf")
+    ingest_parser.add_argument("--docling-assets", type=Path, default=default_supervision / "docling-assets")
+
+    models_parser = subparsers.add_parser("fetch-docling-models", help="explicitly fetch the pinned local PDF OCR/layout/table models")
+    models_parser.add_argument("--output", type=Path, default=default_supervision / "docling-assets")
+
+    qwen_parser = subparsers.add_parser("fetch-qwen-models", help="explicitly fetch the pinned local embedding and reranker models")
+    qwen_parser.add_argument("--output", type=Path, default=default_supervision / "qwen-models")
+
+    evaluation_parser = subparsers.add_parser("evaluate", help="score a stored prediction file against a frozen QA manifest offline")
+    evaluation_parser.add_argument("--manifest", type=Path, required=True)
+    evaluation_parser.add_argument("--predictions", type=Path, required=True)
+    evaluation_parser.add_argument("--output", type=Path)
 
     release_parser = subparsers.add_parser("release", help="build, verify and publish an immutable local corpus release")
     release_parser.add_argument("--release-id", required=True)
@@ -218,11 +245,23 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "serve":
         serve(database_path=args.database, object_root=args.objects, host=args.host, port=args.port,
-              principal_id=args.principal_id, time_mode=args.time_mode)
+              principal_id=args.principal_id, time_mode=args.time_mode,
+              qwen_model_dir=args.qwen_models)
         return
-    if args.command == "ingest":
+    if args.command == "fetch-docling-models":
+        result = download_docling_assets(args.output)
+    elif args.command == "fetch-qwen-models":
+        result = download_qwen_models(args.output)
+    elif args.command == "evaluate":
+        result = evaluate_manifest(args.manifest, args.predictions)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    elif args.command == "ingest":
         result = ingest_file(source_path=args.source, metadata_path=args.metadata, database_path=args.database,
-                             object_root=args.objects, scratch_root=args.scratch)
+                             object_root=args.objects, scratch_root=args.scratch,
+                             pdf_backend=args.pdf_backend,
+                             docling_artifacts_path=args.docling_assets if args.pdf_backend == "docling" else None)
     elif args.command == "release":
         result = build_release(release_id=args.release_id, version_ids=args.version_id,
                                database_path=args.database, object_root=args.objects,

@@ -225,9 +225,14 @@ class IndustrialRagService:
                 channel_results[channel] = self._toc_results(plan, blocks, version_by_id)
                 channel_status[channel] = {"status": "available", "implementation": "section_and_page_block_reference", "candidate_count": len(channel_results[channel])}
             elif channel in self.channel_adapters:
-                adapted = list(self.channel_adapters[channel](plan, version_ids))
+                adapter = self.channel_adapters[channel]
+                adapted = list(adapter(plan, version_ids))
                 channel_results[channel] = adapted[: plan.top_k * 5]
-                channel_status[channel] = {"status": "available", "implementation": "configured_external_adapter", "candidate_count": len(adapted)}
+                channel_status[channel] = {
+                    "status": "available",
+                    "implementation": getattr(adapter, "implementation", "configured_external_adapter"),
+                    "candidate_count": len(adapted),
+                }
             else:
                 channel_results[channel] = []
                 channel_status[channel] = {"status": "unavailable", "reason": self._unavailable_reason(channel)}
@@ -240,7 +245,11 @@ class IndustrialRagService:
             if any(item.evidence_id not in allowed_ids for item in reranked):
                 raise ValueError("reranker returned evidence outside the retrieved candidate set")
             fused = reranked[: plan.top_k]
-            rerank_status = {"status": "available", "implementation": "configured_cross_encoder_adapter", "scores_are_probabilities": False}
+            rerank_status = {
+                "status": "available",
+                "implementation": getattr(self.reranker, "implementation", "configured_cross_encoder_adapter"),
+                "scores_are_probabilities": False,
+            }
         else:
             fused = fused[: plan.top_k]
             rerank_status = {"status": "unavailable", "reason": "no independently versioned cross-encoder reranker configured"}
@@ -394,6 +403,13 @@ class IndustrialRagService:
                     "column_index": int(cell["column_index"]),
                     "page_number": cell["page_number"],
                     "raw_text": str(cell["raw_text"]),
+                    "normalized_value": cell["normalized_value"],
+                    "value_kind": str(cell["value_kind"]),
+                    "unit": cell["unit"] or table["unit_text"],
+                    "multiplier": cell["multiplier"],
+                    "currency": cell["currency"],
+                    "accounting_basis": cell["accounting_basis"] or table["table_accounting_basis"],
+                    "report_period": cell["report_period"] or table["table_report_period"],
                 }
                 for cell in used_cells
             ],

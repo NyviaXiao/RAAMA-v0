@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 from adaptive_mas.industrial_rag.models import QueryPlan
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore, ReleaseNotReady
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
+from adaptive_mas.runtime_limits import http_thread_limit
 
 
 def _json(value: object) -> bytes:
@@ -172,7 +173,32 @@ class LocalRagHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler]):
         self.address_family = socket.AF_INET6 if ":" in server_address[0] else socket.AF_INET
+        self._request_slots = threading.BoundedSemaphore(http_thread_limit())
         super().__init__(server_address, handler_class)
+
+    def process_request(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            finally:
+                request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
 
 def serve(
@@ -183,6 +209,7 @@ def serve(
     port: int = 8877,
     principal_id: str = "local-public",
     time_mode: str = "strict_forward",
+    qwen_model_dir: str | Path | None = None,
 ) -> None:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("RAG API must bind to a loopback interface")
@@ -191,7 +218,18 @@ def serve(
     from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore
 
     store = IndustrialRagStore(database_path, LocalContentAddressedStore(object_root))
-    service = IndustrialRagService(store, allow_retrospective_diagnostic=time_mode == "retrospective_diagnostic")
+    channel_adapters = None
+    reranker = None
+    if qwen_model_dir is not None:
+        from adaptive_mas.industrial_rag.qwen_models import create_local_qwen_adapters
+
+        channel_adapters, reranker = create_local_qwen_adapters(store, qwen_model_dir)
+    service = IndustrialRagService(
+        store,
+        channel_adapters=channel_adapters,
+        reranker=reranker,
+        allow_retrospective_diagnostic=time_mode == "retrospective_diagnostic",
+    )
     server = LocalRagHTTPServer((host, port), RagRequestHandler)
     server.context = {"store": store, "service": service, "principal_id": principal_id, "time_mode": time_mode}
     print(f"RAAMA 金融资料工作台已启动：http://{host}:{port}")

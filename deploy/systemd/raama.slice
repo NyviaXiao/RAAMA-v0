@@ -1,0 +1,17 @@
+# Install as a delegated project slice and place every RAAMA service/container
+# process in this slice. Do not attach unrelated services or assume this file is
+# active until the host confirms the effective cgroup values. The host must set
+# AllowedCPUs in a drop-in to the CPUs delegated specifically to RAAMA. Do not
+# choose a CPU list until the host allocation is known.
+[Unit]
+Description=RAAMA shared-host resource allocation
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=2000%
+MemoryAccounting=yes
+MemoryHigh=180000000000
+MemoryMax=200000000000
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=4096

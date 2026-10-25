@@ -24,9 +24,9 @@
         "type": "object", "additionalProperties": false,
         "required": ["source_id", "content_sha256", "page_number", "evidence_type", "metric"],
         "properties": {
-          "source_id": {"type": ["string", "null"]},
-          "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-          "page_number": {"type": ["integer", "null"], "minimum": 1},
+          "source_id": {"type": "string", "minLength": 1},
+          "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "page_number": {"type": "integer", "minimum": 1},
           "evidence_type": {"enum": ["fact", "table", "cell", "span", "paragraph", "refutation", "permission", "time"]},
           "metric": {"type": ["string", "null"]},
           "raw_value": {"type": ["string", "null"]},
@@ -36,9 +36,26 @@
           "currency": {"type": ["string", "null"]},
           "report_period": {"type": ["string", "null"]},
           "accounting_basis": {"type": ["string", "null"]},
-          "cell_reference": {"type": ["string", "null"]},
+          "table_id": {"type": ["string", "null"]},
+          "row_index": {"type": ["integer", "null"], "minimum": 0},
+          "column_index": {"type": ["integer", "null"], "minimum": 0},
+          "row_start": {"type": ["integer", "null"], "minimum": 0},
+          "row_end": {"type": ["integer", "null"], "minimum": 0},
+          "fact_id": {"type": ["string", "null"]},
+          "span_id": {"type": ["string", "null"]},
+          "char_start": {"type": ["integer", "null"], "minimum": 0},
+          "char_end": {"type": ["integer", "null"], "minimum": 0},
+          "evidence_record_id": {"type": ["string", "null"]},
+          "cell_reference": {"type": ["string", "null"], "pattern": "^r[0-9]+c[0-9]+$"},
           "annotation_note": {"type": ["string", "null"]}
-        }
+        },
+        "allOf": [
+          {"if": {"properties": {"evidence_type": {"const": "cell"}}}, "then": {"required": ["table_id", "row_index", "column_index"], "properties": {"table_id": {"type": "string", "minLength": 1}, "row_index": {"type": "integer", "minimum": 0}, "column_index": {"type": "integer", "minimum": 0}}}},
+          {"if": {"properties": {"evidence_type": {"const": "table"}}}, "then": {"required": ["table_id"], "properties": {"table_id": {"type": "string", "minLength": 1}}, "anyOf": [{"required": ["row_index"], "properties": {"row_index": {"type": "integer", "minimum": 0}}}, {"required": ["row_start", "row_end"], "properties": {"row_start": {"type": "integer", "minimum": 0}, "row_end": {"type": "integer", "minimum": 0}}}]}},
+          {"if": {"properties": {"evidence_type": {"const": "fact"}}}, "then": {"required": ["fact_id"], "properties": {"fact_id": {"type": "string", "minLength": 1}}}},
+          {"if": {"properties": {"evidence_type": {"enum": ["span", "paragraph", "refutation"]}}}, "then": {"anyOf": [{"required": ["span_id"], "properties": {"span_id": {"type": "string", "minLength": 1}}}, {"required": ["char_start", "char_end"], "properties": {"char_start": {"type": "integer", "minimum": 0}, "char_end": {"type": "integer", "minimum": 0}}}]}},
+          {"if": {"properties": {"evidence_type": {"enum": ["permission", "time"]}}}, "then": {"required": ["evidence_record_id"], "properties": {"evidence_record_id": {"type": "string", "minLength": 1}}}}
+        ]
       }
     },
     "expected_claims": {"type": "array", "items": {"type": "string"}},

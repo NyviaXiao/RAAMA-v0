@@ -31,6 +31,20 @@ observability = [
 verification = ["scipy>=1.14,<2"]
 postgres = ["psycopg[binary]==3.3.6"]
 object-storage = ["boto3==1.43.118"]
+document-ai = [
+    "docling[rapidocr]==2.129.0",
+    "rapidocr==3.9.2",
+    "torch==2.14.1",
+    "transformers==5.20.2",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [tool.setuptools]
 package-dir = {"" = "src"}
