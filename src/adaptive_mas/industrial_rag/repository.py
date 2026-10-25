@@ -185,11 +185,27 @@ class IndustrialRagStore:
             raise ContractError("table cell references an absent table")
         if any(fact.security_code != document.security_code for fact in bundle.facts):
             raise ContractError("fact security code must match its parent document")
+        if any(fact.entity_name != document.entity_name for fact in bundle.facts):
+            raise ContractError("fact entity must match its parent document")
+        if any(fact.consolidation != document.accounting_basis for fact in bundle.facts):
+            raise ContractError("fact accounting basis must match its parent document")
         if version.parser_status != "parsed" and any((bundle.blocks, bundle.sections, bundle.spans, bundle.tables, bundle.cells, bundle.facts)):
             raise ContractError("quarantined or unavailable versions cannot persist searchable content")
         span_ids = {item.span_id for item in bundle.spans}
         if any(block.span_id is not None and block.span_id not in span_ids for block in bundle.blocks):
             raise ContractError("block source span reference is missing")
+        spans_by_id = {item.span_id: item for item in bundle.spans}
+        for fact in bundle.facts:
+            for span_id in fact.span_ids:
+                span = spans_by_id.get(span_id)
+                if (
+                    span is None
+                    or span.version_id != version.version_id
+                    or span.page_number is None
+                    or not span.text.strip()
+                    or span.char_end <= span.char_start
+                ):
+                    raise ContractError("financial fact must cite an existing, nonempty, locatable span from the same version")
         object_hash = self.object_store.put(bundle.payload)
         if object_hash != version.content_sha256:
             raise ObjectStoreError("object store returned a different content hash")
@@ -207,10 +223,18 @@ class IndustrialRagStore:
                     if (
                         existing["source_id"] != version.source_id
                         or existing["version_id"] != version.version_id
+                        or existing["document_id"] != document.document_id
                         or existing["content_sha256"] != version.content_sha256
                         or existing["metadata_json"] != _json(version_data)
                     ):
                         raise ImmutableConflict("source/version identity was reused with changed bytes or metadata")
+                    prior_document = connection.execute(
+                        "SELECT metadata_json FROM rag_documents WHERE document_id=?",
+                        (document.document_id,),
+                    ).fetchone()
+                    if prior_document is None or prior_document["metadata_json"] != _json(metadata):
+                        raise ImmutableConflict("document identity was reused with changed metadata")
+                    self._verify_existing_children(connection, bundle)
                     connection.commit()
                     return {"status": "reused", "document_id": document.document_id, "version_id": version.version_id, "content_sha256": version.content_sha256}
                 prior_document = connection.execute("SELECT * FROM rag_documents WHERE document_id=?", (document.document_id,)).fetchone()
@@ -264,6 +288,31 @@ class IndustrialRagStore:
                 connection.rollback()
                 raise
         return {"status": "ingested", "document_id": document.document_id, "version_id": version.version_id, "content_sha256": version.content_sha256, "outbox_event_key": event_key}
+
+    @staticmethod
+    def _verify_existing_children(connection: sqlite3.Connection, bundle: DocumentBundle) -> None:
+        child_tables = (
+            ("rag_sections", "section_id", bundle.sections),
+            ("rag_spans", "span_id", bundle.spans),
+            ("rag_blocks", "block_id", bundle.blocks),
+            ("rag_tables", "table_id", bundle.tables),
+            ("rag_cells", "cell_id", bundle.cells),
+            ("rag_facts", "fact_id", bundle.facts),
+        )
+        for table, id_column, incoming in child_tables:
+            stored = {
+                str(row[id_column]): str(row["payload_json"])
+                for row in connection.execute(
+                    f"SELECT {id_column},payload_json FROM {table} WHERE version_id=?",
+                    (bundle.version.version_id,),
+                ).fetchall()
+            }
+            expected = {
+                str(getattr(item, id_column.removesuffix("_id") + "_id")): _json(_normalise_record(item))
+                for item in incoming
+            }
+            if stored != expected:
+                raise ImmutableConflict("source/version identity was reused with changed parsed child records")
 
     @staticmethod
     def _insert_children(connection: sqlite3.Connection, bundle: DocumentBundle) -> None:
@@ -394,11 +443,24 @@ class IndustrialRagStore:
     def _get_span(self, span_id: str) -> dict[str, object] | None:
         with closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT s.*,v.source_id,v.source_url,v.published_at,v.first_available_at,v.captured_at,v.ingested_at,v.content_sha256,d.document_id,d.title,d.security_code "
+                "SELECT s.*,v.source_id,v.source_url,v.published_at,v.first_available_at,v.captured_at,v.ingested_at,v.content_sha256,v.time_basis,d.document_id,d.title,d.security_code "
                 "FROM rag_spans s JOIN rag_document_versions v USING(version_id) JOIN rag_documents d USING(document_id) WHERE span_id=?",
                 (span_id,),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def read_spans(self, span_ids: Sequence[str]) -> list[dict[str, object]]:
+        if not span_ids:
+            return []
+        unique_ids = list(dict.fromkeys(span_ids))
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT s.*,v.source_id,v.source_url,v.published_at,v.first_available_at,v.captured_at,v.ingested_at,v.content_sha256,v.time_basis,d.document_id,d.title,d.security_code "
+                "FROM rag_spans s JOIN rag_document_versions v USING(version_id) JOIN rag_documents d USING(document_id) "
+                "WHERE s.span_id IN (" + ",".join("?" for _ in unique_ids) + ")",
+                unique_ids,
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def _get_document_bytes(self, document_id: str, version_id: str, principal_id: str) -> bytes:
         with closing(self._connect()) as connection:
@@ -702,9 +764,23 @@ class IndustrialRagStore:
                 return None
             connection.execute("UPDATE rag_outbox SET status='processing',consumer_id=?,lease_until=?,attempts=attempts+1 WHERE event_id=?", (consumer_id, now_epoch + lease_seconds, row["event_id"]))
             connection.commit()
-        return {"event_id": int(row["event_id"]), "event_key": row["event_key"], "event_type": row["event_type"], "payload": json.loads(row["payload_json"]), "attempt": int(row["attempts"]) + 1, "consumer_id": consumer_id}
+        generation = int(row["attempts"]) + 1
+        return {
+            "event_id": int(row["event_id"]), "event_key": row["event_key"],
+            "event_type": row["event_type"], "payload": json.loads(row["payload_json"]),
+            "attempt": generation, "lease_generation": generation, "consumer_id": consumer_id,
+        }
 
-    def finish_outbox(self, event_key: str, consumer_id: str, result: Mapping[str, object]) -> bool:
+    def finish_outbox(
+        self,
+        event_key: str,
+        consumer_id: str,
+        result: Mapping[str, object],
+        *,
+        lease_generation: int,
+    ) -> bool:
+        if lease_generation < 1:
+            raise ValueError("lease_generation must be positive")
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM rag_outbox WHERE event_key=?", (event_key,)).fetchone()
@@ -715,7 +791,13 @@ class IndustrialRagStore:
             if receipt is not None and row["status"] == "done":
                 connection.commit()
                 return False
-            if row["status"] != "processing" or row["consumer_id"] != consumer_id:
+            if (
+                row["status"] != "processing"
+                or row["consumer_id"] != consumer_id
+                or int(row["attempts"]) != lease_generation
+                or row["lease_until"] is None
+                or float(row["lease_until"]) < time.time()
+            ):
                 connection.rollback()
                 raise RuntimeError("consumer no longer owns this outbox lease")
             connection.execute("INSERT OR IGNORE INTO rag_consumer_receipts VALUES(?,?,?,?)", (consumer_id, event_key, _json(dict(result)), _now()))
@@ -728,7 +810,10 @@ class IndustrialRagStore:
         if event is None:
             return None
         output = handler(str(event["event_key"]), str(event["event_type"]), event["payload"])
-        committed = self.finish_outbox(str(event["event_key"]), consumer_id, output)
+        committed = self.finish_outbox(
+            str(event["event_key"]), consumer_id, output,
+            lease_generation=int(event["lease_generation"]),
+        )
         return {"event_key": event["event_key"], "attempt": event["attempt"], "committed": committed}
 
     def cache_get(self, cache_key: str) -> dict[str, object] | None:

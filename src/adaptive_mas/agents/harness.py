@@ -21,6 +21,8 @@ from adaptive_mas.agents.public_prompt_context import build_public_context
 from adaptive_mas.agents.quantitative import quantitative_agents
 from adaptive_mas.data.research import ResearchData
 from adaptive_mas.harness_state import HarnessStateStore
+from adaptive_mas.industrial_rag.models import QueryPlan
+from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -584,6 +586,12 @@ def _compact_tool_message(message: dict[str, object]) -> dict[str, object]:
         raise TypeError("tool result must be a JSON object")
     keep = {
         "summary", "status", "evidence_refs", "findings", "items", "symbols",
+        "retrieved", "text_excerpt", "page_number", "financial_fact", "citation",
+        "release_id", "numeric_eligible", "raw_value", "normalized_value", "multiplier",
+        "document_id", "version_id", "source_id", "source_url", "content_sha256",
+        "block_id", "span_id", "time_basis", "security_code", "as_of", "captured_at",
+        "ingested_at", "first_available_at", "revised_at", "release_spec_sha256",
+        "bbox", "char_start", "char_end", "section_id", "table_id", "row_start", "row_end",
         "evidence_id", "evidence_ids", "reopen_ref", "source_record_id",
         "source_type", "title", "exact_title", "symbol", "field", "unit", "report_period", "facts",
         "facts_units", "vintage", "vintage_status", "vintage_verified",
@@ -641,7 +649,9 @@ def _structured_context_records(value: object) -> list[dict[str, object]]:
         "source_type", "dataset", "field", "metric", "value", "unit", "facts",
         "facts_units", "report_period", "period_start", "period_end", "published_at",
         "available_at", "fetched_at", "vintage", "vintage_status", "vintage_verified",
-        "retrospective_backfill_proxy", "locator", "content_scope",
+        "retrospective_backfill_proxy", "locator", "content_scope", "citation",
+        "page_number", "raw_value", "normalized_value", "multiplier", "currency",
+        "accounting_basis", "review_status", "numeric_eligible", "release_id",
     }
     records: list[dict[str, object]] = []
 
@@ -1186,6 +1196,9 @@ def _market_handlers(
 def _fundamental_handlers(
     public_snapshot: dict[str, object] | None,
     decision_time: datetime,
+    industrial_rag_service: IndustrialRagService | None = None,
+    industrial_rag_principal_id: str = "local-public",
+    industrial_rag_release_id: str | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object], dict[str, dict[str, object]]]:
     snapshot = public_snapshot or {}
     source_records: dict[str, dict[str, object]] = {}
@@ -1297,6 +1310,7 @@ def _fundamental_handlers(
         }
         for evidence_id, row in source_records.items()
     }
+    industrial_rag_evidence: dict[str, dict[str, object]] = {}
 
     def search_sources(arguments: dict[str, object]) -> dict[str, object]:
         question = arguments.get("question", "财报与公告的重要证据及其报告期")
@@ -1498,10 +1512,175 @@ def _fundamental_handlers(
         ),
         SUBMIT_REPORT,
     ]
-    return tools, {
+    handlers: dict[str, object] = {
         "search_financial_facts_and_announcements": search_sources,
         "read_cached_source": read_source,
-    }, evidence_catalog
+    }
+    if industrial_rag_service is not None:
+        if not industrial_rag_principal_id.strip():
+            raise ValueError("industrial RAG principal identity must be nonempty")
+
+        def search_indexed_documents(arguments: dict[str, object]) -> dict[str, object]:
+            question = arguments.get("question")
+            symbols = arguments.get("symbols")
+            limit = arguments.get("limit", 4)
+            periods = arguments.get("report_periods", [])
+            basis = arguments.get("accounting_basis")
+            task_type = arguments.get("task_type", "fact")
+            if not isinstance(question, str) or not question.strip() or len(question) > 240:
+                raise InvalidToolInput("question must be a nonempty string up to 240 characters")
+            if not isinstance(symbols, list) or not 1 <= len(symbols) <= 4 or any(
+                not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit()
+                for symbol in symbols
+            ):
+                raise InvalidToolInput("symbols must contain one to four six-digit security codes")
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2:
+                raise InvalidToolInput("indexed-document limit must be an integer within 1..2 per security")
+            if not isinstance(periods, list) or len(periods) > 8 or any(
+                not isinstance(period, str) or not period.strip() for period in periods
+            ):
+                raise InvalidToolInput("report_periods must be a list of up to eight nonempty strings")
+            if basis is not None and (not isinstance(basis, str) or len(basis) > 120):
+                raise InvalidToolInput("accounting_basis must be at most 120 characters")
+            if task_type not in {"fact", "comparison", "table", "narrative", "refutation", "unknown"}:
+                raise InvalidToolInput("task_type is unsupported")
+            if industrial_rag_release_id is None:
+                return {"status": "unavailable", "reason": "no published industrial RAG snapshot was active at task start", "retrieved": []}
+
+            retrieved: list[dict[str, object]] = []
+            channel_status: list[dict[str, object]] = []
+            warnings: list[str] = []
+            for symbol in dict.fromkeys(symbols):
+                plan = QueryPlan(
+                    plan_id=uuid.uuid4().hex,
+                    query=question,
+                    security_code=symbol,
+                    as_of=decision_time,
+                    principal_id=industrial_rag_principal_id,
+                    task_type=task_type,
+                    accounting_basis=basis,
+                    report_periods=tuple(periods),
+                    release_id=industrial_rag_release_id,
+                    channels=("structured_facts", "bm25"),
+                    top_k=limit,
+                    time_mode="strict_forward",
+                )
+                result = industrial_rag_service.search(plan)
+                channel_status.append({"symbol": symbol, "channels": result["channels"], "status": result["status"]})
+                warnings.extend(str(item) for item in result.get("warnings", []))
+                for item in result["retrieved"]:
+                    citation = dict(item["citation"])
+                    evidence_id = _opaque_id(
+                        "industrial-rag",
+                        f"{industrial_rag_release_id}:{symbol}:{plan.query}:{item['evidence_id']}",
+                    )
+                    reference = {
+                        "tool": "read_indexed_financial_evidence",
+                        "arguments": {"evidence_id": evidence_id},
+                    }
+                    available_at = citation.get("first_available_at") or citation.get("published_at")
+                    basis_tag = str(item.get("source_time_basis", "unknown"))
+                    fact_values = {}
+                    fact_units = {}
+                    if item.get("fact_id") and citation.get("numeric_eligible"):
+                        metric = str(citation["metric"])
+                        fact_values[metric] = citation["normalized_value"]
+                        fact_units[metric] = citation["unit"]
+                    title = str(citation.get("title") or "")
+                    source_ref = {
+                        "evidence_id": evidence_id,
+                        "source_type": "public_financial_document",
+                        "dataset": "industrial_rag",
+                        "symbol": symbol,
+                        "title": title,
+                        "report_period": citation.get("report_period"),
+                        "published_at": citation.get("published_at"),
+                        "available_at": available_at,
+                        "fetched_at": citation.get("captured_at"),
+                        "vintage": citation.get("content_sha256"),
+                        "vintage_status": basis_tag,
+                        "vintage_verified": basis_tag == "strict_forward",
+                        "retrospective_backfill_proxy": basis_tag == "retrospective_proxy",
+                        "facts": fact_values,
+                        "facts_units": fact_units,
+                        "reopen_ref": reference,
+                        "content_scope": "page_span_excerpt",
+                    }
+                    if evidence_id in evidence_catalog:
+                        raise InvalidResearchOutput("fundamental", "duplicate_evidence_identity")
+                    evidence_catalog[evidence_id] = source_ref
+                    industrial_rag_evidence[evidence_id] = {
+                        "plan": plan,
+                        "span_id": citation.get("span_id"),
+                        "search_result": item,
+                    }
+                    retrieved.append({
+                        **source_ref,
+                        "text_excerpt": str(item["text"])[:1_200],
+                        "page_number": citation.get("page_number"),
+                        "financial_fact": {
+                            key: citation.get(key)
+                            for key in (
+                                "fact_id", "metric", "raw_value", "normalized_value", "unit",
+                                "multiplier", "currency", "report_period", "accounting_basis",
+                                "review_status", "numeric_eligible",
+                            )
+                            if citation.get(key) is not None
+                        },
+                        "citation": citation,
+                    })
+            return {
+                "status": "available" if retrieved else "no_evidence",
+                "release_id": industrial_rag_release_id,
+                "retrieved": retrieved,
+                "channels": channel_status,
+                "warnings": sorted(set(warnings)),
+                "scores_are_confidence": False,
+            }
+
+        def read_indexed_evidence(arguments: dict[str, object]) -> dict[str, object]:
+            evidence_id = arguments.get("evidence_id")
+            if not isinstance(evidence_id, str) or evidence_id not in industrial_rag_evidence:
+                raise InvalidToolInput("evidence_id must identify a document result returned in this task")
+            record = industrial_rag_evidence[evidence_id]
+            span_id = record.get("span_id")
+            if not isinstance(span_id, str):
+                raise InvalidToolInput("indexed evidence does not have a reopenable page span")
+            expanded = industrial_rag_service.read_span(record["plan"], span_id)
+            return {
+                "evidence_id": evidence_id,
+                "text_excerpt": expanded["text"][:2_400],
+                "citation": expanded["citation"],
+                "next_offset": None,
+                "content_scope": "reopened_source_span",
+            }
+
+        tools.extend([
+            _tool(
+                "search_indexed_financial_documents",
+                "Search the pinned, locally indexed public financial corpus with the task's strict decision-time and permission scope.",
+                {
+                    "question": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "symbols": {"type": "array", "items": {"type": "string", "pattern": "^[0-9]{6}$"}, "minItems": 1, "maxItems": 4},
+                    "report_periods": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                    "accounting_basis": {"type": "string", "maxLength": 120},
+                    "task_type": {"type": "string", "enum": ["fact", "comparison", "table", "narrative", "refutation", "unknown"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 2},
+                },
+                ["question", "symbols"],
+            ),
+            _tool(
+                "read_indexed_financial_evidence",
+                "Reopen the exact source page span returned by the indexed-document search; current permissions and time scope are checked again.",
+                {"evidence_id": {"type": "string", "minLength": 1}},
+                ["evidence_id"],
+            ),
+        ])
+        handlers.update({
+            "search_indexed_financial_documents": search_indexed_documents,
+            "read_indexed_financial_evidence": read_indexed_evidence,
+        })
+    return tools, handlers, evidence_catalog
 
 
 def _news_handlers(
@@ -2398,10 +2577,30 @@ def run_research_harness(
     required_observations: list[dict[str, object]] | None = None,
     procedural_memory: dict[str, object] | None = None,
     model_risk_context: Mapping[str, object] | None = None,
+    industrial_rag_service: IndustrialRagService | None = None,
+    industrial_rag_principal_id: str = "local-public",
+    industrial_rag_release_id: str | None = None,
 ) -> dict[str, object]:
     """Run market and fundamental specialists, then a planning/query/finalize manager."""
     decision_time = datetime.combine(as_of, datetime.min.time()).replace(hour=16, tzinfo=SHANGHAI)
     settings = config or {}
+    industrial_rag_snapshot: dict[str, object] = {"status": "disabled"}
+    if industrial_rag_service is not None:
+        pinned_release_id = industrial_rag_release_id or industrial_rag_service.store.active_release_id()
+        if pinned_release_id is None:
+            industrial_rag_snapshot = {"status": "unavailable", "reason": "no published corpus release was active at task start"}
+        else:
+            release_spec, release_sha256 = industrial_rag_service.store.release_spec(pinned_release_id)
+            industrial_rag_snapshot = {
+                "status": "available",
+                "release_id": pinned_release_id,
+                "release_spec_sha256": release_sha256,
+                "source_manifest_sha256": release_spec["source_manifest_sha256"],
+                "principal_id": industrial_rag_principal_id,
+                "time_mode": "strict_forward",
+            }
+    else:
+        pinned_release_id = None
     market_tools, market_handlers, market_catalog = _market_handlers(research, as_of, settings)
     market_finalized: dict[str, object] = {}
     market_visible_evidence_ids: set[str] = set()
@@ -2440,7 +2639,11 @@ def run_research_harness(
     market_report = market_result["report"]
 
     fundamental_tools, fundamental_handlers, fundamental_catalog = _fundamental_handlers(
-        public_snapshot, decision_time
+        public_snapshot,
+        decision_time,
+        industrial_rag_service=industrial_rag_service,
+        industrial_rag_principal_id=industrial_rag_principal_id,
+        industrial_rag_release_id=pinned_release_id,
     )
     fundamental_finalized: dict[str, object] = {}
     fundamental_visible_evidence_ids: set[str] = set()
@@ -2471,7 +2674,7 @@ def run_research_harness(
             ]
             if (public_snapshot or {}).get("data_mode") == "retrospective_source_publication_proxy" else []
         ),
-        "allowed_data": "locally cached public financial statements, indicators, announcement titles and previously extracted text only",
+        "allowed_data": "locally cached public financial statements, indicators, announcement titles and previously extracted text; when configured, the pinned industrial RAG public corpus in strict decision-time mode",
         "required_research": {
             "observations": [
                 {key: row[key] for key in ("symbol", "field", "report_period") if key in row}
@@ -2541,6 +2744,7 @@ def run_research_harness(
             "available_dimensions": ["event", "industry", "model"],
             "hard_checks_separate": True,
         },
+        "industrial_rag": dict(industrial_rag_snapshot),
     }
 
     def query_specialist_adaptive(arguments: dict[str, object]) -> dict[str, object]:
@@ -3052,6 +3256,7 @@ def run_research_harness(
             },
         },
         "optional_experts": optional_expert_runs,
+        "industrial_rag_snapshot": industrial_rag_snapshot,
         "research_loop": {
             "goal": (manager_state.get("plan") or {}).get("goal"),
             "action_count": int(manager_state["query_count"]),
@@ -3087,6 +3292,7 @@ def run_research_harness(
             "historical_cases_are_retrospective": True,
             "market_source": "pre-existing BaoStock adjusted market cache",
             "fundamental_source": "pre-existing local financial/announcement cache",
+            "industrial_rag_source": industrial_rag_snapshot,
             "announcement_fetching": "disabled; only previously captured text may be read",
             "private_account_or_forecast_fields_sent": False,
             "raw_public_news_text_sent_to_model": False,

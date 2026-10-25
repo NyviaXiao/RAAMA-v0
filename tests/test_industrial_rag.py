@@ -4,7 +4,7 @@ import hashlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -22,6 +22,7 @@ from adaptive_mas.industrial_rag.models import (
     Section,
     Span,
 )
+from adaptive_mas.agents.harness import _fundamental_handlers
 from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore
 from adaptive_mas.industrial_rag.parser import (
     ParseError,
@@ -260,18 +261,83 @@ def test_same_source_identity_cannot_be_reused_with_changed_bytes(tmp_path) -> N
         store.ingest_bundle(_bundle(source_id="cninfo-123456", version_id="version-2", payload=b"changed source bytes"))
 
 
+def test_fact_ingestion_requires_existing_page_locatable_span_and_matching_basis(tmp_path) -> None:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    bundle = _bundle()
+    missing_span_fact = replace(bundle.facts[0], span_ids=("missing-span",))
+    with pytest.raises(ContractError, match="existing, nonempty, locatable span"):
+        store.ingest_bundle(replace(bundle, facts=(missing_span_fact,)))
+
+    unlocated_span = replace(bundle.spans[0], page_number=None)
+    with pytest.raises(ContractError, match="existing, nonempty, locatable span"):
+        store.ingest_bundle(replace(bundle, spans=(unlocated_span,)))
+
+    mismatched_basis = replace(bundle.facts[0], consolidation="母公司")
+    with pytest.raises(ContractError, match="accounting basis"):
+        store.ingest_bundle(replace(bundle, facts=(mismatched_basis,)))
+
+
+def test_fact_citation_uses_the_fact_span_page_and_lists_all_supporting_spans(tmp_path) -> None:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    bundle = _bundle()
+    page_eight = Span("version-1-span-8", "version-1", 8, 0, 12, "营业收入表列数值")
+    fact = replace(bundle.facts[0], span_ids=(page_eight.span_id,))
+    bundle = replace(bundle, spans=(*bundle.spans, page_eight), facts=(fact,))
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, ["version-1"], "release-1")
+
+    result = IndustrialRagService(store).search(_plan())
+    cited = next(item for item in result["retrieved"] if item["fact_id"] == fact.fact_id)
+    assert cited["page_number"] == 8
+    assert cited["citation"]["span_id"] == page_eight.span_id
+    assert cited["citation"]["supporting_spans"] == [{
+        "span_id": page_eight.span_id,
+        "document_id": "document-1",
+        "version_id": "version-1",
+        "source_id": "cninfo-123456",
+        "source_url": bundle.version.source_url,
+        "content_sha256": bundle.version.content_sha256,
+        "page_number": 8,
+        "char_start": 0,
+        "char_end": 12,
+    }]
+
+
+def test_reused_source_version_rejects_changed_document_or_child_metadata(tmp_path) -> None:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    bundle = _bundle()
+    store.ingest_bundle(bundle)
+    with pytest.raises(ImmutableConflict, match="source/version identity"):
+        store.ingest_bundle(_bundle(document_id="different-document"))
+
+    changed_fact = replace(bundle.facts[0], raw_value="337,489", normalized_value="337489")
+    with pytest.raises(ImmutableConflict, match="parsed child records"):
+        store.ingest_bundle(replace(bundle, facts=(changed_fact,)))
+
+
 def test_outbox_expiry_reclaim_duplicate_ack_and_idempotent_handler(tmp_path) -> None:
     store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
     store.ingest_bundle(_bundle())
     first = store.claim_outbox("worker-one", lease_seconds=0.01)
     assert first is not None
     time.sleep(0.02)
-    second = store.claim_outbox("worker-two", lease_seconds=10)
+    second = store.claim_outbox("worker-one", lease_seconds=10)
     assert second is not None and second["event_key"] == first["event_key"]
+    assert second["lease_generation"] > first["lease_generation"]
     with pytest.raises(RuntimeError, match="no longer owns"):
-        store.finish_outbox(str(first["event_key"]), "worker-one", {"late": True})
-    assert store.finish_outbox(str(second["event_key"]), "worker-two", {"event": second["event_key"]}) is True
-    assert store.finish_outbox(str(second["event_key"]), "worker-two", {"event": second["event_key"]}) is False
+        store.finish_outbox(
+            str(first["event_key"]), "worker-one", {"late": True},
+            lease_generation=int(first["lease_generation"]),
+        )
+    assert store.finish_outbox(
+        str(second["event_key"]), "worker-one", {"event": second["event_key"]},
+        lease_generation=int(second["lease_generation"]),
+    ) is True
+    assert store.finish_outbox(
+        str(second["event_key"]), "worker-one", {"event": second["event_key"]},
+        lease_generation=int(second["lease_generation"]),
+    ) is False
 
 
 def test_content_addressed_store_parallel_same_bytes_is_atomic(tmp_path) -> None:
@@ -384,3 +450,41 @@ def test_postgres_row_factory_handles_no_result_statements_and_selects() -> None
     row = make_row(("v1", "a" * 64))
     assert row["version_id"] == "v1"
     assert row[1] == "a" * 64
+
+
+def test_harness_fundamental_tools_search_and_reopen_pinned_rag_evidence(tmp_path) -> None:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    store.ingest_bundle(_bundle())
+    _consume_all(store)
+    _publish(store, ["version-1"], "release-1")
+    service = IndustrialRagService(store)
+    tools, handlers, catalog = _fundamental_handlers(
+        None,
+        datetime.now(timezone.utc),
+        industrial_rag_service=service,
+        industrial_rag_principal_id="analyst",
+        industrial_rag_release_id="release-1",
+    )
+    tool_names = {tool["function"]["name"] for tool in tools}
+    assert "search_indexed_financial_documents" in tool_names
+    assert "read_indexed_financial_evidence" in tool_names
+
+    result = handlers["search_indexed_financial_documents"]({
+        "question": "2024年度营业收入是多少",
+        "symbols": ["600036"],
+        "report_periods": ["2024"],
+        "task_type": "fact",
+        "limit": 2,
+    })
+    assert result["status"] == "available"
+    evidence = next(item for item in result["retrieved"] if item["financial_fact"].get("fact_id"))
+    evidence_id = evidence["evidence_id"]
+    assert evidence_id in catalog
+    assert catalog[evidence_id]["vintage_verified"] is True
+    reopened = handlers["read_indexed_financial_evidence"]({"evidence_id": evidence_id})
+    assert reopened["text_excerpt"] == _bundle().payload.decode()
+    assert reopened["citation"]["release_id"] == "release-1"
+
+    store.set_access("analyst", "document-1", can_read=False)
+    with pytest.raises(PermissionError):
+        handlers["read_indexed_financial_evidence"]({"evidence_id": evidence_id})

@@ -212,12 +212,11 @@ class IndustrialRagService:
         channel_status: dict[str, dict[str, object]] = {}
         blocks = self.store.read_blocks(version_ids)
         facts = self.store.read_facts(version_ids)
-        block_by_id = {str(row["block_id"]): row for row in blocks}
         version_by_id = {str(row["version_id"]): row for row in permitted}
 
         for channel in plan.channels:
             if channel == "structured_facts":
-                channel_results[channel] = self._fact_results(plan, facts, block_by_id, version_by_id)
+                channel_results[channel] = self._fact_results(plan, facts, version_by_id)
                 channel_status[channel] = {"status": "available", "implementation": "typed_fact_records", "candidate_count": len(channel_results[channel])}
             elif channel == "bm25":
                 channel_results[channel] = self._block_results(plan, blocks, version_by_id)
@@ -329,9 +328,15 @@ class IndustrialRagService:
         }
         return reasons.get(channel, "requested channel has no configured backend")
 
-    def _fact_results(self, plan: QueryPlan, facts: Sequence[Mapping[str, object]], block_by_id: Mapping[str, Mapping[str, object]], versions: Mapping[str, Mapping[str, object]]) -> list[EvidenceResult]:
+    def _fact_results(self, plan: QueryPlan, facts: Sequence[Mapping[str, object]], versions: Mapping[str, Mapping[str, object]]) -> list[EvidenceResult]:
         query_tokens = set(financial_tokens(plan.query + " " + " ".join(plan.aliases)))
         rows: list[tuple[float, EvidenceResult]] = []
+        referenced_span_ids = [
+            str(span_id)
+            for fact in facts
+            for span_id in json.loads(str(fact["payload_json"])).get("span_ids", [])
+        ]
+        span_by_id = {str(row["span_id"]): row for row in self.store.read_spans(referenced_span_ids)}
         for fact in facts:
             if str(fact["security_code"]) != plan.security_code:
                 continue
@@ -342,23 +347,52 @@ class IndustrialRagService:
             terms = set(financial_tokens(str(fact["metric"]))) | set(financial_tokens(str(fact["raw_value"])))
             if not terms.intersection(query_tokens):
                 continue
-            span_ids = json.loads(str(fact["payload_json"])).get("span_ids", [])
-            block = next((row for row in block_by_id.values() if str(row["version_id"]) == str(fact["version_id"])), None)
-            if block is None:
-                # A table-cell citation can remain exact even when the parser supplied no narrative block.
-                page_number = None
-                block_payload: Mapping[str, object] = {
-                    "document_id": fact["document_id"], "version_id": fact["version_id"],
-                    "source_id": fact["source_id"], "content_sha256": fact["content_sha256"],
-                    "time_basis": fact["time_basis"], "title": fact["title"], "security_code": plan.security_code,
-                    "page_number": page_number, "payload_json": "{}",
-                }
+            span_ids = [str(value) for value in json.loads(str(fact["payload_json"])).get("span_ids", [])]
+            supporting_spans = [span_by_id[span_id] for span_id in span_ids if span_id in span_by_id]
+            spans_are_valid = (
+                len(supporting_spans) == len(span_ids)
+                and bool(supporting_spans)
+                and all(
+                    str(span["version_id"]) == str(fact["version_id"])
+                    and str(span["source_id"]) == str(fact["source_id"])
+                    and span["page_number"] is not None
+                    and bool(str(span["text"]).strip())
+                    and int(span["char_end"]) > int(span["char_start"])
+                    for span in supporting_spans
+                )
+            )
+            if supporting_spans:
+                primary_span = supporting_spans[0]
+                citation = _citation(primary_span, fact=fact)
+                citation["span_id"] = str(primary_span["span_id"])
             else:
-                block_payload = block
-            citation = _citation(block_payload, fact=fact)
-            citation["span_ids"] = list(span_ids)
+                # Legacy rows without resolvable spans stay visible as nonnumeric evidence.
+                citation = _citation({
+                    "document_id": fact["document_id"], "version_id": fact["version_id"],
+                    "source_id": fact["source_id"], "source_url": fact["source_url"],
+                    "published_at": fact["published_at"], "first_available_at": fact["first_available_at"],
+                    "captured_at": fact["captured_at"], "ingested_at": fact["ingested_at"],
+                    "content_sha256": fact["content_sha256"], "time_basis": fact["time_basis"],
+                    "title": fact["title"], "security_code": plan.security_code,
+                    "page_number": None, "payload_json": "{}",
+                }, fact=fact)
+            citation["span_ids"] = span_ids
+            citation["supporting_spans"] = [
+                {
+                    "span_id": str(span["span_id"]),
+                    "document_id": str(span["document_id"]),
+                    "version_id": str(span["version_id"]),
+                    "source_id": str(span["source_id"]),
+                    "source_url": str(span["source_url"]),
+                    "content_sha256": str(span["content_sha256"]),
+                    "page_number": int(span["page_number"]) if span["page_number"] is not None else None,
+                    "char_start": int(span["char_start"]),
+                    "char_end": int(span["char_end"]),
+                }
+                for span in supporting_spans
+            ]
             citation["point_in_time_eligible"] = fact["time_basis"] == "strict_forward"
-            citation["numeric_eligible"] = fact["review_status"] == "reviewed" and float(fact["confidence"]) >= 0.9
+            citation["numeric_eligible"] = spans_are_valid and fact["review_status"] == "reviewed" and float(fact["confidence"]) >= 0.9
             text = f"{fact['metric']}：{fact['raw_value']} {fact['unit']}；规范值={fact['normalized_value']} {fact['unit']}；报告期={fact['report_period']}；口径={fact['consolidation']}"
             result = EvidenceResult(
                 evidence_id=f"ev-fact-{fact['fact_id']}", channel="structured_facts",
