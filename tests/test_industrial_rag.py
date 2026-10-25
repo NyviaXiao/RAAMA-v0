@@ -288,10 +288,17 @@ def test_search_cache_identity_includes_aliases_and_runtime_revisions(tmp_path) 
     _publish(store, ["version-1"], "release-1")
 
     class DenseStub:
-        implementation = "dense-v1"
-
         def __init__(self) -> None:
             self.calls = 0
+            self.version = "v1"
+
+        @property
+        def cache_identity(self):
+            return {
+                "implementation": "test-dense",
+                "version": self.version,
+                "configuration": {"fixture": "one-source-table"},
+            }
 
         def __call__(self, plan, version_ids):
             self.calls += 1
@@ -305,10 +312,17 @@ def test_search_cache_identity_includes_aliases_and_runtime_revisions(tmp_path) 
             )]
 
     class RerankerStub:
-        implementation = "reranker-v1"
-
         def __init__(self) -> None:
             self.calls = 0
+            self.version = "v1"
+
+        @property
+        def cache_identity(self):
+            return {
+                "implementation": "test-reranker",
+                "version": self.version,
+                "configuration": {"fixture": "identity-ranking"},
+            }
 
         def __call__(self, plan, evidence):
             self.calls += 1
@@ -330,17 +344,47 @@ def test_search_cache_identity_includes_aliases_and_runtime_revisions(tmp_path) 
     assert dense.calls == 2
     assert reranker.calls == 2
 
-    dense.implementation = "dense-v2"
+    dense.version = "v2"
     with_new_adapter = service.search(replace(plan, aliases=("主营业务收入",)))
     assert with_new_adapter["cache"]["hit"] is False
     assert with_new_adapter["cache"]["key_sha256"] != with_different_alias["cache"]["key_sha256"]
     assert dense.calls == 3
 
-    reranker.implementation = "reranker-v2"
+    reranker.version = "v2"
     with_new_reranker = service.search(replace(plan, aliases=("主营业务收入",)))
     assert with_new_reranker["cache"]["hit"] is False
     assert with_new_reranker["cache"]["key_sha256"] != with_new_adapter["cache"]["key_sha256"]
     assert reranker.calls == 4
+
+
+def test_search_skips_persistent_cache_for_unversioned_configured_adapters(tmp_path) -> None:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    store.ingest_bundle(_bundle())
+    _consume_all(store)
+    _publish(store, ["version-1"], "release-1")
+    plan = _plan(channels=("dense",))
+
+    def adapter_for(text: str):
+        def adapter(query_plan, version_ids):
+            assert "version-1" in version_ids
+            return [EvidenceResult(
+                evidence_id=f"ev-{text}", channel="dense", document_id="document-1",
+                version_id="version-1", source_id="cninfo-123456",
+                content_sha256=_bundle().version.content_sha256,
+                page_number=3, block_id="version-1-block-1", fact_id=None,
+                text=text, score=1.0, source_time_basis="strict_forward",
+            )]
+        return adapter
+
+    first = IndustrialRagService(store, channel_adapters={"dense": adapter_for("A")}).search(plan)
+    second = IndustrialRagService(store, channel_adapters={"dense": adapter_for("B")}).search(plan)
+
+    assert first["retrieved"][0]["text"] == "A"
+    assert second["retrieved"][0]["text"] == "B"
+    assert first["cache"]["stored"] is False
+    assert second["cache"]["stored"] is False
+    assert second["cache"]["reason"] == "configured_runtime_identity_incomplete"
+    assert "key_sha256" not in second["cache"]
 
 
 def test_strict_time_requires_capture_and_ingestion_by_cutoff_but_proxy_is_labelled(tmp_path) -> None:

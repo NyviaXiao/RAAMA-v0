@@ -232,11 +232,13 @@ class LocalQwenDenseAdapter:
     def cache_identity(self) -> dict[str, object]:
         return {
             "implementation": self.implementation,
-            "model": EMBEDDING_REPO,
             "revision": EMBEDDING_REVISION,
-            "instruction_sha256": hashlib.sha256(RETRIEVAL_INSTRUCTION.encode("utf-8")).hexdigest(),
-            "pooling": "masked_last_token_l2_v1",
-            "max_length": EMBED_MAX_LENGTH,
+            "configuration": {
+                "model": EMBEDDING_REPO,
+                "instruction_sha256": hashlib.sha256(RETRIEVAL_INSTRUCTION.encode("utf-8")).hexdigest(),
+                "pooling": "masked_last_token_l2_v1",
+                "max_length": EMBED_MAX_LENGTH,
+            },
         }
 
     def __call__(self, plan: QueryPlan, version_ids: Sequence[str]) -> Sequence[EvidenceResult]:
@@ -304,11 +306,13 @@ class LocalQwenReranker:
     def cache_identity(self) -> dict[str, object]:
         return {
             "implementation": self.implementation,
-            "model": RERANKER_REPO,
             "revision": RERANKER_REVISION,
-            "instruction_sha256": hashlib.sha256(RETRIEVAL_INSTRUCTION.encode("utf-8")).hexdigest(),
-            "score": "yes_no_logit_difference",
-            "max_length": RERANK_MAX_LENGTH,
+            "configuration": {
+                "model": RERANKER_REPO,
+                "instruction_sha256": hashlib.sha256(RETRIEVAL_INSTRUCTION.encode("utf-8")).hexdigest(),
+                "score": "yes_no_logit_difference",
+                "max_length": RERANK_MAX_LENGTH,
+            },
         }
 
     def __call__(self, plan: QueryPlan, evidence: Sequence[EvidenceResult]) -> Sequence[EvidenceResult]:

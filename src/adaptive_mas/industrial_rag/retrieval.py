@@ -181,19 +181,24 @@ def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object
     return observations
 
 
-def _component_cache_identity(component: object) -> object:
+def _component_cache_identity(component: object) -> dict[str, object] | None:
     identity = getattr(component, "cache_identity", None)
-    if identity is not None:
-        return identity
-    return {
-        "implementation": getattr(
-            component,
-            "implementation",
-            f"{type(component).__module__}.{type(component).__qualname__}",
-        ),
-        "model": getattr(component, "model", None),
-        "revision": getattr(component, "revision", None),
-    }
+    if not isinstance(identity, Mapping):
+        return None
+    serialized = dict(identity)
+    implementation = serialized.get("implementation")
+    version = serialized.get("version") or serialized.get("revision")
+    configuration = serialized.get("configuration")
+    if (
+        not isinstance(implementation, str) or not implementation.strip()
+        or not isinstance(version, str) or not version.strip()
+        or not isinstance(configuration, (Mapping, str))
+        or (isinstance(configuration, Mapping) and not configuration)
+        or (isinstance(configuration, str) and not configuration.strip())
+    ):
+        return None
+    json.dumps(serialized, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return serialized
 
 
 def _bm25(query: str, documents: Sequence[Mapping[str, object]], *, limit: int, k1: float = 1.2, b: float = 0.75) -> list[tuple[Mapping[str, object], float]]:
@@ -316,8 +321,22 @@ class IndustrialRagService:
             "bm25": "local_bm25_chinese_bigrams_v1",
             "toc_page": "section_page_reference_v1",
         }
+        channel_implementations: dict[str, object] = {}
+        runtime_cacheable = True
+        for channel in plan.channels:
+            if channel in self.channel_adapters:
+                identity = _component_cache_identity(self.channel_adapters[channel])
+                channel_implementations[channel] = identity
+                runtime_cacheable = runtime_cacheable and identity is not None
+            else:
+                channel_implementations[channel] = builtin_channel_identities.get(channel, "unavailable")
+        if self.reranker is None:
+            reranker_identity: object = "disabled"
+        else:
+            reranker_identity = _component_cache_identity(self.reranker)
+            runtime_cacheable = runtime_cacheable and reranker_identity is not None
         safe_plan = {
-            "cache_schema_version": "adaptive-mas.financial-rag-search-cache.v2",
+            "cache_schema_version": "adaptive-mas.financial-rag-search-cache.v3",
             "query_sha256": hashlib.sha256(plan.query.encode("utf-8")).hexdigest(),
             "aliases": list(plan.aliases),
             "security_code": plan.security_code, "as_of": as_of.isoformat(),
@@ -326,26 +345,16 @@ class IndustrialRagService:
             "report_periods": list(plan.report_periods), "release_id": release_id,
             "release_spec_sha256": release_hash, "channels": list(plan.channels),
             "top_k": plan.top_k, "time_mode": plan.time_mode,
-            "channel_implementations": {
-                channel: (
-                    _component_cache_identity(self.channel_adapters[channel])
-                    if channel in self.channel_adapters
-                    else builtin_channel_identities.get(channel, "unavailable")
-                )
-                for channel in plan.channels
-            },
-            "reranker_implementation": (
-                _component_cache_identity(self.reranker)
-                if self.reranker is not None else "unavailable"
-            ),
+            "channel_implementations": channel_implementations,
+            "reranker_implementation": reranker_identity,
         }
         cache_key = stable_hash(safe_plan)
-        cached = self.store.cache_get(cache_key) if use_cache else None
+        cached = self.store.cache_get(cache_key) if use_cache and runtime_cacheable else None
         if cached is not None:
             return {
                 **cached,
                 "plan_id": plan.plan_id,
-                "cache": {"hit": True, "key_sha256": cache_key},
+                "cache": {"hit": True, "stored": True, "key_sha256": cache_key},
                 "current_permission_revision": permission_revision,
             }
 
@@ -396,6 +405,11 @@ class IndustrialRagService:
             rerank_status = {"status": "unavailable", "reason": "no independently versioned cross-encoder reranker configured"}
 
         status = "available" if fused and all(item["status"] != "unavailable" for item in channel_status.values()) else "partial" if fused else "no_evidence"
+        cache_result: dict[str, object] = {"hit": False, "stored": runtime_cacheable}
+        if runtime_cacheable:
+            cache_result["key_sha256"] = cache_key
+        else:
+            cache_result["reason"] = "configured_runtime_identity_incomplete"
         response: dict[str, object] = {
             "schema_version": "adaptive-mas.financial-rag-search.v1",
             "plan_id": plan.plan_id,
@@ -407,12 +421,13 @@ class IndustrialRagService:
             "fusion": fusion_trace,
             "reranking": rerank_status,
             "permission_revision": permission_revision,
-            "cache": {"hit": False, "key_sha256": cache_key},
+            "cache": cache_result,
             "warnings": [
                 str(value["reason"]) for value in channel_status.values() if value.get("status") == "unavailable"
             ] + (["retrospective source timing is a diagnostic proxy, not verified historical availability"] if any(row["time_basis"] == "retrospective_proxy" for row in permitted) else []),
         }
-        self.store.cache_put(cache_key, response)
+        if runtime_cacheable:
+            self.store.cache_put(cache_key, response)
         return response
 
     def research(
