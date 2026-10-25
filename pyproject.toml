@@ -13,10 +13,12 @@ dependencies = [
     "gepa>=0.1.4",
     "numpy>=2.0",
     "pypdf>=5.0",
+    "fonttools==4.67.0",
 ]
 
 [project.scripts]
 raama-harness = "adaptive_mas.harness_service:main"
+raama-rag = "adaptive_mas.industrial_rag.cli:main"
 raama-optimizer-verify = "adaptive_mas.optimizer_reference:main"
 
 [project.optional-dependencies]
@@ -27,12 +29,17 @@ observability = [
     "opentelemetry-exporter-otlp-proto-http>=1.25",
 ]
 verification = ["scipy>=1.14,<2"]
+postgres = ["psycopg[binary]==3.3.6"]
+object-storage = ["boto3==1.43.118"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+adaptive_mas = ["industrial_rag/migrations/*.sql", "industrial_rag/web/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

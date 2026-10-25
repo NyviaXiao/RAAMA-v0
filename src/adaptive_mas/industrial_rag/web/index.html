@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RAAMA 金融资料工作台</title>
+  <style>
+    :root{color-scheme:light;--ink:#1c3129;--muted:#60746b;--line:#dce6df;--paper:#f4f7f4;--card:#fff;--green:#17684d;--pale:#e7f3eb;--amber:#8a5d0a;--red:#943e37;--shadow:0 12px 32px #153d2910;font:15px/1.5 "Segoe UI","Microsoft YaHei",sans-serif}
+    *{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--paper)}button,input,textarea,select{font:inherit}button{cursor:pointer}.shell{max-width:1220px;margin:auto;padding:26px 24px 48px}.top{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:18px}.brand{font-size:13px;color:var(--green);font-weight:800;letter-spacing:.12em}.top h1{font-size:28px;margin:4px 0}.sub{color:var(--muted);margin:0}.status{border:1px solid var(--line);background:white;border-radius:24px;padding:8px 12px;font-size:12px;color:var(--muted)}.grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(340px,.95fr);gap:14px;align-items:start}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:var(--shadow);min-width:0}.card h2{font-size:16px;margin:0 0 12px}.form{display:grid;grid-template-columns:1fr 1fr;gap:11px}.field{display:grid;gap:5px;min-width:0}.field.full{grid-column:1/-1}.field label{font-size:12px;color:#4e6259;font-weight:700}.field input,.field textarea,.field select{width:100%;min-width:0;border:1px solid #cedbd2;border-radius:8px;padding:9px 10px;background:#fbfdfb;color:var(--ink)}.field textarea{min-height:95px;resize:vertical}.help{font-size:11px;color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}.primary,.secondary{border-radius:8px;padding:9px 14px;font-weight:700}.primary{border:1px solid var(--green);background:var(--green);color:white}.secondary{border:1px solid var(--line);background:white;color:var(--green)}.checkrow{display:flex;gap:12px;flex-wrap:wrap;color:#42564c;font-size:12px}.checkrow label{display:flex;gap:5px;align-items:center}.facts{display:grid;gap:10px}.empty{border:1px dashed #cbd8d0;border-radius:10px;padding:22px;text-align:center;color:var(--muted);font-size:13px}.result{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fcfdfc;min-width:0}.result-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.result-title{font-weight:750;overflow-wrap:anywhere}.tag{display:inline-flex;border-radius:20px;padding:3px 8px;background:var(--pale);color:var(--green);font-size:11px;white-space:nowrap}.tag.warn{background:#fff2d8;color:var(--amber)}.tag.bad{background:#fde8e5;color:var(--red)}.result-text{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin:9px 0;font-size:13px}.meta{font-size:11px;color:var(--muted);overflow-wrap:anywhere}.meta div{margin-top:3px}.result a{color:var(--green);font-weight:650;font-size:12px}.trace{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:12px}.channel{padding:8px;border:1px solid var(--line);border-radius:8px;background:#fbfdfb;font-size:11px;min-width:0;overflow-wrap:anywhere}.channel strong{display:block;font-size:12px}.aside{display:grid;gap:14px}.release-list,.quarantine-list{display:grid;gap:7px}.release-row{padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:12px;overflow-wrap:anywhere}.release-row strong{display:block}.note{color:var(--muted);font-size:11px;margin-top:12px}.error{background:#fff4f1;border:1px solid #f0cbc4;color:var(--red);border-radius:8px;padding:10px;font-size:12px;display:none;white-space:pre-wrap}.error.show{display:block}.section{margin-top:14px}.detail{margin-top:10px;padding:10px;background:#f2f7f3;border-radius:8px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;display:none}.detail.show{display:block}.table{width:100%;border-collapse:collapse;font-size:12px}.table td{padding:7px;border-bottom:1px solid var(--line);vertical-align:top}.table td:first-child{color:var(--muted);width:34%}.footer{font-size:11px;color:var(--muted);margin-top:16px}
+    @media(max-width:860px){.grid{grid-template-columns:1fr}.shell{padding:18px 14px 36px}.aside{grid-template-columns:1fr 1fr}}
+    @media(max-width:560px){.top{display:block}.status{display:inline-block;margin-top:12px}.form{grid-template-columns:minmax(0,1fr)}.field.full{grid-column:auto}.aside{grid-template-columns:1fr}.trace{grid-template-columns:1fr}.card{padding:14px}.shell{padding-inline:11px}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div><div class="brand">RAAMA · 本地金融语料</div><h1>金融资料工作台</h1><p class="sub">按证券、时间和当前权限检索财报证据；每条结果都保留来源与页码。</p></div>
+      <div id="status" class="status">正在连接本地服务…</div>
+    </header>
+    <div class="grid">
+      <section class="card">
+        <h2>查询财报与公告</h2>
+        <form id="queryForm">
+          <div class="form">
+            <div class="field"><label for="security">证券代码</label><input id="security" value="600036" pattern="[0-9]{6}" maxlength="6" required><div class="help">必须填写六位证券代码。</div></div>
+            <div class="field"><label for="period">报告期（可选）</label><input id="period" placeholder="例如 2024 或 2024-Q4"></div>
+            <div class="field full"><label for="asof">资料截止时间</label><input id="asof" type="datetime-local" required></div>
+            <div class="field full"><label for="question">研究问题</label><textarea id="question" required placeholder="例如：2024年营业收入是多少？请给出报告期、单位和页码。"></textarea></div>
+            <div class="field full"><label>检索通道</label><div class="checkrow">
+              <label><input type="checkbox" value="structured_facts" checked>结构化事实</label>
+              <label><input type="checkbox" value="bm25" checked>中文文本检索</label>
+              <label><input type="checkbox" value="toc_page">目录与页码</label>
+              <label><input type="checkbox" value="dense">向量检索</label>
+              <label><input type="checkbox" value="source_relations">来源关系</label>
+            </div><div class="help">未配置的模型或索引会明确显示不可用，不会自动改用其他评分冒充。</div></div>
+          </div>
+          <div class="actions"><button class="primary" type="submit">检索证据</button><button class="secondary" type="button" id="refresh">刷新语料状态</button></div>
+        </form>
+        <div id="error" class="error section" role="alert"></div>
+        <div id="trace" class="trace" aria-live="polite"></div>
+        <div id="results" class="facts section"><div class="empty">提交一个研究问题后，来源证据会显示在这里。</div></div>
+        <div class="note">文本内容来自本机已登记语料。来源原文仅在本地查看；源文件不会发送给模型或上传。</div>
+      </section>
+      <aside class="aside">
+        <section class="card"><h2>当前语料版本</h2><div id="releases" class="release-list"><div class="empty">正在读取版本…</div></div></section>
+        <section class="card"><h2>待检查资料</h2><div id="quarantine" class="quarantine-list"><div class="empty">正在读取解析状态…</div></div></section>
+        <section class="card"><h2>后端状态</h2><table class="table"><tbody id="backend"><tr><td colspan="2">正在检查…</td></tr></tbody></table><div class="note">SQLite 文本参考索引只用于本地诊断。PostgreSQL、OpenSearch、Qdrant、OCR、向量模型和神经重排需要分别配置并验证。</div></section>
+      </aside>
+    </div>
+    <div class="footer">检索分数只用于排序，不代表事实概率。来源时间未知、权限被撤销或语料不足时，系统会显示无证据或拒答状态。</div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    $('asof').value = now.toISOString().slice(0,16);
+    function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+    async function api(path, body){const response=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});const data=await response.json().catch(()=>({error:'本地服务返回了无法读取的内容。'}));if(!response.ok)throw new Error(data.error||`本地服务返回 ${response.status}`);return data;}
+    function showError(message){$('error').textContent=message||'';$('error').classList.toggle('show',Boolean(message));}
+    async function refresh(){
+      try{
+        const [health,quarantine]=await Promise.all([api('/api/health'),api('/api/quarantine')]);
+        const release=health.release||{};
+        $('status').textContent=health.ok?`本机服务正常 · ${health.time_mode==='strict_forward'?'严格可用时间':'回顾性诊断模式'}`:'服务不可用';
+        const list=(release.releases||[]).map(item=>`<div class="release-row"><strong>${esc(item.release_id)} ${item.active?'<span class="tag">当前</span>':''}</strong><div>状态：${esc(item.status)} · 文档版本：${esc(item.version_count)}</div><div>后端：${esc(item.ready_backends.join('、')||'尚未就绪')}</div>${item.missing_backends.length?`<div class="tag warn">待就绪：${esc(item.missing_backends.join('、'))}</div>`:''}<div>版本哈希：${esc(item.spec_sha256)}</div></div>`).join('');
+        $('releases').innerHTML=list||'<div class="empty">尚无已发布语料。请先用本地导入工具登记资料并构建版本。</div>';
+        const q=(quarantine.items||[]).map(item=>`<div class="release-row"><strong>${esc(item.title||item.document_id)}</strong><div>${esc(item.security_code||'未知证券')} · ${esc(item.error_code)}</div><div>${esc(item.reason)}</div><div>来源：${esc(item.source_id)} · ${esc(item.content_sha256)}</div></div>`).join('');
+        $('quarantine').innerHTML=q||'<div class="empty">当前没有待检查资料。</div>';
+        const back=health.backends||{};const rows=Object.entries(back).map(([key,value])=>`<tr><td>${esc(key)}</td><td>${esc(typeof value==='object'?JSON.stringify(value):value)}</td></tr>`).join('');
+        $('backend').innerHTML=rows||'<tr><td colspan="2">没有后端状态。</td></tr>';
+      }catch(error){$('status').textContent='本地服务连接失败';showError(error.message);}
+    }
+    function renderChannels(channels){$('trace').innerHTML=Object.entries(channels||{}).map(([name,item])=>`<div class="channel"><strong>${esc(name)} · ${esc(item.status)}</strong>${esc(item.implementation||item.reason||'')}<br>候选数：${esc(item.candidate_count??0)}</div>`).join('');}
+    function addResult(item, scope){
+      const card=document.createElement('article');card.className='result';
+      const head=document.createElement('div');head.className='result-head';
+      const title=document.createElement('div');title.className='result-title';title.textContent=`${item.citation?.title||item.document_id||'资料'} · 第${item.page_number||'未知'}页`;
+      const tag=document.createElement('span');tag.className='tag'+(item.citation?.numeric_eligible===false?' warn':'');tag.textContent=item.channel==='rrf'?'综合排序':item.channel;
+      head.append(title,tag);card.append(head);
+      const body=document.createElement('div');body.className='result-text';body.textContent=item.text||'';card.append(body);
+      const meta=document.createElement('div');meta.className='meta';meta.innerHTML=`<div>来源编号：${esc(item.source_id||item.citation?.source_id)} · 报告期：${esc(item.citation?.report_period||scope.report_periods?.join('、')||'未限定')}</div><div>口径：${esc(item.citation?.accounting_basis||'未提取')} · 时间类型：${esc(item.source_time_basis||item.citation?.time_basis)}</div><div>来源 SHA-256：${esc(item.content_sha256||item.citation?.content_sha256)}</div><div>来源时间：${esc(item.citation?.published_at||'披露时间未知')} · 首次可用：${esc(item.citation?.first_available_at||'未知')} · 实际抓取：${esc(item.citation?.captured_at||'未知')}</div><div>排序分：${esc(item.rank_score??item.score)}（非置信度）${item.citation?.numeric_eligible===false?' · 数值事实尚未复核':''}</div>`;card.append(meta);
+      const actions=document.createElement('div');actions.className='actions';
+      const spanId=item.citation?.span_id||(item.citation?.span_ids||[])[0];
+      if(spanId){const button=document.createElement('button');button.className='secondary';button.textContent='查看原文片段';button.addEventListener('click',async()=>{button.disabled=true;try{const detail=await api('/api/evidence',{security_code:scope.security_code,query:scope.query,as_of:scope.as_of,report_periods:scope.report_periods||[],accounting_basis:scope.accounting_basis||null,span_id:spanId});const target=document.createElement('div');target.className='detail show';target.textContent=`第${detail.citation.page_number||'未知'}页 · ${detail.citation.source_id}\n${detail.text}`;card.append(target);}catch(error){showError(error.message);}finally{button.disabled=false;}});actions.append(button);}
+      if(item.document_id&&item.version_id){const link=document.createElement('a');const query=new URLSearchParams({security_code:scope.security_code,query:scope.query,as_of:scope.as_of});link.href=`/api/original/${encodeURIComponent(item.document_id)}/${encodeURIComponent(item.version_id)}?${query}`;link.textContent='查看原始文件';link.target='_blank';link.rel='noopener';actions.append(link);}
+      if(actions.childNodes.length)card.append(actions);
+      $('results').append(card);
+    }
+    $('queryForm').addEventListener('submit',async event=>{
+      event.preventDefault();showError('');$('trace').replaceChildren();$('results').replaceChildren();$('results').innerHTML='<div class="empty">正在读取已发布语料…</div>';
+      const localDate=new Date($('asof').value);const offset=-localDate.getTimezoneOffset();const sign=offset>=0?'+':'-';const hh=String(Math.floor(Math.abs(offset)/60)).padStart(2,'0');const mm=String(Math.abs(offset)%60).padStart(2,'0');
+      const period=$('period').value.trim();const body={security_code:$('security').value.trim(),query:$('question').value.trim(),as_of:`${$('asof').value}:00${sign}${hh}:${mm}`,task_type:/对比|变化|增长|下降|差额|较/.test($('question').value)?'comparison':/表|附注|脚注/.test($('question').value)?'table':'fact',report_periods:period?[period]:[],channels:[...document.querySelectorAll('.checkrow input:checked')].map(node=>node.value),top_k:10};
+      try{const result=await api('/api/search',body);$('results').replaceChildren();renderChannels(result.channels);if(!result.retrieved?.length){$('results').innerHTML=`<div class="empty">没有返回符合当前证券、时间和权限条件的证据。<br>${esc((result.warnings||[]).join('；'))}</div>`;return;}for(const item of result.retrieved)addResult(item,body);if(result.warnings?.length){const note=document.createElement('div');note.className='result';note.textContent=result.warnings.join('；');$('results').prepend(note);}}
+      catch(error){$('results').replaceChildren();$('results').innerHTML='<div class="empty">检索没有完成。</div>';showError(error.message);}
+    });
+    $('refresh').addEventListener('click',refresh);refresh();
+  </script>
+</body>
+</html>

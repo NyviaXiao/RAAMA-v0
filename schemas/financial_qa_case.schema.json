@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raama.local/schemas/financial-qa-case.v1.json",
+  "title": "Financial RAG QA case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "case_id", "dataset_group", "question", "security_code",
+    "report_periods", "as_of", "answerability", "required_evidence", "allowed_calculations",
+    "expected_refusal_reason", "source_records", "data_partition", "view_status", "annotation"
+  ],
+  "properties": {
+    "schema_version": {"const": "adaptive-mas.financial-qa-case.v1"},
+    "case_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{1,95}$"},
+    "dataset_group": {"enum": ["public_report_diagnostic", "synthetic_adversarial"]},
+    "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "security_code": {"type": ["string", "null"], "pattern": "^[0-9]{6}$"},
+    "report_periods": {"type": "array", "items": {"type": "string", "pattern": "^[0-9]{4}(-Q[1-4])?$"}, "uniqueItems": true},
+    "as_of": {"type": "string", "format": "date-time"},
+    "answerability": {"enum": ["answerable", "partial", "unanswerable", "permission_denied", "time_ineligible"]},
+    "required_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source_id", "content_sha256", "page_number", "evidence_type", "metric"],
+        "properties": {
+          "source_id": {"type": ["string", "null"]},
+          "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "page_number": {"type": ["integer", "null"], "minimum": 1},
+          "evidence_type": {"enum": ["fact", "table", "cell", "span", "paragraph", "refutation", "permission", "time"]},
+          "metric": {"type": ["string", "null"]},
+          "raw_value": {"type": ["string", "null"]},
+          "normalized_value": {"type": ["string", "null"]},
+          "unit": {"type": ["string", "null"]},
+          "multiplier": {"type": ["string", "null"]},
+          "currency": {"type": ["string", "null"]},
+          "report_period": {"type": ["string", "null"]},
+          "accounting_basis": {"type": ["string", "null"]},
+          "cell_reference": {"type": ["string", "null"]},
+          "annotation_note": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "expected_claims": {"type": "array", "items": {"type": "string"}},
+    "allowed_calculations": {
+      "type": "array", "items": {"enum": ["add", "subtract", "multiply_by_unit_multiplier", "ratio", "percentage_change", "basis_point_conversion"]}, "uniqueItems": true
+    },
+    "expected_refusal_reason": {
+      "type": ["string", "null"],
+      "enum": [null, "no_evidence", "incomplete_evidence_set", "time_unknown", "not_available_as_of", "current_permission_revoked", "conflict_unresolved", "restatement_unresolved", "parser_quarantine", "prompt_injection_is_untrusted_data", "unsupported_calculation"]
+    },
+    "source_records": {
+      "type": "array", "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source_id", "source_url", "content_sha256", "rights_note", "published_at", "first_available_at", "captured_at", "time_basis"],
+        "properties": {
+          "source_id": {"type": "string"}, "source_url": {"type": "string", "format": "uri"},
+          "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "rights_note": {"type": "string", "minLength": 1},
+          "published_at": {"type": ["string", "null"], "format": "date-time"},
+          "first_available_at": {"type": ["string", "null"], "format": "date-time"},
+          "captured_at": {"type": "string", "format": "date-time"},
+          "time_basis": {"enum": ["strict_forward", "retrospective_proxy", "unknown"]}
+        }
+      }
+    },
+    "data_partition": {"enum": ["development", "selection", "independent_acceptance", "synthetic_adversarial"]},
+    "view_status": {"enum": ["unseen", "public_viewed_diagnostic", "annotation_seen", "used_for_development"]},
+    "annotation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["annotator", "annotated_at", "review_status"],
+      "properties": {
+        "annotator": {"type": "string", "minLength": 1},
+        "annotated_at": {"type": "string", "format": "date-time"},
+        "reviewer": {"type": ["string", "null"]},
+        "review_status": {"enum": ["unreviewed", "single_review", "independently_double_reviewed"]},
+        "review_note": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
