@@ -77,9 +77,11 @@ def test_docling_ambiguous_table_rows_are_marked_unsearchable() -> None:
 def test_docling_unit_and_period_are_kept_as_explicit_source_labels() -> None:
     assert document_ai._explicit_unit_text(["2024年度财务报告", "单位：", "人民币百万元"]) == "人民币百万元"
     assert document_ai._explicit_unit_text(["2024年度财务报告", "人民币百万元"]) is None
+    assert document_ai._explicit_unit_text(["（人民币百万元，特别注明除外）"]) == "人民币百万元"
     assert document_ai._period_header("2024年度") == "2024年度"
     assert document_ai._period_header("2024年") == "2024年"
     assert document_ai._period_header("2024年1-3月") == "2024年1-3月"
+    assert document_ai._combined_period_header(["2024年", "第一季度"]) == "2024年第一季度"
     assert document_ai._period_header("累计收入") is None
 
 
@@ -137,3 +139,47 @@ def test_docling_keeps_a_subtable_without_column_headers_unsearchable() -> None:
     segments = document_ai._docling_table_segments(cells)
     assert [segment["start_row"] for segment in segments] == [0, 2]
     assert segments[1]["quarantine_reason"] == "column_headers_not_detected"
+
+
+def test_docling_splits_repeated_year_and_quarter_headers_without_column_header_flags() -> None:
+    cells = [
+        SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=0, text="项目", column_header=True),
+        SimpleNamespace(start_row_offset_idx=0, start_col_offset_idx=1, text="2024年12月31日", column_header=True),
+        SimpleNamespace(start_row_offset_idx=1, start_col_offset_idx=0, text="经营活动产生的现金流量净额", column_header=False),
+        SimpleNamespace(start_row_offset_idx=1, start_col_offset_idx=1, text="447,023", column_header=False),
+        *[
+            SimpleNamespace(start_row_offset_idx=2, start_col_offset_idx=column, text="2024年", column_header=False)
+            for column in range(1, 5)
+        ],
+        SimpleNamespace(start_row_offset_idx=3, start_col_offset_idx=0, text="（人民币百万元）", column_header=False),
+        *[
+            SimpleNamespace(start_row_offset_idx=3, start_col_offset_idx=column, text=quarter, column_header=False)
+            for column, quarter in enumerate(("第一季度", "第二季度", "第三季度", "第四季度"), start=1)
+        ],
+        SimpleNamespace(start_row_offset_idx=4, start_col_offset_idx=0, text="按季度披露的经营业绩指标", column_header=False),
+        SimpleNamespace(start_row_offset_idx=5, start_col_offset_idx=0, text="经营活动产生的现金流量净额", column_header=False),
+        SimpleNamespace(start_row_offset_idx=5, start_col_offset_idx=1, text="(1,208)", column_header=False),
+    ]
+    segments = document_ai._docling_table_segments(cells)
+    assert [segment["start_row"] for segment in segments] == [0, 2]
+    assert [segment["header_rows"] for segment in segments] == [1, 3]
+    assert segments[0]["end_row"] == 1
+    assert segments[1]["title"] == "按季度披露的经营业绩指标"
+    assert segments[1]["column_header_rows"] == (2, 3)
+    assert all(segment["quarantine_reason"] is None for segment in segments)
+
+    annual_table, annual_cells = document_ai._docling_segment_records(
+        segments[0], table_id="annual-table", page_number=4, title_parts=[], unit_context=[],
+    )
+    quarterly_table, quarterly_cells = document_ai._docling_segment_records(
+        segments[1], table_id="quarterly-table", page_number=4, title_parts=[], unit_context=[],
+    )
+    annual_value = next(cell for cell in annual_cells if cell["raw_text"] == "447,023")
+    q1_value = next(cell for cell in quarterly_cells if cell["raw_text"] == "(1,208)")
+    assert annual_table["unit_text"] is None
+    assert annual_value["report_period"] == "2024年12月31日"
+    assert "(1,208)" not in {cell["raw_text"] for cell in annual_cells}
+    assert quarterly_table["unit_text"] == "人民币百万元"
+    assert quarterly_table["title"] == "按季度披露的经营业绩指标"
+    assert q1_value["normalized_value"] == "-1208"
+    assert q1_value["report_period"] == "2024年第一季度"

@@ -139,6 +139,15 @@ def _publish(store: IndustrialRagStore, version_ids: list[str], release_id: str)
     store.publish_release(release_id, actor_id="test-operator", reason="isolated contract test")
 
 
+def _research_one_bundle(tmp_path, bundle: DocumentBundle, query: str, *, periods: tuple[str, ...] = ("2024",)) -> dict[str, object]:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, [bundle.version.version_id], "release-1")
+    plan = replace(_plan(), query=query, report_periods=periods)
+    return IndustrialRagService(store).research(plan)
+
+
 def _plan(*, as_of: datetime | None = None, principal: str = "analyst", time_mode: str = "strict_forward", release_id: str | None = None, channels: tuple[str, ...] = ("structured_facts", "bm25")) -> QueryPlan:
     return QueryPlan(
         plan_id="query-plan-1", query="2024年度营业收入是多少", security_code="600036",
@@ -167,6 +176,83 @@ def test_sqlite_ingest_release_query_and_citation_are_source_bound(tmp_path) -> 
     span = IndustrialRagService(store).read_span(_plan(), "version-1-span-1")
     assert span["text"] == bundle.payload.decode()
     assert store._get_document_bytes("document-1", "version-1", "analyst") == bundle.payload
+
+
+@pytest.mark.parametrize(
+    ("query", "source_metric", "payload"),
+    [
+        ("2024年净利润", "利润总额", "2024年度利润总额 178,652"),
+        ("2024年基本每股收益", "稀释每股收益", "2024年度稀释每股收益 5.66"),
+        ("2024年主营业务收入", "营业总收入", "2024年度营业总收入 337,488"),
+    ],
+)
+def test_metric_coverage_rejects_financially_distinct_source_labels(tmp_path, query, source_metric, payload) -> None:
+    result = _research_one_bundle(
+        tmp_path,
+        _bundle(metric=source_metric, raw_value="178652", normalized_value="178652", payload=payload.encode()),
+        query,
+    )
+    assert result["coverage"][0]["status"] == "candidate_only"
+    assert result["coverage"][0]["candidate_metrics"] == [
+        "total_profit" if source_metric == "利润总额" else
+        "diluted_eps" if source_metric == "稀释每股收益" else
+        "total_operating_revenue"
+    ]
+    assert result["supporting_evidence"] == []
+    assert all(item["citation"].get("numeric_eligible") is False for item in result["candidate_evidence"])
+
+
+def test_page_level_metric_mention_without_a_corresponding_value_is_candidate_only(tmp_path) -> None:
+    result = _research_one_bundle(
+        tmp_path,
+        _bundle(
+            metric="营业收入",
+            payload="2024年度净利润相关说明未列出对应金额；营业收入为337,488。".encode(),
+        ),
+        "2024年净利润",
+    )
+    assert result["coverage"][0]["status"] == "candidate_only"
+    assert result["supporting_evidence"] == []
+    assert result["candidate_evidence"]
+
+
+def test_coverage_preserves_parent_metric_period_unit_and_consolidation_basis(tmp_path) -> None:
+    result = _research_one_bundle(
+        tmp_path,
+        _bundle(
+            metric="归属于母公司股东的净利润",
+            raw_value="148,391",
+            normalized_value="148391",
+            payload="2024年度归属于本行股东的净利润为148,391 人民币百万元。".encode(),
+        ),
+        "2024年合并归母净利润（人民币百万元）",
+    )
+    coverage = result["coverage"][0]
+    assert coverage["status"] == "located"
+    assert coverage["requested_metric"] == "归母净利润"
+    assert coverage["normalized_report_period"] == "2024"
+    assert coverage["requested_unit"] == "人民币百万元"
+    assert coverage["requested_accounting_basis"] == "consolidated"
+    assert coverage["observed_units"] == ["人民币百万元"]
+    assert coverage["observed_accounting_bases"] == ["本集团"]
+    assert coverage["observed_report_periods"] == ["2024"]
+    assert coverage["observed_metrics"] == ["parent_net_profit"]
+    assert coverage["candidate_metrics"] == []
+    assert result["supporting_evidence"][0]["query_numeric_eligible"] is True
+
+
+@pytest.mark.parametrize(
+    ("query", "periods"),
+    [
+        ("2024年1-3月营业收入", ()),
+        ("2024年人民币元营业收入", ("2024",)),
+    ],
+)
+def test_period_or_unit_mismatch_stays_candidate_only(tmp_path, query, periods) -> None:
+    result = _research_one_bundle(tmp_path, _bundle(), query, periods=periods)
+    assert result["coverage"][0]["status"] == "candidate_only"
+    assert result["supporting_evidence"] == []
+    assert result["candidate_evidence"]
 
 
 def test_cache_is_bound_to_current_grants_and_span_or_download_rechecks_access(tmp_path) -> None:

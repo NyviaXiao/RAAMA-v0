@@ -15,11 +15,15 @@ from typing import Callable, Mapping, Sequence
 
 from adaptive_mas.industrial_rag.models import EvidenceResult, QueryPlan, parse_datetime
 from adaptive_mas.industrial_rag.planning import (
-    METRIC_ALIASES,
+    accounting_basis_signature,
+    metric_for_source_label,
     normalize_period,
     plan_research,
-    requested_metrics,
+    requested_accounting_basis,
+    requested_metric_specs,
     requested_periods,
+    requested_unit,
+    unit_signature,
 )
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore, ReleaseNotReady, _json
 from adaptive_mas.research_provenance import stable_hash
@@ -43,17 +47,6 @@ def financial_tokens(text: str) -> list[str]:
             else:
                 tokens.extend(run[index:index + 2] for index in range(len(run) - 1))
     return tokens
-
-
-def _period_matches(requested: object, observed_periods: set[str]) -> bool:
-    requested_key = normalize_period(requested)
-    if requested_key is None:
-        return True
-    if requested_key in observed_periods:
-        return True
-    if re.fullmatch(r"(?:19|20)\d{2}", requested_key):
-        return any(value.startswith(requested_key) for value in observed_periods)
-    return False
 
 
 def _citation(block: Mapping[str, object], *, fact: Mapping[str, object] | None = None) -> dict[str, object]:
@@ -97,6 +90,95 @@ def _citation(block: Mapping[str, object], *, fact: Mapping[str, object] | None 
             "review_status": fact.get("review_status"),
         })
     return citation
+
+
+def _decimal_value(value: object) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return result if result.is_finite() else None
+
+
+def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object]]:
+    """Return source-located metric values; page-level text is never a value label."""
+    citation = item.get("citation")
+    if not isinstance(citation, Mapping):
+        citation = {}
+    fact_metric = metric_for_source_label(citation.get("metric"))
+    if fact_metric is not None:
+        value = _decimal_value(citation.get("normalized_value"))
+        if value is None:
+            return []
+        period = citation.get("report_period")
+        unit = citation.get("unit")
+        multiplier = citation.get("multiplier", "1")
+        basis = citation.get("accounting_basis")
+        return [{
+            "metric": fact_metric,
+            "period": normalize_period(period),
+            "unit": unit,
+            "unit_signature": unit_signature(unit, multiplier),
+            "multiplier": str(multiplier),
+            "basis": basis,
+            "basis_signature": accounting_basis_signature(basis),
+            "currency": citation.get("currency"),
+            "value": value,
+            "numeric_eligible": citation.get("numeric_eligible") is True,
+        }]
+
+    expanded = item.get("reopened_table_row")
+    if not isinstance(expanded, Mapping) or not isinstance(expanded.get("rows"), list):
+        return []
+    supporting_cells = citation.get("supporting_cells", [])
+    source_cells = {
+        (cell.get("row_index"), cell.get("column_index")): cell
+        for cell in supporting_cells
+        if isinstance(cell, Mapping)
+    } if isinstance(supporting_cells, list) else {}
+    observations: list[dict[str, object]] = []
+    for row in expanded["rows"]:
+        if not isinstance(row, Mapping) or not isinstance(row.get("values"), list):
+            continue
+        cells = [cell for cell in row["values"] if isinstance(cell, Mapping)]
+        row_label = next((
+            str(cell.get("raw_text", "")).strip()
+            for cell in cells if cell.get("column_index") == 0
+        ), "")
+        metric = metric_for_source_label(row_label)
+        if metric is None:
+            continue
+        for cell in cells:
+            if cell.get("column_index") == 0 or cell.get("value_kind") not in {"number", "percent", "basis_points", "zero"}:
+                continue
+            value = _decimal_value(cell.get("normalized_value"))
+            if value is None:
+                continue
+            row_index, column_index = row.get("row_index"), cell.get("column_index")
+            source_cell = source_cells.get((row_index, column_index), {})
+            unit = cell.get("unit") or source_cell.get("unit") or citation.get("unit")
+            multiplier = cell.get("multiplier") or source_cell.get("multiplier") or "1"
+            basis = source_cell.get("accounting_basis") or citation.get("accounting_basis")
+            period = (
+                source_cell.get("report_period")
+                or normalize_period(cell.get("column_header"))
+                or citation.get("report_period")
+            )
+            observations.append({
+                "metric": metric,
+                "period": normalize_period(period),
+                "unit": unit,
+                "unit_signature": unit_signature(unit, multiplier),
+                "multiplier": str(multiplier),
+                "basis": basis,
+                "basis_signature": accounting_basis_signature(basis),
+                "currency": cell.get("currency") or source_cell.get("currency"),
+                "value": value,
+                "numeric_eligible": False,
+            })
+    return observations
 
 
 def _bm25(query: str, documents: Sequence[Mapping[str, object]], *, limit: int, k1: float = 1.2, b: float = 0.75) -> list[tuple[Mapping[str, object], float]]:
@@ -315,8 +397,13 @@ class IndustrialRagService:
         # Freeze the release at task start; all subqueries and reopen actions use it.
         pinned_plan = replace(plan, release_id=release_id)
         searches = plan_research(pinned_plan, max_searches=max_searches)
-        metrics = requested_metrics(plan.query)
+        metric_specs = requested_metric_specs(plan.query)
+        metrics = tuple(dict.fromkeys(item.metric for item in metric_specs))
         periods = requested_periods(plan.query, plan.report_periods)
+        requested_unit_label = requested_unit(plan.query)
+        requested_unit_key = unit_signature(requested_unit_label) if requested_unit_label else None
+        requested_basis_label = requested_accounting_basis(plan.query, plan.accounting_basis)
+        requested_basis_key = accounting_basis_signature(requested_basis_label)
         support: list[dict[str, object]] = []
         counter_candidates: list[dict[str, object]] = []
         step_trace: list[dict[str, object]] = []
@@ -380,6 +467,11 @@ class IndustrialRagService:
                         candidate = dict(seen[key])
                         candidate["research_role"] = "counter_evidence_candidate"
                         candidate["duplicate_of_supporting_evidence"] = True
+                        candidate_citation = dict(candidate.get("citation", {}))
+                        candidate_citation["source_numeric_eligible"] = candidate_citation.get("numeric_eligible") is True
+                        candidate_citation["numeric_eligible"] = False
+                        candidate["citation"] = candidate_citation
+                        candidate["query_numeric_eligible"] = False
                         counter_candidates.append(candidate)
                     continue
                 seen[key] = item
@@ -405,70 +497,134 @@ class IndustrialRagService:
                     support.append(item)
                 else:
                     item["counter_review_status"] = "candidate_requires_source_and_claim_review"
+                    citation = dict(item.get("citation", {}))
+                    citation["source_numeric_eligible"] = citation.get("numeric_eligible") is True
+                    citation["numeric_eligible"] = False
+                    item["citation"] = citation
+                    item["query_numeric_eligible"] = False
                     counter_candidates.append(item)
 
-        def evidence_metrics(item: Mapping[str, object]) -> set[str]:
-            citation = item.get("citation", {})
-            citation = citation if isinstance(citation, Mapping) else {}
-            fact_metric = str(citation.get("metric") or "").casefold()
-            text = str(item.get("text") or "").casefold()
-            expanded = item.get("reopened_table_row")
-            if isinstance(expanded, Mapping):
-                text += " " + str(expanded.get("text") or "").casefold()
-            matches = set()
-            for metric, aliases in METRIC_ALIASES.items():
-                if any(alias.casefold() in fact_metric or alias.casefold() in text for alias in aliases):
-                    matches.add(metric)
-            return matches
-
-        def evidence_periods(item: Mapping[str, object]) -> set[str]:
-            citation = item.get("citation", {})
-            citation = citation if isinstance(citation, Mapping) else {}
-            values: set[str] = set()
-            for value in (citation.get("report_period"),):
-                normalized = normalize_period(value)
-                if normalized:
-                    values.add(normalized)
-            for cell in citation.get("supporting_cells", []) if isinstance(citation.get("supporting_cells", []), list) else []:
-                if isinstance(cell, Mapping):
-                    normalized = normalize_period(cell.get("report_period"))
-                    if normalized:
-                        values.add(normalized)
-            expanded = item.get("reopened_table_row")
-            if isinstance(expanded, Mapping):
-                expanded_citation = expanded.get("citation", {})
-                if isinstance(expanded_citation, Mapping):
-                    normalized = normalize_period(expanded_citation.get("report_period"))
-                    if normalized:
-                        values.add(normalized)
-                    for cell in expanded_citation.get("supporting_cells", []):
-                        if isinstance(cell, Mapping):
-                            normalized = normalize_period(cell.get("report_period"))
-                            if normalized:
-                                values.add(normalized)
-            return values
+        metric_dimensions = [
+            (metric, period)
+            for metric in (metric_specs or (None,))
+            for period in (periods or (None,))
+        ]
+        observations_by_id: dict[str, list[dict[str, object]]] = {}
+        raw_support = support
+        support = []
+        metric_candidates: list[dict[str, object]] = []
+        for item in raw_support:
+            evidence_id = str(item.get("evidence_id"))
+            observations = _financial_observations(item)
+            observations_by_id[evidence_id] = observations
+            matched_dimensions: list[str] = []
+            matched_observations: list[dict[str, object]] = []
+            for metric, period in metric_dimensions:
+                if metric is None or metric.match_status != "exact":
+                    continue
+                requested_period_key = normalize_period(period) if period is not None else None
+                for observation in observations:
+                    if observation["metric"] != metric.metric or observation["period"] is None:
+                        continue
+                    if requested_period_key is not None and observation["period"] != requested_period_key:
+                        continue
+                    if observation["unit_signature"] is None or observation["basis_signature"] is None:
+                        continue
+                    if requested_unit_key is not None and observation["unit_signature"] != requested_unit_key:
+                        continue
+                    if requested_basis_key is not None and observation["basis_signature"] != requested_basis_key:
+                        continue
+                    dimension_key = f"{metric.metric}|{requested_period_key or '*'}"
+                    if dimension_key not in matched_dimensions:
+                        matched_dimensions.append(dimension_key)
+                    matched_observations.append(observation)
+            item["query_match_dimensions"] = matched_dimensions
+            item["query_numeric_eligible"] = any(
+                observation["numeric_eligible"] for observation in matched_observations
+            )
+            item["query_metric_match_status"] = "exact" if matched_dimensions else "candidate_only"
+            citation = item.get("citation")
+            if isinstance(citation, Mapping):
+                citation = dict(citation)
+                if not item["query_numeric_eligible"]:
+                    citation["source_numeric_eligible"] = citation.get("numeric_eligible") is True
+                    citation["numeric_eligible"] = False
+                item["citation"] = citation
+            if matched_dimensions:
+                support.append(item)
+            else:
+                item["research_role"] = "metric_scope_candidate"
+                item["review_status"] = "candidate_requires_exact_metric_period_unit_and_basis_review"
+                metric_candidates.append(item)
 
         supporting_limit = evidence_limit - max(1, min(6, evidence_limit // 4))
         support = support[:supporting_limit]
-        counter_candidates = counter_candidates[: evidence_limit - len(support)]
+        counter_reserve = max(1, min(6, evidence_limit // 4))
+        counter_candidates = counter_candidates[:counter_reserve]
+        metric_candidates = metric_candidates[: max(0, evidence_limit - len(support) - len(counter_candidates))]
         coverage_rows = []
-        for metric in metrics or (None,):
+        returned_support_ids = {str(item.get("evidence_id")) for item in support}
+        returned_candidate_ids = {str(item.get("evidence_id")) for item in metric_candidates}
+        for metric in metric_specs or (None,):
             for period in periods or (None,):
+                normalized_period = normalize_period(period) if period is not None else None
+                dimension_key = (
+                    f"{metric.metric}|{normalized_period or '*'}"
+                    if metric is not None else f"unspecified|{normalized_period or '*'}"
+                )
                 matching = []
                 for item in support:
-                    if metric is not None and metric not in evidence_metrics(item):
-                        continue
-                    observed_periods = evidence_periods(item)
-                    if period is not None and observed_periods and not _period_matches(period, observed_periods):
-                        continue
-                    if period is not None and not observed_periods:
-                        continue
-                    matching.append(item)
+                    if dimension_key in item.get("query_match_dimensions", []):
+                        matching.append(item)
+                matching_ids = {str(item.get("evidence_id")) for item in matching}
+                candidate_ids = sorted(
+                    (returned_support_ids | returned_candidate_ids)
+                    - matching_ids
+                )
+                observed_ids = sorted(matching_ids | set(candidate_ids))
+                observed_observations = [
+                    observation
+                    for evidence_id in observed_ids
+                    for observation in observations_by_id.get(evidence_id, [])
+                ]
+                candidate_observations = [
+                    observation
+                    for evidence_id in candidate_ids
+                    for observation in observations_by_id.get(evidence_id, [])
+                ]
                 coverage_rows.append({
-                    "metric": metric,
+                    "metric": metric.metric if metric is not None else None,
+                    "requested_metric": metric.label if metric is not None else None,
+                    "metric_match_status": metric.match_status if metric is not None else "unspecified",
                     "report_period": period,
-                    "status": "located" if matching else "missing",
+                    "normalized_report_period": normalized_period,
+                    "requested_unit": requested_unit_label,
+                    "observed_units": sorted({
+                        str(observation["unit"]) for observation in observed_observations
+                        if observation.get("unit")
+                    }),
+                    "requested_accounting_basis": requested_basis_label,
+                    "observed_accounting_bases": sorted({
+                        str(observation["basis"]) for observation in observed_observations
+                        if observation.get("basis")
+                    }),
+                    "observed_report_periods": sorted({
+                        str(observation["period"]) for observation in observed_observations
+                        if observation.get("period")
+                    }),
+                    "observed_metrics": sorted({
+                        str(observation["metric"]) for observation in observed_observations
+                    }),
+                    "candidate_metrics": sorted({
+                        str(observation["metric"]) for observation in candidate_observations
+                    }),
+                    "status": (
+                        "located" if matching else
+                        "candidate_only" if candidate_ids else
+                        "missing"
+                    ),
                     "evidence_ids": [str(item.get("evidence_id")) for item in matching],
+                    "candidate_evidence_ids": candidate_ids,
                     "source_locations": [
                         {
                             "source_id": item.get("source_id"),
@@ -520,11 +676,14 @@ class IndustrialRagService:
             if len({row["value"] for row in rows}) > 1
         ]
         all_covered = bool(coverage_rows) and all(row["status"] == "located" for row in coverage_rows)
-        planned_dimensions = max(1, len(metrics) * max(1, len(periods)))
+        planned_dimensions = max(1, len(metric_specs) * max(1, len(periods)))
         supporting_steps = sum(step["kind"] == "supporting_evidence" for step in step_trace)
         if all_covered:
             stop_reason = "requested_metric_period_coverage_located"
             next_action = "answer_with_source_citations_and_review_counter_candidates"
+        elif not support and metric_candidates:
+            stop_reason = "candidate_evidence_requires_metric_scope_review"
+            next_action = "review_candidate_metric_period_unit_and_basis_before_numeric_claims"
         elif not support:
             stop_reason = "no_supporting_evidence_after_bounded_search"
             next_action = "abstain_or_clarify_missing_metric_period"
@@ -550,19 +709,27 @@ class IndustrialRagService:
                 "max_searches": max_searches,
                 "evidence_limit": evidence_limit,
                 "returned_supporting_count": len(support),
+                "returned_metric_candidate_count": len(metric_candidates),
                 "returned_counter_candidate_count": len(counter_candidates),
-                "evidence_truncated": max(0, len(seen) - len(support) - len(counter_candidates)),
+                "evidence_truncated": max(0, len(seen) - len(support) - len(metric_candidates) - len(counter_candidates)),
                 "search_count": len(step_trace),
                 "requested_metrics": list(metrics),
+                "requested_metric_variants": [
+                    {"metric": item.metric, "label": item.label, "match_status": item.match_status}
+                    for item in metric_specs
+                ],
                 "requested_report_periods": list(periods),
+                "requested_unit": requested_unit_label,
+                "requested_accounting_basis": requested_basis_label,
                 "dimensions_truncated": supporting_steps < planned_dimensions,
                 "steps": step_trace,
             },
-            "status": "available" if support else "no_evidence",
+            "status": "available" if support else "candidate_only" if metric_candidates else "no_evidence",
             "coverage": coverage_rows,
             "channels": channel_status,
-            "retrieved": [*support, *counter_candidates],
+            "retrieved": [*support, *metric_candidates, *counter_candidates],
             "supporting_evidence": support,
+            "candidate_evidence": metric_candidates,
             "counter_evidence": {
                 "status": "candidate_search_completed" if step_trace and step_trace[-1]["kind"] == "counter_evidence_candidate" else "not_attempted",
                 "backend_scope": "local BM25 search for correction and restatement language; results require source and claim review",

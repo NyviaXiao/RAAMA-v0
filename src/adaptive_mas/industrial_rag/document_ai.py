@@ -138,6 +138,14 @@ def _explicit_unit_text(parts: list[str]) -> str | None:
     """Read a unit only when the source explicitly labels it as a unit."""
     lines = [line.strip() for part in parts for line in str(part).splitlines()]
     for index, line in enumerate(lines):
+        bracketed_unit = re.fullmatch(
+            r"[（(]\s*(人民币\s*)?(百万元|亿元|万元|元\s*/\s*股|元|%)\s*(?:[，,][^）)]*)?[）)]",
+            line,
+        )
+        if bracketed_unit is not None:
+            prefix = "人民币" if bracketed_unit.group(1) else ""
+            unit = re.sub(r"\s+", "", bracketed_unit.group(2))
+            return prefix + unit
         match = re.fullmatch(r"(?:单位|unit)\s*[:：]\s*(.*)", line, flags=re.IGNORECASE)
         if match is None:
             continue
@@ -158,9 +166,26 @@ def _period_header(value: str) -> str | None:
     """Keep the source's period label when a table heading states one clearly."""
     text = value.strip()
     period_marker = r"年|FY|Q[1-4]|季度|截至|期末|(?:1[-—~至]3|1[-—~至]6|1[-—~至]9|4[-—~至]6|7[-—~至]9|10[-—~至]12)月|12月31日"
+    if re.fullmatch(r"(?:第一|第二|第三|第四|第?[一二三四1-4])季度|Q[1-4]", text, flags=re.IGNORECASE):
+        return text
     if re.search(r"(?:19|20)\d{2}", text) and re.search(period_marker, text, flags=re.IGNORECASE):
         return text
     return None
+
+
+def _combined_period_header(values: list[str]) -> str | None:
+    periods = tuple(dict.fromkeys(
+        period for value in values
+        if (period := _period_header(value)) is not None
+    ))
+    years = [value for value in periods if re.fullmatch(r"(?:19|20)\d{2}年", value)]
+    quarters = [
+        value for value in periods
+        if re.fullmatch(r"(?:第一|第二|第三|第四|第?[一二三四1-4])季度|Q[1-4]", value, flags=re.IGNORECASE)
+    ]
+    if len(years) == 1 and len(quarters) == 1:
+        return years[0] + quarters[0]
+    return periods[0] if len(periods) == 1 else None
 
 
 _STATEMENT_TITLE = re.compile(
@@ -211,6 +236,44 @@ def _docling_table_segments(cells: list[Any]) -> list[dict[str, Any]]:
             )
         )
 
+    def quarter_labels(row_index: int) -> dict[int, str]:
+        labels = {}
+        for cell in rows[row_index]:
+            text = str(getattr(cell, "text", "")).strip()
+            period = _period_header(text)
+            if period is not None and re.fullmatch(
+                r"(?:第一|第二|第三|第四|第?[一二三四1-4])季度|Q[1-4]",
+                period,
+                flags=re.IGNORECASE,
+            ):
+                labels[int(cell.start_col_offset_idx)] = period
+        return labels
+
+    quarter_header_rows: dict[int, tuple[int, int]] = {}
+    for row_index in sorted(rows):
+        next_row = row_index + 1
+        if next_row not in rows:
+            continue
+        years = {
+            int(cell.start_col_offset_idx): text
+            for cell in rows[row_index]
+            if (text := str(getattr(cell, "text", "")).strip())
+            and re.fullmatch(r"(?:19|20)\d{2}年", text)
+        }
+        quarters = quarter_labels(next_row)
+        shared_columns = set(years).intersection(quarters)
+        if len(shared_columns) >= 2 and len({years[column] for column in shared_columns}) == 1:
+            if len({quarters[column] for column in shared_columns}) >= 2:
+                quarter_header_rows[row_index] = (row_index, next_row)
+
+    quarter_caption_rows: dict[int, int] = {}
+    for start in quarter_header_rows:
+        caption_row = start + 2
+        if caption_row in rows and re.search(
+            r"按季度披露的(?:经营业绩|财务)指标", row_text(caption_row)
+        ):
+            quarter_caption_rows[start] = caption_row
+
     def is_text_preamble(row_index: int) -> bool:
         return (
             is_statement_title(row_index)
@@ -226,12 +289,15 @@ def _docling_table_segments(cells: list[Any]) -> list[dict[str, Any]]:
         if first_start <= min(rows) + 1 or all(is_text_preamble(row) for row in preamble_rows):
             first_header_end = first_end
     boundaries: set[int] = set()
+    boundaries.update(quarter_header_rows)
     for run_start, _run_end in header_runs[1:]:
         if run_start > first_header_end:
             title_row = run_start - 1 if run_start - 1 in rows and is_statement_title(run_start - 1) else run_start
             boundaries.add(title_row)
     for row_index in sorted(rows):
         if row_index <= first_header_end:
+            continue
+        if row_index in quarter_caption_rows.values():
             continue
         if is_statement_title(row_index):
             boundaries.add(row_index)
@@ -248,6 +314,9 @@ def _docling_table_segments(cells: list[Any]) -> list[dict[str, Any]]:
         segment_rows = [row for row in row_indexes if start <= row <= end]
         segment_cells = [cell for row in segment_rows for cell in rows[row]]
         segment_header_rows = [row for row in column_header_rows if start <= row <= end]
+        if start in quarter_header_rows:
+            segment_header_rows.extend(quarter_header_rows[start])
+            segment_header_rows = sorted(set(segment_header_rows))
         quarantine = None
         if not segment_header_rows:
             header_rows = 1
@@ -268,6 +337,8 @@ def _docling_table_segments(cells: list[Any]) -> list[dict[str, Any]]:
                 header_rows = contiguous_end - start + 1
             if contiguous_end < max(segment_header_rows):
                 quarantine = quarantine or "non_contiguous_column_header_rows"
+        if start in quarter_caption_rows:
+            header_rows = max(header_rows, quarter_caption_rows[start] - start + 1)
         title_values = [
             str(getattr(cell, "text", "")).strip()
             for row in segment_rows
@@ -275,6 +346,8 @@ def _docling_table_segments(cells: list[Any]) -> list[dict[str, Any]]:
             for cell in rows[row]
             if str(getattr(cell, "text", "")).strip()
         ]
+        if start in quarter_caption_rows:
+            title_values.append(row_text(quarter_caption_rows[start]))
         segments.append({
             "start_row": start,
             "end_row": end,
@@ -339,12 +412,9 @@ def _docling_segment_records(
             headers_by_column.setdefault(int(cell["column_index"]), []).append(str(cell["raw_text"]).strip())
     period_by_column: dict[int, str] = {}
     for column, values in headers_by_column.items():
-        periods = tuple(dict.fromkeys(
-            period for value in values
-            if (period := _period_header(value)) is not None
-        ))
-        if len(periods) == 1:
-            period_by_column[column] = periods[0]
+        period = _combined_period_header(values)
+        if period is not None:
+            period_by_column[column] = period
     for cell in table_cells:
         if int(cell["row_index"]) >= header_rows:
             cell["report_period"] = period_by_column.get(int(cell["column_index"]))

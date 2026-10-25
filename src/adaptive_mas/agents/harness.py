@@ -1590,6 +1590,10 @@ def _fundamental_handlers(
                     (item, "supporting_evidence")
                     for item in result.get("supporting_evidence", [])
                 ]
+                evidence_items.extend(
+                    (item, "metric_scope_candidate")
+                    for item in result.get("candidate_evidence", [])
+                )
                 counter_candidates = result.get("counter_evidence", {}).get("candidates", [])
                 evidence_items.extend(
                     (item, "counter_evidence_candidate")
@@ -1686,7 +1690,12 @@ def _fundamental_handlers(
                             "duplicate_of_supporting_evidence": bool(item.get("duplicate_of_supporting_evidence", False)),
                         })
             return {
-                "status": "available" if retrieved else "no_new_evidence" if reused_evidence_ids else "no_evidence",
+                "status": (
+                    "available" if any(item.get("research_role") == "supporting_evidence" for item in retrieved)
+                    else "candidate_only" if retrieved
+                    else "no_new_evidence" if reused_evidence_ids
+                    else "no_evidence"
+                ),
                 "release_id": industrial_rag_release_id,
                 "retrieved": retrieved,
                 "reused_evidence_ids": reused_evidence_ids,
@@ -2165,10 +2174,18 @@ def _validate_report(
                 raise ValueError(f"{role_id} cited source does not expose a finite numeric value for {field_name!r}") from None
             if not expected_decimal.is_finite():
                 raise ValueError(f"{role_id} cited source does not expose a finite numeric value for {field_name!r}")
-            if observation_decimal != expected_decimal:
+            market_observation = "facts" not in source and "metric" in source and "value" in source
+            values_match = (
+                math.isclose(
+                    float(observation_decimal), float(expected_decimal),
+                    rel_tol=1e-9, abs_tol=1e-10,
+                )
+                if market_observation else observation_decimal == expected_decimal
+            )
+            if not values_match:
                 raise ValueError(
                     f"{role_id} structured observation value does not match its cited source "
-                    "under exact Decimal equality"
+                    + ("within market observation tolerance" if market_observation else "under exact Decimal equality")
                 )
             available_at = source.get("available_at")
             validated = dict(observation)
