@@ -19,6 +19,7 @@ from adaptive_mas.industrial_rag.models import (
     Document,
     DocumentBundle,
     DocumentVersion,
+    EvidenceResult,
     FinancialFact,
     QueryPlan,
     Section,
@@ -277,6 +278,69 @@ def test_cache_is_bound_to_current_grants_and_span_or_download_rechecks_access(t
         service.read_span(plan, "version-1-span-1")
     with pytest.raises(PermissionError):
         service.download_original(plan, "document-1", "version-1")
+
+
+def test_search_cache_identity_includes_aliases_and_runtime_revisions(tmp_path) -> None:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    bundle = _bundle()
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, ["version-1"], "release-1")
+
+    class DenseStub:
+        implementation = "dense-v1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, plan, version_ids):
+            self.calls += 1
+            assert "version-1" in version_ids
+            return [EvidenceResult(
+                evidence_id="dense-result", channel="dense", document_id="document-1",
+                version_id="version-1", source_id="cninfo-123456",
+                content_sha256=bundle.version.content_sha256,
+                page_number=3, block_id="version-1-block-1", fact_id=None,
+                text=" ".join(plan.aliases), score=1.0, source_time_basis="strict_forward",
+            )]
+
+    class RerankerStub:
+        implementation = "reranker-v1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, plan, evidence):
+            self.calls += 1
+            return evidence
+
+    dense = DenseStub()
+    reranker = RerankerStub()
+    service = IndustrialRagService(store, channel_adapters={"dense": dense}, reranker=reranker)
+    plan = replace(_plan(channels=("dense",)), aliases=("营业收入",))
+    first = service.search(plan)
+    cached_repeat = service.search(replace(plan, plan_id="query-plan-retry"))
+    assert cached_repeat["cache"]["hit"] is True
+    assert cached_repeat["plan_id"] == "query-plan-retry"
+    assert dense.calls == 1
+    assert reranker.calls == 1
+
+    with_different_alias = service.search(replace(plan, aliases=("主营业务收入",)))
+    assert first["cache"]["key_sha256"] != with_different_alias["cache"]["key_sha256"]
+    assert dense.calls == 2
+    assert reranker.calls == 2
+
+    dense.implementation = "dense-v2"
+    with_new_adapter = service.search(replace(plan, aliases=("主营业务收入",)))
+    assert with_new_adapter["cache"]["hit"] is False
+    assert with_new_adapter["cache"]["key_sha256"] != with_different_alias["cache"]["key_sha256"]
+    assert dense.calls == 3
+
+    reranker.implementation = "reranker-v2"
+    with_new_reranker = service.search(replace(plan, aliases=("主营业务收入",)))
+    assert with_new_reranker["cache"]["hit"] is False
+    assert with_new_reranker["cache"]["key_sha256"] != with_new_adapter["cache"]["key_sha256"]
+    assert reranker.calls == 4
 
 
 def test_strict_time_requires_capture_and_ingestion_by_cutoff_but_proxy_is_labelled(tmp_path) -> None:

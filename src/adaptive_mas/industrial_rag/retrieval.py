@@ -181,6 +181,21 @@ def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object
     return observations
 
 
+def _component_cache_identity(component: object) -> object:
+    identity = getattr(component, "cache_identity", None)
+    if identity is not None:
+        return identity
+    return {
+        "implementation": getattr(
+            component,
+            "implementation",
+            f"{type(component).__module__}.{type(component).__qualname__}",
+        ),
+        "model": getattr(component, "model", None),
+        "revision": getattr(component, "revision", None),
+    }
+
+
 def _bm25(query: str, documents: Sequence[Mapping[str, object]], *, limit: int, k1: float = 1.2, b: float = 0.75) -> list[tuple[Mapping[str, object], float]]:
     query_terms = list(dict.fromkeys(financial_tokens(query)))
     if not query_terms or not documents:
@@ -296,19 +311,43 @@ class IndustrialRagService:
         )
         version_ids = [str(row["version_id"]) for row in permitted]
         permission_revision = self.store.permission_revision()
+        builtin_channel_identities = {
+            "structured_facts": "typed_fact_records_v1",
+            "bm25": "local_bm25_chinese_bigrams_v1",
+            "toc_page": "section_page_reference_v1",
+        }
         safe_plan = {
+            "cache_schema_version": "adaptive-mas.financial-rag-search-cache.v2",
             "query_sha256": hashlib.sha256(plan.query.encode("utf-8")).hexdigest(),
+            "aliases": list(plan.aliases),
             "security_code": plan.security_code, "as_of": as_of.isoformat(),
             "principal_id": plan.principal_id, "permission_revision": permission_revision,
             "task_type": plan.task_type, "accounting_basis": plan.accounting_basis,
             "report_periods": list(plan.report_periods), "release_id": release_id,
             "release_spec_sha256": release_hash, "channels": list(plan.channels),
             "top_k": plan.top_k, "time_mode": plan.time_mode,
+            "channel_implementations": {
+                channel: (
+                    _component_cache_identity(self.channel_adapters[channel])
+                    if channel in self.channel_adapters
+                    else builtin_channel_identities.get(channel, "unavailable")
+                )
+                for channel in plan.channels
+            },
+            "reranker_implementation": (
+                _component_cache_identity(self.reranker)
+                if self.reranker is not None else "unavailable"
+            ),
         }
         cache_key = stable_hash(safe_plan)
         cached = self.store.cache_get(cache_key) if use_cache else None
         if cached is not None:
-            return {**cached, "cache": {"hit": True, "key_sha256": cache_key}, "current_permission_revision": permission_revision}
+            return {
+                **cached,
+                "plan_id": plan.plan_id,
+                "cache": {"hit": True, "key_sha256": cache_key},
+                "current_permission_revision": permission_revision,
+            }
 
         channel_results: dict[str, list[EvidenceResult]] = {}
         channel_status: dict[str, dict[str, object]] = {}
