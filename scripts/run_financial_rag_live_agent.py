@@ -62,6 +62,7 @@ class LiveAgentRunBundle:
     expected_case_identity_sha256: str
     bundle_sha256: str
     bundle_path: Path | None = None
+    dense_cache_path: Path | None = None
 
     def verify_immutable_inputs(self) -> None:
         if self.bundle_path is not None and capture._sha256(self.bundle_path.read_bytes()) != self.bundle_sha256:
@@ -96,6 +97,7 @@ def _default_run_bundle() -> LiveAgentRunBundle:
         expected_runtime_model_identity_sha256=SOURCE_RUNTIME_MODEL_IDENTITY_SHA256,
         expected_case_identity_sha256=SOURCE_CASE_IDENTITY_SHA256,
         bundle_sha256=capture._canonical_hash(identity_lock),
+        dense_cache_path=ROOT / ".tmp" / "industrial_rag_dense_vector_cache.sqlite3",
     )
 
 
@@ -478,13 +480,21 @@ def _verify_capture_run(
     journal.verify_references(attempts[-1].get("retrieval_trace_records"), require_nonempty=True)
     journal.verify_references(completed.get("retrieval_trace_records"), require_nonempty=True)
     paired_path = bundle.source_run_dir / f"agent_progress_{security_code}_ablation12.json"
-    paired_progress = json.loads(paired_path.read_text(encoding="utf-8"))
-    if paired_progress.get("attempts_sha256") != capture._canonical_hash(paired_progress.get("attempts")):
-        raise capture.RunIdentityError("failed paired reranker progress failed its attempt hash")
-    paired_attempts = paired_progress.get("attempts")
-    if not isinstance(paired_attempts, list) or not paired_attempts or not isinstance(paired_attempts[-1], dict):
-        raise capture.RunIdentityError("failed paired reranker attempt is missing")
-    journal.verify_references(paired_attempts[-1].get("retrieval_trace_records"), require_nonempty=True)
+    if paired_path.is_file():
+        paired_progress = json.loads(paired_path.read_text(encoding="utf-8"))
+        if not isinstance(paired_progress, dict):
+            raise capture.RunIdentityError("paired reranker progress is malformed")
+        paired_attempts = paired_progress.get("attempts")
+        if "attempts_sha256" in paired_progress and paired_progress.get("attempts_sha256") != capture._canonical_hash(paired_attempts):
+            raise capture.RunIdentityError("paired reranker progress failed its attempt hash")
+        if paired_attempts is not None:
+            if not isinstance(paired_attempts, list):
+                raise capture.RunIdentityError("paired reranker attempts are malformed")
+            for paired_attempt in paired_attempts:
+                if not isinstance(paired_attempt, dict):
+                    raise capture.RunIdentityError("paired reranker attempt is malformed")
+                if "retrieval_trace_records" in paired_attempt:
+                    journal.verify_references(paired_attempt["retrieval_trace_records"])
     source_store = IndustrialRagStore(
         bundle.source_run_dir / "industrial_rag.sqlite3",
         LocalContentAddressedStore(bundle.source_run_dir / "objects"),
@@ -498,7 +508,7 @@ def _load_service(
     bundle: LiveAgentRunBundle | None = None,
     *,
     qwen_assets_path: Path | None = None,
-    dense_cache_path: Path | None = None,
+    dense_cache_path: Path,
 ) -> tuple[IndustrialRagStore, IndustrialRagService, dict[str, object]]:
     bundle = bundle or _default_run_bundle()
     bundle.verify_immutable_inputs()
@@ -520,8 +530,10 @@ def _load_service(
     dense = LocalQwenDenseAdapter(
         store,
         embedding,
-        cache_path=dense_cache_path or ROOT / ".tmp" / "industrial_rag_dense_vector_cache.sqlite3",
+        cache_path=dense_cache_path,
+        require_cached_vectors=True,
     )
+    dense.verify_persistent_cache(store.release_versions(bundle.source_run_id))
     reranker = LocalQwenReranker(reranker_runtime)
     runtime_identity = capture._runtime_model_identity(
         use_qwen=True,
@@ -548,6 +560,7 @@ def main() -> None:
     parser.add_argument("--expected-bundle-sha256", help="Out-of-band SHA-256 pin for --run-bundle raw bytes")
     parser.add_argument("--output-root", type=Path, help="Parent directory for a new, non-overwriting live-agent run")
     parser.add_argument("--qwen-assets", type=Path, help="Pinned local Qwen asset directory; required with --run-bundle")
+    parser.add_argument("--dense-cache", type=Path, help="Existing identity-checked dense-vector cache to reuse")
     args = parser.parse_args()
     if args.run_bundle is None:
         if args.expected_bundle_sha256 is not None:
@@ -565,17 +578,25 @@ def main() -> None:
         raise ValueError("run-id must be a safe immutable identifier")
 
     source_envelope, _baseline_progress, spec, case_identity = _verify_capture_run(bundle)
+    dense_cache_source_path = capture._resolve_dense_cache_path(
+        run_dir=bundle.source_run_dir,
+        explicit_path=args.dense_cache or bundle.dense_cache_path,
+    )
     output_root = args.output_root.resolve() if args.output_root is not None else LIVE_OUTPUT_ROOT
     output_dir = output_root / run_id
     if output_dir.resolve().is_relative_to(bundle.source_run_dir.resolve()):
         raise ValueError("live-agent output directory cannot be inside the immutable source run")
     output_dir.mkdir(parents=True, exist_ok=False)
+    dense_cache_path = LocalQwenDenseAdapter.copy_persistent_cache(
+        dense_cache_source_path,
+        output_dir / "dense_vector_cache.sqlite3",
+    )
     qwen_assets_path = args.qwen_assets or capture.QWEN_ASSETS
     store, service, runtime_identity = _load_service(
         source_envelope,
         bundle,
         qwen_assets_path=qwen_assets_path,
-        dense_cache_path=output_dir / "dense_vector_cache.sqlite3",
+        dense_cache_path=dense_cache_path,
     )
     permission_revision, continuation_revision = _verify_runtime_access_revisions(store, case_identity)
     provider_client = _load_provider_client()
@@ -590,6 +611,7 @@ def main() -> None:
         "source_manifest_sha256": bundle.source_manifest_sha256,
         "source_run_identity_sha256": source_envelope["run_identity_sha256"],
         "source_runtime_model_identity_sha256": source_envelope["runtime_model_identity_sha256"],
+        "dense_vector_cache_source": str(dense_cache_source_path),
         "source_implementation_sha256": source_run_identity["implementation_sha256"],
         "case_identity_sha256": case_identity["case_identity_sha256"],
         "runtime_model_identity_sha256": runtime_identity_sha256,

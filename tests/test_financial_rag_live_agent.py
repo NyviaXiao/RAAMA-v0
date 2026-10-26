@@ -398,6 +398,16 @@ def test_versioned_run_bundle_binds_new_issuer_and_exact_manifest_bytes(tmp_path
     assert loaded_progress["completed_result_sha256"] == capture._canonical_hash(loaded_progress["completed_result"])
     assert loaded_spec["security_code"] == "123456"
 
+    paired_path = source_run_dir / "agent_progress_123456_ablation12.json"
+    paired_progress = json.loads(paired_path.read_text(encoding="utf-8"))
+    paired_progress["attempts_sha256"] = "0" * 64
+    paired_path.write_text(json.dumps(paired_progress, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(capture.RunIdentityError, match="paired reranker progress failed its attempt hash"):
+        live_agent._verify_capture_run(bundle)
+
+    paired_path.unlink()
+    live_agent._verify_capture_run(bundle)
+
     manifest_path.write_bytes(manifest_bytes.replace(b"\r\n", b"\n"))
     with pytest.raises(capture.RunIdentityError, match="raw bytes"):
         bundle.verify_immutable_inputs()

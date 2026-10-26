@@ -29,6 +29,7 @@ from adaptive_mas.industrial_rag.models import (  # noqa: E402
     Document,
     DocumentBundle,
     DocumentVersion,
+    FinancialFact,
     Span,
 )
 from adaptive_mas.industrial_rag.object_store import S3CompatibleObjectStore  # noqa: E402
@@ -193,7 +194,19 @@ def main() -> None:
         raise AssertionError("RustFS content-addressed round trip did not preserve the synthetic bytes")
     output["rustfs_s3_content_addressed_roundtrip"] = True
 
-    store = PostgresIndustrialRagStore(_postgres_dsn(ports["postgres"], secrets["POSTGRES_PASSWORD"]), objects)
+    postgres_dsn = _postgres_dsn(ports["postgres"], secrets["POSTGRES_PASSWORD"])
+    postgres_deadline = time.monotonic() + 45
+    store: PostgresIndustrialRagStore | None = None
+    last_postgres_error: RuntimeError | None = None
+    while time.monotonic() < postgres_deadline:
+        try:
+            store = PostgresIndustrialRagStore(postgres_dsn, objects)
+            break
+        except RuntimeError as error:
+            last_postgres_error = error
+            time.sleep(1)
+    if store is None:
+        raise RuntimeError("PostgreSQL did not accept the initial adapter connection within the bounded startup window") from last_postgres_error
     output["postgres_backend"] = store.backend_status()
     now = datetime.now(timezone.utc)
     published = now - timedelta(minutes=1)
@@ -231,6 +244,14 @@ def main() -> None:
         block, block_id=f"rollback-block-{suffix}", version_id=rollback_version_id,
         text=rollback_payload.decode("utf-8"), char_end=len(rollback_payload), span_id=rollback_span.span_id,
     )
+    rollback_fact = FinancialFact(
+        fact_id=f"rollback-fact-{suffix}", version_id=rollback_version_id,
+        security_code=str(fixture["security_code"]), entity_name=str(fixture["entity_name"]),
+        metric="synthetic_revenue", raw_value="10", normalized_value="10", unit="CNY",
+        multiplier="1", currency="CNY", report_period=str(fixture["report_period"]),
+        consolidation=str(fixture["accounting_basis"]), span_ids=(rollback_span.span_id,), parser_version="synthetic@1",
+        confidence=1.0, review_status="reviewed",
+    )
     rollback_bundle = DocumentBundle(
         document=replace(document, document_id=f"rollback-document-{suffix}"),
         version=replace(
@@ -238,7 +259,7 @@ def main() -> None:
             content_sha256=rollback_sha256, captured_at=now + timedelta(seconds=1),
             ingested_at=now + timedelta(seconds=1, milliseconds=1),
         ),
-        payload=rollback_payload, spans=(rollback_span,), blocks=(rollback_block,),
+        payload=rollback_payload, spans=(rollback_span,), blocks=(rollback_block,), facts=(rollback_fact,),
         read_principals=("x" * 129,),
     )
     try:
@@ -252,12 +273,16 @@ def main() -> None:
         rollback_rows = {
             "document": connection.execute("SELECT COUNT(*) FROM rag_documents WHERE document_id=?", (rollback_bundle.document.document_id,)).fetchone()[0],
             "version": connection.execute("SELECT COUNT(*) FROM rag_document_versions WHERE version_id=?", (rollback_version_id,)).fetchone()[0],
+            "spans": connection.execute("SELECT COUNT(*) FROM rag_spans WHERE version_id=?", (rollback_version_id,)).fetchone()[0],
+            "blocks": connection.execute("SELECT COUNT(*) FROM rag_blocks WHERE version_id=?", (rollback_version_id,)).fetchone()[0],
+            "facts": connection.execute("SELECT COUNT(*) FROM rag_facts WHERE version_id=?", (rollback_version_id,)).fetchone()[0],
             "outbox": connection.execute("SELECT COUNT(*) FROM rag_outbox WHERE event_key=?", (f"rag.document.ingested:{rollback_version_id}:{rollback_sha256}",)).fetchone()[0],
         }
     if any(rollback_rows.values()) or objects.get(rollback_sha256) != rollback_payload:
         raise AssertionError("failed PostgreSQL ingest left partial SQL rows or lost the content-addressed fixture object")
     output["postgres_ingest_transaction_rollback"] = {
-        "document_version_and_outbox_rows_rolled_back": True,
+        "document_version_span_block_fact_and_outbox_rows_rolled_back": True,
+        "row_counts_after_rollback": {key: int(value) for key, value in rollback_rows.items()},
         "content_addressed_object_remains_until_isolated_volume_cleanup": True,
     }
 
@@ -289,8 +314,6 @@ def main() -> None:
     outbox = _outbox_verify_once(store)
     if outbox is None or outbox.get("committed") is not True:
         raise AssertionError("PostgreSQL outbox consume did not commit its receipt")
-    if _outbox_verify_once(store) is not None:
-        raise AssertionError("completed PostgreSQL outbox event was consumed a second time")
     with store._connect() as connection:
         receipt = connection.execute(
             "SELECT result_json FROM rag_consumer_receipts WHERE consumer_id=? AND event_key=?",
@@ -298,6 +321,19 @@ def main() -> None:
         ).fetchone()
     if receipt is None:
         raise AssertionError("PostgreSQL outbox receipt is missing after commit")
+    duplicate_ack = store.finish_outbox(
+        str(outbox["event_key"]), "sqlite-reference-indexer-v1",
+        {"duplicate_ack_probe": True}, lease_generation=int(outbox["attempt"]),
+    )
+    with store._connect() as connection:
+        receipt_after_duplicate_ack = connection.execute(
+            "SELECT result_json FROM rag_consumer_receipts WHERE consumer_id=? AND event_key=?",
+            ("sqlite-reference-indexer-v1", str(outbox["event_key"])),
+        ).fetchone()
+    if duplicate_ack is not False or receipt_after_duplicate_ack is None or receipt_after_duplicate_ack["result_json"] != receipt["result_json"]:
+        raise AssertionError("duplicate PostgreSQL outbox ack changed a committed receipt")
+    if _outbox_verify_once(store) is not None:
+        raise AssertionError("completed PostgreSQL outbox event was claimable a second time")
 
     source_manifest = store.source_manifest([version_id])
     text_index = store.preview_reference_index_manifest(release_id, [version_id])
@@ -312,6 +348,12 @@ def main() -> None:
         text_index_manifest_sha256=str(text_index["index_manifest_sha256"]),
         vector_index_manifest_sha256=vector_index_sha256,
     )
+    store.create_release(release_spec, [version_id])
+    reference_receipt = store.build_reference_index_receipt(release_id)
+    ready = store.mark_backend_ready(reference_receipt, store.verify_reference_index)
+    publication = store.publish_release(release_id, actor_id="integration-smoke", reason="Verify isolated PostgreSQL-backed application contract.")
+    if not ready["ready"] or publication["status"] != "published" or store.release_summaries()["active_release_id"] != release_id:
+        raise AssertionError("PostgreSQL reference receipt and release publication did not complete")
     missing_receipt_release_id = f"{release_id}-missing-backend"
     missing_receipt_spec = replace(
         release_spec,
@@ -320,6 +362,8 @@ def main() -> None:
         text_index_manifest_sha256=str(store.preview_reference_index_manifest(missing_receipt_release_id, [version_id])["index_manifest_sha256"]),
     )
     active_before_failed_publish = store.active_release_id()
+    if active_before_failed_publish != release_id:
+        raise AssertionError("the valid baseline release is not active before negative publication probe")
     store.create_release(missing_receipt_spec, [version_id])
     try:
         store.publish_release(missing_receipt_release_id, actor_id="integration-smoke", reason="Verify failed publication transaction rollback.")
@@ -332,18 +376,14 @@ def main() -> None:
     if after_failed_publish["active_release_id"] != active_before_failed_publish or failed_release_row is None or failed_release_row["status"] != "building":
         raise AssertionError("failed release publication changed the active pointer or release status")
     output["postgres_release_publication_failure_atomic"] = {
-        "active_release_unchanged": True, "incomplete_release_remains_building": True,
+        "previous_active_release_preserved": True,
+        "previous_active_release_id": active_before_failed_publish,
+        "incomplete_release_remains_building": True,
     }
-
-    store.create_release(release_spec, [version_id])
-    reference_receipt = store.build_reference_index_receipt(release_id)
-    ready = store.mark_backend_ready(reference_receipt, store.verify_reference_index)
-    publication = store.publish_release(release_id, actor_id="integration-smoke", reason="Verify isolated PostgreSQL-backed application contract.")
-    if not ready["ready"] or publication["status"] != "published" or store.release_summaries()["active_release_id"] != release_id:
-        raise AssertionError("PostgreSQL reference receipt and release publication did not complete")
     output["postgres_application_ingest_outbox_release_publish"] = {
         "ingested": True, "object_reopened": True, "outbox_receipt_committed": True,
-        "outbox_handler_failure_retried_once": True, "duplicate_ack_prevented": True,
+        "outbox_handler_failure_retried_once": True, "duplicate_ack_returned_false_without_mutating_receipt": True,
+        "completed_event_not_claimable_again": True,
         "reference_receipt_ready": True, "release_published": True,
     }
 

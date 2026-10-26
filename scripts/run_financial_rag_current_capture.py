@@ -476,6 +476,39 @@ def _write_live_agent_run_bundle(
     return {"path": path.name, "expected_bundle_sha256": _sha256(path.read_bytes())}
 
 
+def _resolve_dense_cache_path(
+    *,
+    run_dir: Path,
+    explicit_path: Path | None = None,
+) -> Path:
+    if explicit_path is not None:
+        resolved = explicit_path.resolve(strict=True)
+        if not resolved.is_file():
+            raise FileNotFoundError(f"dense-vector cache is not a file: {resolved}")
+        return resolved
+    raw_path: object = None
+    for record_path in (run_dir / "current_capture_run.json", run_dir / "capture_run_metadata.json"):
+        if not record_path.is_file():
+            continue
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        cache_record = record.get("dense_vector_cache") if isinstance(record, dict) else None
+        raw_path = cache_record.get("path") if isinstance(cache_record, dict) else None
+        if isinstance(raw_path, str) and raw_path.strip():
+            break
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise FileNotFoundError("resume-existing Qwen mode requires a recorded dense-vector cache path")
+    recorded = Path(raw_path)
+    candidates = [recorded] if recorded.is_absolute() else [run_dir / recorded, ROOT / recorded]
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError:
+            continue
+        if resolved.is_file():
+            return resolved
+    raise FileNotFoundError(f"recorded dense-vector cache is unavailable: {raw_path}")
+
+
 def _case_result_sha256(row: Mapping[str, Any]) -> str:
     return _canonical_hash({key: value for key, value in row.items() if key != "case_result_sha256"})
 
@@ -1865,6 +1898,7 @@ def main() -> None:
     parser.add_argument("--source-manifest", type=Path, default=SOURCE_MANIFEST)
     parser.add_argument("--docling-assets", type=Path, default=DOCLING_ASSETS)
     parser.add_argument("--qwen-assets", type=Path, default=QWEN_ASSETS)
+    parser.add_argument("--dense-cache", type=Path, help="Existing identity-checked dense-vector cache to reuse")
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--case-registry", type=Path, help="JSON array of reviewed revenue case specifications")
     parser.add_argument("--run-id", help="Unique local run directory")
@@ -1923,6 +1957,8 @@ def main() -> None:
         raise ValueError("run-id must be a safe immutable identifier")
     output_dir = args.output_root.resolve() / run_id
     use_qwen = not args.skip_qwen
+    dense_cache_seed_path: Path | None = None
+    dense_cache_path: Path | None = None
     as_of: datetime | None = None
     saved_identity_envelope: dict[str, Any] | None = None
     saved_run_identity: dict[str, Any] | None = None
@@ -1942,8 +1978,16 @@ def main() -> None:
         if saved_run_identity.get("evaluation_scope") != requested_scope:
             raise RunIdentityError("resume-existing evaluation scope differs from the saved run; refusing before model initialization")
         as_of = datetime.fromisoformat(str(saved_run_identity["as_of"])).astimezone(timezone.utc)
+        if use_qwen:
+            dense_cache_path = _resolve_dense_cache_path(run_dir=output_dir, explicit_path=args.dense_cache)
     else:
         as_of = None
+        if use_qwen:
+            dense_cache_path = output_dir / "dense_vector_cache.sqlite3"
+            if args.dense_cache is not None:
+                dense_cache_seed_path = args.dense_cache.resolve(strict=True)
+                if not dense_cache_seed_path.is_file():
+                    raise FileNotFoundError(f"dense-vector cache is not a file: {dense_cache_seed_path}")
     if not args.resume_existing:
         output_dir.mkdir(parents=True, exist_ok=False)
 
@@ -2078,13 +2122,19 @@ def main() -> None:
     dense_adapter = None
     reranker = None
     if use_qwen:
+        if dense_cache_seed_path is not None:
+            LocalQwenDenseAdapter.copy_persistent_cache(dense_cache_seed_path, dense_cache_path)
         embedding = Qwen3EmbeddingRuntime(args.qwen_assets)
         reranker_runtime = Qwen3RerankerRuntime(args.qwen_assets)
+        reuse_cache_only = args.resume_existing or dense_cache_seed_path is not None
         dense_adapter = LocalQwenDenseAdapter(
             store,
             embedding,
-            cache_path=output_dir / "dense_vector_cache.sqlite3",
+            cache_path=dense_cache_path,
+            require_cached_vectors=reuse_cache_only,
         )
+        if reuse_cache_only:
+            dense_adapter.verify_persistent_cache(version_ids)
         reranker = LocalQwenReranker(reranker_runtime)
     runtime_model_identity = _runtime_model_identity(
         use_qwen=use_qwen,
@@ -2098,6 +2148,23 @@ def main() -> None:
         resuming=args.resume_existing,
     )
     saved_identity_envelope = _read_run_identity(identity_path)
+    dense_cache_record_path = (
+        dense_cache_path.relative_to(output_dir).as_posix()
+        if dense_cache_path is not None and dense_cache_path.is_relative_to(output_dir)
+        else str(dense_cache_path) if dense_cache_path is not None else None
+    )
+    capture_run_metadata: dict[str, Any] = {
+        "schema_version": "raama.financial-rag.current-capture.metadata.v1",
+        "run_id": run_id,
+        "run_identity_sha256": run_identity_sha256,
+        "runtime_model_identity_sha256": runtime_model_identity_sha256,
+        "dense_vector_cache": {
+            "path": dense_cache_record_path,
+            "reuse_identity": "source_id+original_sha256+block_id+block_text_sha256+model_revision+asset_manifest+instruction+dimension"
+            if use_qwen else None,
+        },
+    }
+    _write_json(output_dir / "capture_run_metadata.json", capture_run_metadata)
 
     def identity_check() -> None:
         current_identity = _build_run_identity(
@@ -2169,6 +2236,7 @@ def main() -> None:
         "asset_manifest_sha256": _sha256(qwen_manifest_path.read_bytes()),
     }
     completed_case_ids = {str(item["case_id"]) for item in query_runs}
+    live_agent_bundle_summary: dict[str, str] | None = None
     for source, spec in zip(source_records, selected_specs):
         identity_check()
         if str(source["case_id"]) in completed_case_ids:
@@ -2203,6 +2271,22 @@ def main() -> None:
             identity_check=identity_check,
             retrieval_trace_journal=retrieval_trace_journal,
         )
+        if args.emit_live_agent_bundle:
+            selected_spec = selected_specs[0]
+            case_id = str(selected_spec["case_id"])
+            live_agent_bundle_summary = _write_live_agent_run_bundle(
+                output_dir,
+                source_run_id=run_id,
+                source_manifest_path=source_manifest_path,
+                case_id=case_id,
+                case_specs=CASE_SPECS,
+                report_periods=REPORT_PERIODS,
+                expected_run_identity_sha256=run_identity_sha256,
+                expected_runtime_model_identity_sha256=runtime_model_identity_sha256,
+                expected_case_identity_sha256=_canonical_hash(case_identity_by_id[case_id]),
+            )
+            capture_run_metadata["live_agent_run_bundle"] = live_agent_bundle_summary
+            _write_json(output_dir / "capture_run_metadata.json", capture_run_metadata)
         no_reranker = (
             _run_agent_chain(
                 service=service,
@@ -2307,7 +2391,7 @@ def main() -> None:
             "terminal_event_sha256": retrieval_trace_journal.previous_event_sha256,
         },
         "dense_vector_cache": {
-            "path": "dense_vector_cache.sqlite3" if use_qwen else None,
+            "path": dense_cache_record_path,
             "reuse_identity": "source_id+original_sha256+block_id+block_text_sha256+model_revision+asset_manifest+instruction+dimension"
             if use_qwen else None,
         },
@@ -2340,21 +2424,9 @@ def main() -> None:
             "Retrieval ranks and exact claim validation do not establish semantic entailment or investment quality.",
         ],
     }
-    live_agent_bundle_summary = None
-    if args.emit_live_agent_bundle:
-        selected_spec = selected_specs[0]
-        case_id = str(selected_spec["case_id"])
-        live_agent_bundle_summary = _write_live_agent_run_bundle(
-            output_dir,
-            source_run_id=run_id,
-            source_manifest_path=source_manifest_path,
-            case_id=case_id,
-            case_specs=CASE_SPECS,
-            report_periods=REPORT_PERIODS,
-            expected_run_identity_sha256=run_identity_sha256,
-            expected_runtime_model_identity_sha256=runtime_model_identity_sha256,
-            expected_case_identity_sha256=_canonical_hash(case_identity_by_id[case_id]),
-        )
+    if args.emit_live_agent_bundle and live_agent_bundle_summary is None:
+        raise RuntimeError("live-agent bundle was not written after the completed source baseline")
+    if live_agent_bundle_summary is not None:
         record["live_agent_run_bundle"] = live_agent_bundle_summary
     _write_json(output_dir / "current_capture_run.json", record)
     print(json.dumps({

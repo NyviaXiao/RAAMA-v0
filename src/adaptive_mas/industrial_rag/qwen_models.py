@@ -7,6 +7,7 @@ import json
 import sqlite3
 import time
 from collections import OrderedDict
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -288,10 +289,12 @@ class LocalQwenDenseAdapter:
         *,
         cache_capacity: int = 2048,
         cache_path: str | Path | None = None,
+        require_cached_vectors: bool = False,
     ) -> None:
         self.store = store
         self.embedding = embedding
         self.cache_capacity = max(1, cache_capacity)
+        self.require_cached_vectors = bool(require_cached_vectors)
         self._vectors: OrderedDict[str, np.ndarray] = OrderedDict()
         self._cache_path = Path(cache_path).resolve() if cache_path is not None else None
         self._cache_identity = self._build_cache_identity()
@@ -388,6 +391,30 @@ class LocalQwenDenseAdapter:
         if not np.isfinite(vector).all() or not np.isclose(float(np.linalg.norm(vector)), 1.0, atol=1e-3):
             return None
         return vector
+
+    @staticmethod
+    def copy_persistent_cache(source_path: str | Path, destination_path: str | Path) -> Path:
+        """Create a consistent SQLite backup of an existing dense-vector cache."""
+        source = Path(source_path).resolve(strict=True)
+        destination = Path(destination_path).resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"persistent Qwen vector cache is not a file: {source}")
+        if source == destination:
+            return destination
+        if destination.exists():
+            raise FileExistsError(f"refusing to overwrite dense-vector cache: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source_uri = source.as_uri() + "?mode=ro"
+        try:
+            with closing(sqlite3.connect(source_uri, uri=True, timeout=30)) as source_connection:
+                with closing(sqlite3.connect(destination, timeout=30)) as destination_connection:
+                    source_connection.backup(destination_connection)
+                    destination_connection.commit()
+        except Exception:
+            if destination.exists():
+                destination.unlink()
+            raise
+        return destination
 
     def _write_persistent_vector(self, key: str, metadata: dict[str, object], vector: np.ndarray) -> None:
         if self._cache_connection is None:
@@ -510,6 +537,8 @@ class LocalQwenDenseAdapter:
                 ],
                 "elapsed_seconds": round(time.perf_counter() - search_started, 3),
             })
+        if missing_rows and self.require_cached_vectors:
+            raise RuntimeError(f"persistent Qwen vector cache is missing or invalid for {len(missing_rows)} source block(s)")
         for start in range(0, len(missing_rows), EMBED_BATCH_SIZE):
             batch_rows = missing_rows[start:start + EMBED_BATCH_SIZE]
             batch_keys = missing_keys[start:start + EMBED_BATCH_SIZE]
@@ -587,6 +616,21 @@ class LocalQwenDenseAdapter:
         for row, key, vector in zip(rows, keys, vectors):
             self._remember_vector(key, vector)
             ranked.append((float(np.dot(query_vector, vector)), row))
+
+    def verify_persistent_cache(self, version_ids: Sequence[str]) -> int:
+        """Validate source-block vectors without invoking document embedding inference."""
+        if self._cache_connection is None:
+            raise RuntimeError("a persistent Qwen vector cache is required for this source run")
+        rows = [row for row in self.store.read_blocks(version_ids) if str(row["text"]).strip()]
+        missing = 0
+        for row in rows:
+            text = str(row["text"])
+            key, metadata = self._vector_key(row, text)
+            if self._read_persistent_vector(key, metadata) is None:
+                missing += 1
+        if missing:
+            raise RuntimeError(f"persistent Qwen vector cache is missing or invalid for {missing} source block(s)")
+        return len(rows)
 
     @staticmethod
     def _ranked_candidate(rank: int, score: float, row: Any) -> dict[str, object]:

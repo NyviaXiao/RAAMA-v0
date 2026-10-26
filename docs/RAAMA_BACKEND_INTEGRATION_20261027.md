@@ -85,6 +85,15 @@ The probe injects a late validation failure after PostgreSQL has inserted synthe
 - The final Compose cleanup output confirmed five containers, three named volumes, and the project network removed. The ephemeral `private.env` file is absent. Sanitized result JSON remains local at `.tmp/raama-smoke-df3117bc3396/probe_result.json` with SHA-256 `56dddfb80d94868c17b4a2c4cf120811dedc157c9c321493f08e4c92d3ccd8ad`.
 - Reproduction artifact SHA-256 values: probe `df1c7553c2c7938be9e8e3c56c2abf728882508e1d5842ccf18e61c0461a8b7b`, Compose `dc42e0dc0d6de518f3e549ddce05987e87f68f96cbfd31ef419bc5b4aee39ab7`, fixture `c3d1e33addd625932dad47ca9352d203dfbefc36cff1b6b5ae68f307780e4407`, and fixture schema `91a384ecb0b3b78d35ae27851a4082d2f7bc9f24dc2bf3a4241d0486781cdc53`.
 
+### Parent-review follow-up probe — 2026-10-27
+
+- A first revised startup reached PostgreSQL before it accepted connections; the temporary stack and private credentials were removed. The probe now retries adapter construction for up to 45 seconds. The next attempt exposed an accounting-basis mismatch in its new synthetic rollback fact; that stack and credentials were also removed. The final bounded run passed after the fixture fact was aligned with the declared document basis.
+- Project `raama-smoke-3f67131299a7`, run `f52a211c9c8f`: injected late invalid-principal failure left zero document, version, span, block, fact, and outbox rows. The content-addressed object remained available through the rollback check.
+- After successful outbox completion, the probe explicitly called `finish_outbox` again. The duplicate acknowledgement returned `False`, and the stored receipt JSON remained unchanged. A separate claim check found no completed event available to claim.
+- The probe first published a valid release, then attempted a second release with its required OpenSearch receipt missing. The failed release remained `building` and the previously active release ID remained active.
+- PostgreSQL outage/reconnect, RustFS content-addressed round trip, direct OpenSearch/Qdrant REST checks, and Temporal UI/RPC health passed. These do not establish a full PostgreSQL contract suite, OpenSearch/Qdrant application adapters, or a Temporal application workflow.
+- Cleanup output confirmed all five containers, three named volumes, and the isolated network removed; the generated private env file is absent. Sanitized result JSON is `.tmp/industrial_rag_backend_integration_20261027/parent-review-followup-raama-smoke-3f67131299a7.json`, SHA-256 `6aee849130a051d256c9efd778fc8689b013d593c84008f62d556b94c229c563`. Probe SHA-256 `27aa574f45966975727a48e5ffa1bba73c4cbe4c2a19c24bfa1500b60540f14c`.
+
 ## Remaining work
 
 Expand the PostgreSQL contract suite beyond these synthetic transaction, lease recovery, release publication, and bounded outage/reconnect cases. Implement and validate OpenSearch/Qdrant application adapters with release-bound receipts. Connect Temporal to the application workflow and exercise durable recovery. This smoke is local integration evidence, not production acceptance.

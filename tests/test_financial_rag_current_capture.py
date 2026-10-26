@@ -74,6 +74,28 @@ def test_capture_emits_bundle_loadable_from_raw_manifest_bytes(tmp_path) -> None
     assert bundle.source_manifest_sha256 == hashlib.sha256(manifest_bytes).hexdigest()
 
 
+def test_resume_dense_cache_path_uses_recorded_relative_path_and_fails_closed(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cache_path = run_dir / "dense-vectors.sqlite3"
+    cache_path.write_bytes(b"fixture cache marker")
+    capture._write_json(run_dir / "current_capture_run.json", {
+        "dense_vector_cache": {"path": "dense-vectors.sqlite3"},
+    })
+
+    assert capture._resolve_dense_cache_path(run_dir=run_dir) == cache_path.resolve()
+
+    (run_dir / "current_capture_run.json").unlink()
+    capture._write_json(run_dir / "capture_run_metadata.json", {
+        "dense_vector_cache": {"path": "dense-vectors.sqlite3"},
+    })
+    assert capture._resolve_dense_cache_path(run_dir=run_dir) == cache_path.resolve()
+
+    capture._write_json(run_dir / "capture_run_metadata.json", {"dense_vector_cache": {"path": "missing.sqlite3"}})
+    with pytest.raises(FileNotFoundError, match="recorded dense-vector cache is unavailable"):
+        capture._resolve_dense_cache_path(run_dir=run_dir)
+
+
 def test_run_identity_rejects_changes_to_mode_policy_time_code_source_or_release() -> None:
     saved = {
         "run_id": "capture-1",

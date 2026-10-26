@@ -156,6 +156,37 @@ def test_dense_vectors_are_reused_only_for_verified_source_and_model_identity(tm
     assert changed_source_events[-1]["cache"]["persistent_hits"] == 1
 
 
+def test_required_dense_cache_is_preflighted_and_never_reembeds_source_blocks(tmp_path) -> None:
+    store = _FakeBlockStore()
+    cache_path = tmp_path / "dense-vectors.sqlite3"
+    LocalQwenDenseAdapter(store, _FakeEmbedding(), cache_path=cache_path).search_with_trace(
+        _dense_plan(), ["version-1"], None, lambda _event: None,
+    )
+    copied_cache_path = tmp_path / "copied-dense-vectors.sqlite3"
+    LocalQwenDenseAdapter.copy_persistent_cache(cache_path, copied_cache_path)
+
+    embedding = _FakeEmbedding()
+    adapter = LocalQwenDenseAdapter(
+        store, embedding, cache_path=copied_cache_path, require_cached_vectors=True,
+    )
+    assert adapter.verify_persistent_cache(["version-1"]) == 2
+    adapter.search_with_trace(_dense_plan(), ["version-1"], None, lambda _event: None)
+    assert embedding.calls == [(('revenue 2024',), True)]
+
+
+def test_required_dense_cache_fails_closed_before_document_embedding_on_miss(tmp_path) -> None:
+    store = _FakeBlockStore()
+    embedding = _FakeEmbedding()
+    adapter = LocalQwenDenseAdapter(
+        store, embedding, cache_path=tmp_path / "empty-cache.sqlite3", require_cached_vectors=True,
+    )
+    with pytest.raises(RuntimeError, match="missing or invalid for 2 source block"):
+        adapter.verify_persistent_cache(["version-1"])
+    with pytest.raises(RuntimeError, match="missing or invalid for 2 source block"):
+        adapter.search_with_trace(_dense_plan(), ["version-1"], None, lambda _event: None)
+    assert embedding.calls == [(('revenue 2024',), True)]
+
+
 def test_dense_vector_cache_detects_blob_tampering_and_recomputes(tmp_path) -> None:
     store = _FakeBlockStore()
     cache_path = tmp_path / "dense-vectors.sqlite3"
