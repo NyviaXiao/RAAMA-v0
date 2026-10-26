@@ -8,6 +8,7 @@ import json
 import math
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -40,7 +41,7 @@ from adaptive_mas.research_provenance import (
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 GEPA_METRIC_CALL_LIMIT = 8
 GEPA_PROPOSAL_LIMIT = 1
-GEPA_REFLECTION_COMPONENTS = 6
+GEPA_REFLECTION_COMPONENTS = 7
 GEPA_REFLECTION_REQUESTS_PER_PROPOSAL = GEPA_REFLECTION_COMPONENTS
 SELECTION_CASE_LIMIT = 2
 FROZEN_CASE_LIMIT = 2
@@ -245,7 +246,7 @@ class HarnessVersionStore:
             candidate = validate_candidate(version["candidate"])
         except ValueError as exc:
             raise ValueError(f"harness version {version_id!r} has an invalid component schema") from exc
-        expected_hash = hashlib.sha256(_json(candidate).encode("utf-8")).hexdigest()
+        expected_hash = hashlib.sha256(_json(version["candidate"]).encode("utf-8")).hexdigest()
         if expected_hash != version.get("candidate_sha256"):
             raise ValueError(f"harness version {version_id!r} failed its candidate hash check")
         return candidate, version
@@ -1411,6 +1412,72 @@ def _selection_summary(
     }
 
 
+def _paired_case_deltas(
+    baseline_rows: list[dict[str, object]],
+    comparison_rows: list[dict[str, object]],
+) -> dict[str, object]:
+    baseline_by_date = {str(row["as_of"]): row for row in baseline_rows}
+    comparison_by_date = {str(row["as_of"]): row for row in comparison_rows}
+    if len(baseline_by_date) != len(baseline_rows) or len(comparison_by_date) != len(comparison_rows):
+        raise ValueError("paired evaluation rows must have unique as_of dates")
+    if baseline_by_date.keys() != comparison_by_date.keys():
+        raise ValueError("paired evaluation must use the same fixed case dates")
+
+    pairs = []
+    for as_of in sorted(baseline_by_date):
+        baseline = baseline_by_date[as_of]
+        comparison = comparison_by_date[as_of]
+        baseline_metrics = dict(baseline.get("metrics", {}))
+        comparison_metrics = dict(comparison.get("metrics", {}))
+        baseline_metrics["score"] = baseline.get("score")
+        comparison_metrics["score"] = comparison.get("score")
+        metric_deltas = {}
+        unavailable_metrics = []
+        for metric in sorted(set(baseline_metrics) | set(comparison_metrics)):
+            left = baseline_metrics.get(metric)
+            right = comparison_metrics.get(metric)
+            if (
+                isinstance(left, (int, float)) and not isinstance(left, bool)
+                and isinstance(right, (int, float)) and not isinstance(right, bool)
+            ):
+                metric_deltas[metric] = float(right) - float(left)
+            else:
+                unavailable_metrics.append(metric)
+        usage_left = baseline.get("task_model_usage", {})
+        usage_right = comparison.get("task_model_usage", {})
+        if not isinstance(usage_left, Mapping):
+            usage_left = {}
+        if not isinstance(usage_right, Mapping):
+            usage_right = {}
+        left_cost = usage_left.get("logical_estimated_cost_cny")
+        right_cost = usage_right.get("logical_estimated_cost_cny")
+        cost_delta = (
+            float(right_cost) - float(left_cost)
+            if isinstance(left_cost, (int, float)) and not isinstance(left_cost, bool)
+            and isinstance(right_cost, (int, float)) and not isinstance(right_cost, bool)
+            else None
+        )
+        quality_regressions = sorted(
+            metric for metric, delta in metric_deltas.items() if delta < 0
+        )
+        pairs.append({
+            "as_of": as_of,
+            "baseline_score": baseline.get("score"),
+            "comparison_score": comparison.get("score"),
+            "metric_deltas": metric_deltas,
+            "unavailable_metrics": unavailable_metrics,
+            "logical_estimated_cost_cny_delta": cost_delta,
+            "quality_regressions": quality_regressions,
+            "logical_cost_increased": cost_delta is not None and cost_delta > 0,
+            "failure_attribution_scope": "observed per-metric delta; not causal module attribution",
+        })
+    return {
+        "case_count": len(pairs),
+        "paired_as_of_dates": [pair["as_of"] for pair in pairs],
+        "pairs": pairs,
+    }
+
+
 def _quality_gates_hold(candidate: dict[str, object], baseline: dict[str, object]) -> bool:
     for metric in (
         "fact_accuracy", "required_fact_coverage", "citation_precision",
@@ -1444,7 +1511,7 @@ def run_gepa_evolution(
     active_candidate, active_version_id, active_version = version_store.load_active()
     active_candidate = validate_candidate(active_candidate)
     if len(active_candidate) != GEPA_REFLECTION_COMPONENTS:
-        raise ValueError("the GEPA call budget is fixed for exactly six evolvable text components")
+        raise ValueError("the GEPA call budget is fixed for exactly seven bounded strategy components")
     exploration_case_count = len(cases["exploration"])
     if (
         exploration_case_count != 3
@@ -1686,10 +1753,12 @@ def run_gepa_evolution(
             "point-in-time compliance, research-tool efficiency, and measured model cost."
         ),
         background=(
-            "Evolve only the supplied market, fundamental, manager, context, handoff and procedural-experience "
-            "text components. Tool schemas, evaluator weights, data split, expected-return calibration and portfolio "
-            "optimizer are fixed. All cases are retrospective cached data; never put accounts, private forecasts, "
-            "trades, internal source paths or portfolio results in reflection feedback."
+            "Evolve only the supplied market, fundamental, manager, context, handoff and procedural-experience text, "
+            "plus the bounded research_policy_json package. That package is data only and must satisfy its declared "
+            "schema; never add code, paths, credentials, new tools, or values outside its bounds. Challenge search, "
+            "stop behavior, active procedural-memory reference, tool schemas, evaluator weights, data split, "
+            "expected-return calibration and portfolio optimizer are fixed. All cases are retrospective cached data; "
+            "never put accounts, private forecasts, trades, internal source paths or portfolio results in reflection feedback."
         ),
         config=GEPAConfig(
             engine=EngineConfig(
@@ -1906,6 +1975,40 @@ def run_gepa_evolution(
                 "task_model_usage": info["task_model_usage"],
                 "data_status": "retrospective_frozen_evaluation",
             })
+    selection_pairs = _paired_case_deltas(
+        selection_rows["active"], selection_rows["candidate"],
+    )
+    frozen_pairs = _paired_case_deltas(
+        frozen_rows["active_baseline"], frozen_rows["selected_version"],
+    )
+    paired_evaluation = {
+        "schema_version": "adaptive-mas.paired-evaluation-deltas.v1",
+        "status": "paired_retrospective_comparison",
+        "selection_case_set_sha256": _stable_hash([
+            {
+                "as_of": case.as_of.isoformat(),
+                "snapshot_sha256": _stable_hash(case.public_snapshot),
+                "required_observations_sha256": _stable_hash(case.required_observations),
+            }
+            for case in cases["selection"]
+        ]),
+        "frozen_case_set_sha256": _stable_hash([
+            {
+                "as_of": case.as_of.isoformat(),
+                "snapshot_sha256": _stable_hash(case.public_snapshot),
+                "required_observations_sha256": _stable_hash(case.required_observations),
+            }
+            for case in cases["frozen_evaluation"]
+        ]),
+        "candidate_changed_components": [
+            key for key in active_candidate if proposed_candidate.get(key) != active_candidate.get(key)
+        ],
+        "selection": selection_pairs,
+        "frozen_evaluation": frozen_pairs,
+        "failure_attribution_scope": "per-metric and logical-cost deltas are observed on the same cases; they do not establish causal module attribution",
+    }
+    paired_evaluation_file = "paired_evaluation.json"
+    _write_json(run_dir / paired_evaluation_file, paired_evaluation)
     reuse_demo_result = None
     if reuse_demo:
         fresh_case = cases["reuse_demo"][0]
@@ -2033,7 +2136,9 @@ def run_gepa_evolution(
             "candidate": candidate_selection,
             "accepted": accepted,
             "reason": reason,
+            "paired_case_deltas": selection_pairs,
         },
+        "paired_evaluation_file": paired_evaluation_file,
         "candidate_diff": candidate_diff,
         "candidate_audit_file": "candidate_audit.json",
         "procedural_memory": {
@@ -2048,6 +2153,7 @@ def run_gepa_evolution(
             "active_baseline_version_id": active_version_id,
             "selected_version_id": selected_version_id,
             "paired_cases": frozen_rows,
+            "paired_case_deltas": frozen_pairs,
         },
         "reuse_demo": reuse_demo_result,
         "cost": budget.summary(),

@@ -89,9 +89,9 @@
           <div class="section-head"><div><h3>中断任务核对</h3><p>租约过期的任务会先隔离；确认没有副作用后才可重新排队。</p></div></div>
           <div class="form-grid">
             <div class="field"><label for="workflowOperatorToken">工作流操作员令牌</label><input id="workflowOperatorToken" type="password" autocomplete="off" placeholder="仅在本机内存中使用，不会保存"></div>
-            <div class="field"><label for="workflowReconcileReason">核对依据</label><input id="workflowReconcileReason" type="text" maxlength="1000" placeholder="说明如何确认上次尝试未产生副作用"></div>
+            <div class="field"><label for="workflowReconcileReason">操作原因或核对依据</label><input id="workflowReconcileReason" type="text" maxlength="1000" placeholder="说明暂停/取消原因，或核对上次尝试是否产生副作用"></div>
           </div>
-          <p class="help">服务器需配置 RAAMA_WORKFLOW_OPERATOR_ID 与 RAAMA_WORKFLOW_OPERATOR_TOKEN。未知任务不会自动重跑；只有在核对上次未生效后，才使用详情中的“确认未生效并重排”。</p>
+          <p class="help">服务器需配置 RAAMA_WORKFLOW_OPERATOR_ID 与 RAAMA_WORKFLOW_OPERATOR_TOKEN。可暂停、恢复或取消任务；未知任务不会自动重跑，只有核对上次未生效后才可重新排队。</p>
         </div>
         <div class="grid two-col">
           <div class="card"><div id="taskList" class="task-list"><div class="empty">还没有任务。提交一项离线复用决策后，这里会显示真实任务状态。</div></div></div>
@@ -170,8 +170,8 @@
     const escapeHtml = (value) => String(value??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const moneyCell = (value) => value==null || !Number.isFinite(Number(value)) ? '未知' : `¥${Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
     const statusTag = (status) => {
-      const label={queued:'排队中',running:'运行中',completed:'已完成',failed:'失败',unknown:'待核对'}[status]||status||'未知';
-      const cls=status==='completed'?'good':status==='failed'||status==='unknown'?'bad':status==='running'?'warn':'';
+      const label={queued:'排队中',running:'运行中',pause_requested:'暂停处理中',paused:'已暂停',cancel_requested:'取消处理中',cancelled:'已取消',dead_letter:'已关闭为死信',completed:'已完成',failed:'失败',unknown:'待核对'}[status]||status||'未知';
+      const cls=status==='completed'||status==='paused'?'good':status==='failed'||status==='unknown'||status==='cancelled'||status==='dead_letter'?'bad':status==='running'||status==='pause_requested'||status==='cancel_requested'?'warn':'';
       return `<span class="tag ${cls}">${escapeHtml(label)}</span>`;
     };
     const riskRequestFromForm = () => {
@@ -220,7 +220,7 @@
            </div><details style="margin-top:10px"><summary>查看完整本地决策工件</summary><pre style="margin-top:9px">${escapeHtml(JSON.stringify(result,null,2))}</pre></details>`;
         if(d.status==='unknown'){
           const panel=document.createElement('div');panel.className='notice';panel.style.marginTop='12px';
-          panel.innerHTML=`<div><strong>任务结果待核对</strong><p>尝试 ${escapeHtml(d.attempt_count)} 的 worker 租约已过期，系统没有自动重放。${d.error?.reason?`<br>${escapeHtml(d.error.reason)}`:''}</p><button class="danger small" type="button" id="reconcileUnknownTask">确认未生效并重排</button></div>`;
+          panel.innerHTML=`<div><strong>任务结果待核对</strong><p>尝试 ${escapeHtml(d.attempt_count)} 的 worker 租约已过期，系统没有自动重放。${d.error?.reason?`<br>${escapeHtml(d.error.reason)}`:''}</p><div class="actions"><button class="secondary small" type="button" id="reconcileUnknownTask">确认未生效并重排</button><button class="danger small" type="button" id="deadLetterUnknownTask">关闭为死信（不再重跑）</button></div></div>`;
           $('taskDetail').append(panel);
           $('reconcileUnknownTask').addEventListener('click',async()=>{
             const token=$('workflowOperatorToken').value.trim();const reason=$('workflowReconcileReason').value.trim();
@@ -228,6 +228,29 @@
             try{await request(`/api/tasks/${encodeURIComponent(taskId)}/reconcile`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({action:'retry_after_confirmed_no_external_effect',expected_attempt:Number(d.attempt_count),reason})});showToast('任务已记入核对审计并重新排队。');await refreshTasks();}
             catch(e){showToast(`任务未重排：${e.message}`);}
           });
+          $('deadLetterUnknownTask').addEventListener('click',async()=>{
+            const token=$('workflowOperatorToken').value.trim();const reason=$('workflowReconcileReason').value.trim();
+            if(!token||!reason){showToast('请填写操作员令牌和关闭依据。');return;}
+            const button=$('deadLetterUnknownTask');button.disabled=true;
+            try{await request(`/api/tasks/${encodeURIComponent(taskId)}/dead-letter`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({expected_attempt:Number(d.attempt_count),reason})});showToast('任务已记入死信审计，不会自动重跑。');await refreshTasks();}
+            catch(e){showToast(`任务未关闭：${e.message}`);button.disabled=false;}
+          });
+        }
+        const controls={queued:['pause','cancel'],running:['pause','cancel'],pause_requested:['cancel'],paused:['resume','cancel']}[d.status]||[];
+        if(controls.length){
+          const panel=document.createElement('div');panel.className='notice';panel.style.marginTop='12px';
+          const content=document.createElement('div');const title=document.createElement('strong');title.textContent='工作流控制';content.append(title);
+          const note=document.createElement('p');note.textContent=d.status==='running'?'运行中的任务会在当前活动检查控制请求后暂停或取消。':'此操作会写入工作流审计记录。';content.append(note);
+          const buttons=document.createElement('div');buttons.className='actions';
+          const labels={pause:'暂停任务',resume:'恢复任务',cancel:'取消任务'};
+          for(const action of controls){const button=document.createElement('button');button.type='button';button.className=action==='cancel'?'danger small':'secondary small';button.textContent=labels[action];button.addEventListener('click',async()=>{
+            const token=$('workflowOperatorToken').value.trim();const reason=$('workflowReconcileReason').value.trim();
+            if(!token||!reason){showToast('请填写操作员令牌和操作原因。');return;}
+            button.disabled=true;
+            try{const result=await request(`/api/tasks/${encodeURIComponent(taskId)}/control`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({action,reason})});showToast(result.changed?`已记录${labels[action]}，当前状态：${result.status}`:'任务状态无需更改。');await refreshTasks();}
+            catch(e){showToast(`任务控制未生效：${e.message}`);button.disabled=false;}
+          });buttons.append(button);}
+          content.append(buttons);panel.append(content);$('taskDetail').append(panel);
         }
       }catch(e){if(!silent)showToast(`读取任务失败：${e.message}`);}}
     async function refreshRelease(){

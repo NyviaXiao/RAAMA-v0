@@ -359,6 +359,23 @@ def test_search_cache_identity_includes_aliases_and_runtime_revisions(tmp_path) 
     assert with_new_reranker["cache"]["key_sha256"] != with_new_adapter["cache"]["key_sha256"]
     assert reranker.calls == 4
 
+    policy_search = service.search(
+        replace(plan, aliases=("营业收入",)),
+        rrf_rank_constant=35,
+        use_reranker=False,
+    )
+    assert policy_search["cache"]["key_sha256"] != first["cache"]["key_sha256"]
+    assert policy_search["fusion"]["rank_constant"] == 35
+    assert policy_search["reranking"]["status"] == "disabled"
+    assert reranker.calls == 4
+    policy_repeat = service.search(
+        replace(plan, plan_id="policy-retry", aliases=("营业收入",)),
+        rrf_rank_constant=35,
+        use_reranker=False,
+    )
+    assert policy_repeat["cache"]["hit"] is True
+    assert policy_repeat["plan_id"] == "policy-retry"
+
 
 def test_search_skips_persistent_cache_for_unversioned_configured_adapters(tmp_path) -> None:
     store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
@@ -1002,6 +1019,34 @@ def test_continuation_review_is_durable_revocable_and_preserves_both_page_citati
     assert expanded["citation"]["supporting_spans"][0]["page_number"] == 114
     assert any(cell["page_number"] == 114 for cell in expanded["citation"]["supporting_cells"])
     assert any(cell["cell_id"] == "child-r15-c1" and cell["page_number"] == 115 for cell in expanded["citation"]["supporting_cells"])
+
+    research_plan = replace(
+        query_plan,
+        query="截至2024年报第115页的合并资产负债表资产总计是多少千元",
+        report_periods=("2024",),
+    )
+    research = service.research(research_plan)
+    coverage = research["coverage"][0]
+    assert research["status"] == "review_required"
+    assert research["numeric_claim_ready"] is False
+    assert coverage["status"] == "located"
+    assert coverage["normalized_report_period"] == "2024"
+    assert coverage["observed_report_periods"] == ["2024-12-31"]
+    assert coverage["observed_units"] == ["千元"]
+    assert coverage["observed_accounting_bases"] == ["consolidated"]
+    assert coverage["claim_status"] == "review_required"
+    assert len(coverage["observations"]) == 1
+    observation = coverage["observations"][0]
+    assert observation["source_metric_label"] == "资产总计"
+    assert observation["normalized_value"] == "786658123"
+    assert observation["numeric_claim_eligible"] is False
+    assert observation["report_period"] == "2024-12-31"
+    assert observation["unit"] == "千元"
+    assert observation["accounting_basis"] == "consolidated"
+    assert observation["source_location"]["cell_id"] == "child-r15-c1"
+    assert observation["source_location"]["page_number"] == 115
+    assert coverage["source_locations"][0]["supporting_pages"] == [114, 115]
+    assert research["stop_policy"]["stop_reason"] == "coverage_located_but_numeric_claim_requires_review"
 
     service.review_continuation_candidate(
         review_plan, child_id, action="revoke", content_sha256=bundle.version.content_sha256,

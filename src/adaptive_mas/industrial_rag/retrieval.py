@@ -106,6 +106,18 @@ def _decimal_value(value: object) -> Decimal | None:
     return result if result.is_finite() else None
 
 
+def _period_matches_request(requested_period: str | None, observed_period: str | None) -> bool:
+    if requested_period is None:
+        return True
+    if observed_period == requested_period:
+        return True
+    return bool(
+        re.fullmatch(r"(?:19|20)\d{2}", requested_period)
+        and re.fullmatch(r"(?:19|20)\d{2}-\d{2}-\d{2}", observed_period or "")
+        and observed_period.startswith(requested_period + "-")
+    )
+
+
 def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object]]:
     """Return source-located metric values; page-level text is never a value label."""
     citation = item.get("citation")
@@ -136,6 +148,9 @@ def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object
     expanded = item.get("reopened_table_row")
     if not isinstance(expanded, Mapping) or not isinstance(expanded.get("rows"), list):
         return []
+    reopened_citation = expanded.get("citation")
+    if isinstance(reopened_citation, Mapping):
+        citation = reopened_citation
     supporting_cells = citation.get("supporting_cells", [])
     source_cells = {
         (cell.get("row_index"), cell.get("column_index")): cell
@@ -165,14 +180,20 @@ def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object
             unit = cell.get("unit") or source_cell.get("unit") or citation.get("unit")
             multiplier = cell.get("multiplier") or source_cell.get("multiplier") or "1"
             basis = source_cell.get("accounting_basis") or citation.get("accounting_basis")
+            column_header = str(cell.get("column_header") or "")
             period = (
+                normalize_period(column_header) if re.search(r"(?:19|20)\d{2}", column_header) else None
+            ) or (
                 source_cell.get("report_period")
-                or normalize_period(cell.get("column_header"))
                 or citation.get("report_period")
             )
+            period_key = normalize_period(period)
+            opening_balance_year = re.fullmatch(r"((?:19|20)\d{2})(?:-12-31)?", period_key or "")
+            if "期初" in column_header and opening_balance_year:
+                period_key = f"{int(opening_balance_year.group(1)) - 1}-12-31"
             observations.append({
                 "metric": metric,
-                "period": normalize_period(period),
+                "period": period_key,
                 "unit": unit,
                 "unit_signature": unit_signature(unit, multiplier),
                 "multiplier": str(multiplier),
@@ -181,6 +202,13 @@ def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object
                 "currency": cell.get("currency") or source_cell.get("currency"),
                 "value": value,
                 "numeric_eligible": False,
+                "source_metric_label": row_label,
+                "raw_value": cell.get("raw_text"),
+                "source_cell_id": cell.get("cell_id"),
+                "source_row_index": row_index,
+                "source_column_index": column_index,
+                "source_page_number": source_cell.get("page_number"),
+                "column_header": cell.get("column_header"),
             })
     return observations
 
@@ -402,10 +430,16 @@ class IndustrialRagService:
         plan: QueryPlan,
         *,
         use_cache: bool = True,
+        rrf_rank_constant: int = 60,
+        use_reranker: bool = True,
         control: SearchControl | None = None,
     ) -> dict[str, object]:
         if control is not None:
             control.check()
+        if isinstance(rrf_rank_constant, bool) or not isinstance(rrf_rank_constant, int) or not 1 <= rrf_rank_constant <= 200:
+            raise ValueError("rrf_rank_constant must be an integer within 1..200")
+        if not isinstance(use_reranker, bool):
+            raise ValueError("use_reranker must be a boolean")
         if plan.time_mode == "retrospective_diagnostic" and not self.allow_retrospective_diagnostic:
             raise PermissionError("retrospective diagnostic queries are disabled by server policy")
         release_id = plan.release_id or self.store.active_release_id()
@@ -441,13 +475,14 @@ class IndustrialRagService:
                 runtime_cacheable = runtime_cacheable and identity is not None
             else:
                 channel_implementations[channel] = builtin_channel_identities.get(channel, "unavailable")
-        if self.reranker is None:
+        reranker_enabled = self.reranker is not None and use_reranker
+        if not reranker_enabled:
             reranker_identity: object = "disabled"
         else:
             reranker_identity = _component_cache_identity(self.reranker)
             runtime_cacheable = runtime_cacheable and reranker_identity is not None
         safe_plan = {
-            "cache_schema_version": "adaptive-mas.financial-rag-search-cache.v4",
+            "cache_schema_version": "adaptive-mas.financial-rag-search-cache.v5",
             "query_sha256": hashlib.sha256(plan.query.encode("utf-8")).hexdigest(),
             "aliases": list(plan.aliases),
             "security_code": plan.security_code, "as_of": as_of.isoformat(),
@@ -459,6 +494,8 @@ class IndustrialRagService:
             "top_k": plan.top_k, "time_mode": plan.time_mode,
             "channel_implementations": channel_implementations,
             "reranker_implementation": reranker_identity,
+            "rrf_rank_constant": rrf_rank_constant,
+            "reranker_enabled": reranker_enabled,
         }
         cache_key = stable_hash(safe_plan)
         cached = self.store.cache_get(cache_key) if use_cache and runtime_cacheable else None
@@ -521,9 +558,13 @@ class IndustrialRagService:
                 channel_results[channel] = []
                 channel_status[channel] = {"status": "unavailable", "reason": self._unavailable_reason(channel)}
 
-        fused, fusion_trace = reciprocal_rank_fusion(channel_results, limit=plan.top_k * 5)
+        fused, fusion_trace = reciprocal_rank_fusion(
+            channel_results,
+            rank_constant=rrf_rank_constant,
+            limit=plan.top_k * 5,
+        )
         rerank_status: dict[str, object]
-        if self.reranker is not None and fused:
+        if reranker_enabled and fused:
             if control is not None:
                 control.check()
             controlled_rerank = getattr(self.reranker, "rerank_with_control", None)
@@ -545,7 +586,11 @@ class IndustrialRagService:
             }
         else:
             fused = fused[: plan.top_k]
-            rerank_status = {"status": "unavailable", "reason": "no independently versioned cross-encoder reranker configured"}
+            rerank_status = (
+                {"status": "disabled", "reason": "disabled by the active research policy"}
+                if self.reranker is not None and not use_reranker
+                else {"status": "unavailable", "reason": "no independently versioned cross-encoder reranker configured"}
+            )
 
         status = "available" if fused and all(item["status"] != "unavailable" for item in channel_status.values()) else "partial" if fused else "no_evidence"
         cache_result: dict[str, object] = {"hit": False, "stored": runtime_cacheable}
@@ -678,6 +723,8 @@ class IndustrialRagService:
         max_searches: int = 8,
         evidence_limit: int = 24,
         table_expansion_limit: int = 12,
+        rrf_rank_constant: int = 60,
+        use_reranker: bool = True,
         control: SearchControl | None = None,
     ) -> dict[str, object]:
         """Run a fixed-template financial search plan with explicit coverage and stop reasons."""
@@ -687,6 +734,10 @@ class IndustrialRagService:
             raise ValueError("evidence_limit must be between 2 and 64")
         if isinstance(table_expansion_limit, bool) or not 0 <= table_expansion_limit <= 24:
             raise ValueError("table_expansion_limit must be between 0 and 24")
+        if isinstance(rrf_rank_constant, bool) or not isinstance(rrf_rank_constant, int) or not 1 <= rrf_rank_constant <= 200:
+            raise ValueError("rrf_rank_constant must be an integer within 1..200")
+        if not isinstance(use_reranker, bool):
+            raise ValueError("use_reranker must be a boolean")
         if plan.time_mode == "retrospective_diagnostic" and not self.allow_retrospective_diagnostic:
             raise PermissionError("retrospective diagnostic queries are disabled by server policy")
         release_id = plan.release_id or self.store.active_release_id()
@@ -747,7 +798,12 @@ class IndustrialRagService:
                 channels=channels,
                 top_k=min(pinned_plan.top_k, 10),
             )
-            result = self.search(subplan, control=control)
+            result = self.search(
+                subplan,
+                rrf_rank_constant=rrf_rank_constant,
+                use_reranker=use_reranker,
+                control=control,
+            )
             if self.store.permission_revision() != task_permission_revision:
                 raise PermissionError("permissions changed during financial research")
             for name, status in result.get("channels", {}).items():
@@ -835,7 +891,7 @@ class IndustrialRagService:
                 for observation in observations:
                     if observation["metric"] != metric.metric or observation["period"] is None:
                         continue
-                    if requested_period_key is not None and observation["period"] != requested_period_key:
+                    if not _period_matches_request(requested_period_key, observation["period"]):
                         continue
                     if observation["unit_signature"] is None or observation["basis_signature"] is None:
                         continue
@@ -846,8 +902,37 @@ class IndustrialRagService:
                     dimension_key = f"{metric.metric}|{requested_period_key or '*'}"
                     if dimension_key not in matched_dimensions:
                         matched_dimensions.append(dimension_key)
-                    matched_observations.append(observation)
+                    if observation not in matched_observations:
+                        matched_observations.append(observation)
             item["query_match_dimensions"] = matched_dimensions
+            citation = item.get("citation")
+            if not isinstance(citation, Mapping):
+                citation = {}
+            item["structured_observations"] = [
+                {
+                    "metric": observation["metric"],
+                    "source_metric_label": observation.get("source_metric_label") or citation.get("metric"),
+                    "report_period": observation["period"],
+                    "unit": observation["unit"],
+                    "multiplier": observation["multiplier"],
+                    "accounting_basis": observation["basis"],
+                    "currency": observation["currency"],
+                    "raw_value": observation.get("raw_value", citation.get("raw_value")),
+                    "normalized_value": str(observation["value"]),
+                    "numeric_claim_eligible": observation["numeric_eligible"],
+                    "source_location": {
+                        "source_id": item.get("source_id") or citation.get("source_id"),
+                        "content_sha256": item.get("content_sha256") or citation.get("content_sha256"),
+                        "page_number": observation.get("source_page_number") or item.get("page_number") or citation.get("page_number"),
+                        "fact_id": citation.get("fact_id"),
+                        "table_id": citation.get("table_id"),
+                        "row_start": citation.get("row_start"),
+                        "row_end": citation.get("row_end"),
+                        "cell_id": observation.get("source_cell_id"),
+                    },
+                }
+                for observation in matched_observations
+            ]
             item["query_numeric_eligible"] = any(
                 observation["numeric_eligible"] for observation in matched_observations
             )
@@ -890,16 +975,21 @@ class IndustrialRagService:
                     (returned_support_ids | returned_candidate_ids)
                     - matching_ids
                 )
-                observed_ids = sorted(matching_ids | set(candidate_ids))
-                observed_observations = [
-                    observation
-                    for evidence_id in observed_ids
-                    for observation in observations_by_id.get(evidence_id, [])
-                ]
                 candidate_observations = [
                     observation
                     for evidence_id in candidate_ids
                     for observation in observations_by_id.get(evidence_id, [])
+                ]
+                structured_observations = [
+                    observation
+                    for item in matching
+                    for observation in item.get("structured_observations", [])
+                    if isinstance(observation, Mapping)
+                    and (metric is None or observation.get("metric") == metric.metric)
+                    and _period_matches_request(
+                        normalized_period,
+                        str(observation.get("report_period")) if observation.get("report_period") is not None else None,
+                    )
                 ]
                 coverage_rows.append({
                     "metric": metric.metric if metric is not None else None,
@@ -909,21 +999,32 @@ class IndustrialRagService:
                     "normalized_report_period": normalized_period,
                     "requested_unit": requested_unit_label,
                     "observed_units": sorted({
-                        str(observation["unit"]) for observation in observed_observations
+                        str(observation["unit"]) for observation in structured_observations
                         if observation.get("unit")
                     }),
                     "requested_accounting_basis": requested_basis_label,
                     "observed_accounting_bases": sorted({
-                        str(observation["basis"]) for observation in observed_observations
-                        if observation.get("basis")
+                        str(observation["accounting_basis"]) for observation in structured_observations
+                        if observation.get("accounting_basis")
                     }),
                     "observed_report_periods": sorted({
-                        str(observation["period"]) for observation in observed_observations
-                        if observation.get("period")
+                        str(observation["report_period"]) for observation in structured_observations
+                        if observation.get("report_period")
                     }),
                     "observed_metrics": sorted({
-                        str(observation["metric"]) for observation in observed_observations
+                        str(observation["metric"]) for observation in structured_observations
                     }),
+                    "numeric_claim_ready": any(
+                        observation.get("numeric_claim_eligible") is True
+                        for observation in structured_observations
+                    ),
+                    "claim_status": (
+                        "eligible" if any(
+                            observation.get("numeric_claim_eligible") is True
+                            for observation in structured_observations
+                        ) else "review_required" if matching else "missing"
+                    ),
+                    "observations": structured_observations,
                     "candidate_metrics": sorted({
                         str(observation["metric"]) for observation in candidate_observations
                     }),
@@ -936,11 +1037,33 @@ class IndustrialRagService:
                     "candidate_evidence_ids": candidate_ids,
                     "source_locations": [
                         {
+                            "evidence_id": item.get("evidence_id"),
                             "source_id": item.get("source_id"),
                             "content_sha256": item.get("content_sha256"),
                             "page_number": item.get("page_number"),
+                            "supporting_pages": sorted({
+                                int(value)
+                                for value in [
+                                    *[
+                                        span.get("page_number")
+                                        for span in ((item.get("citation") or {}).get("supporting_spans", [])
+                                                     if isinstance(item.get("citation"), Mapping) else [])
+                                        if isinstance(span, Mapping) and span.get("page_number") is not None
+                                    ],
+                                    *[
+                                        cell.get("page_number")
+                                        for cell in ((item.get("citation") or {}).get("supporting_cells", [])
+                                                     if isinstance(item.get("citation"), Mapping) else [])
+                                        if isinstance(cell, Mapping) and cell.get("page_number") is not None
+                                    ],
+                                    item.get("page_number"),
+                                ]
+                                if value is not None
+                            }),
                             "fact_id": (item.get("citation") or {}).get("fact_id") if isinstance(item.get("citation"), Mapping) else None,
                             "table_id": (item.get("citation") or {}).get("table_id") if isinstance(item.get("citation"), Mapping) else None,
+                            "row_start": (item.get("citation") or {}).get("row_start") if isinstance(item.get("citation"), Mapping) else None,
+                            "row_end": (item.get("citation") or {}).get("row_end") if isinstance(item.get("citation"), Mapping) else None,
                         }
                         for item in matching
                     ],
@@ -985,11 +1108,19 @@ class IndustrialRagService:
             if len({row["value"] for row in rows}) > 1
         ]
         all_covered = bool(coverage_rows) and all(row["status"] == "located" for row in coverage_rows)
+        numeric_claim_ready = (
+            all_covered
+            and all(row["numeric_claim_ready"] for row in coverage_rows)
+            and not candidate_conflicts
+        )
         planned_dimensions = max(1, len(metric_specs) * max(1, len(periods)))
         supporting_steps = sum(step["kind"] == "supporting_evidence" for step in step_trace)
-        if all_covered:
+        if numeric_claim_ready:
             stop_reason = "requested_metric_period_coverage_located"
             next_action = "answer_with_source_citations_and_review_counter_candidates"
+        elif all_covered:
+            stop_reason = "coverage_located_but_numeric_claim_requires_review"
+            next_action = "review_source_numeric_eligibility_and_citations_before_claim"
         elif not support and metric_candidates:
             stop_reason = "candidate_evidence_requires_metric_scope_review"
             next_action = "review_candidate_metric_period_unit_and_basis_before_numeric_claims"
@@ -1021,6 +1152,9 @@ class IndustrialRagService:
                 "implementation": "fixed_metric_alias_period_templates",
                 "max_searches": max_searches,
                 "evidence_limit": evidence_limit,
+                "rrf_rank_constant": rrf_rank_constant,
+                "reranker_profile": "configured" if use_reranker else "disabled",
+                "channels": list(plan.channels),
                 "returned_supporting_count": len(support),
                 "returned_metric_candidate_count": len(metric_candidates),
                 "returned_counter_candidate_count": len(counter_candidates),
@@ -1037,7 +1171,9 @@ class IndustrialRagService:
                 "dimensions_truncated": supporting_steps < planned_dimensions,
                 "steps": step_trace,
             },
-            "status": "available" if support else "candidate_only" if metric_candidates else "no_evidence",
+            "status": "available" if numeric_claim_ready else "review_required" if support else "candidate_only" if metric_candidates else "no_evidence",
+            "numeric_claim_ready": numeric_claim_ready,
+            "claim_status": "eligible" if numeric_claim_ready else "review_required" if support else "missing",
             "coverage": coverage_rows,
             "channels": channel_status,
             "retrieved": [*support, *metric_candidates, *counter_candidates],

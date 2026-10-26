@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raama.local/schemas/gepa_research_policy.schema.json",
+  "title": "RAAMA GEPA research policy",
+  "description": "A bounded data-only retrieval strategy. Values select fixed runtime behavior and cannot contain executable code.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "channels",
+    "max_searches",
+    "candidate_limit",
+    "symbol_limit",
+    "evidence_limit",
+    "rrf_rank_constant",
+    "reranker_profile",
+    "table_expansion_limit",
+    "parent_context_mode",
+    "context_char_limit",
+    "context_source_limit",
+    "challenge_policy",
+    "stop_policy",
+    "memory_refs"
+  ],
+  "properties": {
+    "channels": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"enum": ["structured_facts", "bm25", "toc_page", "dense", "vision", "source_relations"]},
+      "contains": {"enum": ["structured_facts", "bm25"]},
+      "minContains": 1
+    },
+    "max_searches": {"type": "integer", "minimum": 2, "maximum": 8},
+    "candidate_limit": {"type": "integer", "minimum": 1, "maximum": 2},
+    "symbol_limit": {"type": "integer", "minimum": 1, "maximum": 4},
+    "evidence_limit": {"type": "integer", "minimum": 2, "maximum": 32},
+    "rrf_rank_constant": {"type": "integer", "minimum": 20, "maximum": 100},
+    "reranker_profile": {"enum": ["configured", "disabled"]},
+    "table_expansion_limit": {"type": "integer", "minimum": 0, "maximum": 12},
+    "parent_context_mode": {"enum": ["reviewed_parent_and_child", "source_row_only"]},
+    "context_char_limit": {"type": "integer", "minimum": 400, "maximum": 1200},
+    "context_source_limit": {"type": "integer", "minimum": 1, "maximum": 2},
+    "challenge_policy": {"const": "mandatory_correction_search"},
+    "stop_policy": {"const": "coverage_then_bounded_search"},
+    "memory_refs": {"const": ["procedural_experience"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"parent_context_mode": {"const": "source_row_only"}}},
+      "then": {"properties": {"table_expansion_limit": {"const": 0}}}
+    }
+  ]
+}

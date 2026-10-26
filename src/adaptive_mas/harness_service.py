@@ -37,6 +37,16 @@ class ServiceConflict(RuntimeError):
     """A stable API idempotency key was reused with changed input."""
 
 
+class WorkflowControlRequested(RuntimeError):
+    def __init__(self, action: str) -> None:
+        super().__init__(f"workflow {action} requested")
+        self.action = action
+
+
+class WorkerLeaseLost(ServiceConflict):
+    """The worker attempt no longer owns the durable job lease."""
+
+
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -84,6 +94,7 @@ class HarnessServiceStore:
                     stage TEXT NOT NULL,
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     worker_id TEXT,
+                    lease_token TEXT,
                     lease_until REAL,
                     result_json TEXT,
                     error_json TEXT,
@@ -115,6 +126,11 @@ class HarnessServiceStore:
                 );
                 """
             )
+            job_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(service_jobs)").fetchall()
+            }
+            if "lease_token" not in job_columns:
+                connection.execute("ALTER TABLE service_jobs ADD COLUMN lease_token TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30, isolation_level=None)
@@ -216,7 +232,8 @@ class HarnessServiceStore:
             connection.execute("BEGIN IMMEDIATE")
             expired = connection.execute(
                 "SELECT task_id,attempt_count,worker_id,stage FROM service_jobs "
-                "WHERE status='running' AND lease_until IS NOT NULL AND lease_until < ?",
+                "WHERE status IN ('running','pause_requested','cancel_requested') "
+                "AND lease_until IS NOT NULL AND lease_until < ?",
                 (now_epoch,),
             ).fetchall()
             for stale in expired:
@@ -229,8 +246,8 @@ class HarnessServiceStore:
                     "attempt_count": attempt,
                 }
                 connection.execute(
-                    "UPDATE service_jobs SET status='unknown',stage='unknown',error_json=?,worker_id=NULL,lease_until=NULL,updated_at=? "
-                    "WHERE task_id=? AND status='running' AND lease_until < ?",
+                    "UPDATE service_jobs SET status='unknown',stage='unknown',error_json=?,worker_id=NULL,lease_token=NULL,lease_until=NULL,updated_at=? "
+                    "WHERE task_id=? AND status IN ('running','pause_requested','cancel_requested') AND lease_until < ?",
                     (_json(error), now, task_id, now_epoch),
                 )
                 self._insert_event(
@@ -255,10 +272,11 @@ class HarnessServiceStore:
                 return None
             task_id = str(row["task_id"])
             attempt = int(row["attempt_count"]) + 1
+            lease_token = uuid.uuid4().hex
             lease_until = now_epoch + lease_seconds
             connection.execute(
-                "UPDATE service_jobs SET status='running',stage='preflight',attempt_count=?,worker_id=?,lease_until=?,updated_at=? WHERE task_id=?",
-                (attempt, worker_id, lease_until, now, task_id),
+                "UPDATE service_jobs SET status='running',stage='preflight',attempt_count=?,worker_id=?,lease_token=?,lease_until=?,updated_at=? WHERE task_id=?",
+                (attempt, worker_id, lease_token, lease_until, now, task_id),
             )
             connection.execute(
                 "INSERT INTO service_workers(worker_id,state,last_seen_at,current_task_id) VALUES(?,?,?,?) "
@@ -278,14 +296,32 @@ class HarnessServiceStore:
             connection.commit()
             return self._job(claimed)
 
-    def update_stage(self, task_id: str, stage: str, *, worker_id: str, payload: Mapping[str, object] | None = None) -> None:
+    def update_stage(
+        self,
+        task_id: str,
+        stage: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
         now = _now()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            lease = connection.execute(
+                "SELECT status FROM service_jobs WHERE task_id=? AND worker_id=? AND lease_token=?",
+                (task_id, worker_id, lease_token),
+            ).fetchone()
+            if lease is not None and lease["status"] in {"pause_requested", "cancel_requested"}:
+                connection.rollback()
+                raise WorkflowControlRequested(str(lease["status"]).removesuffix("_requested"))
             connection.execute(
-                "UPDATE service_jobs SET stage=?,lease_until=?,updated_at=? WHERE task_id=? AND worker_id=? AND status='running'",
-                (stage, time.time() + 900, now, task_id, worker_id),
+                "UPDATE service_jobs SET stage=?,lease_until=?,updated_at=? WHERE task_id=? AND worker_id=? AND lease_token=? AND status='running'",
+                (stage, time.time() + 900, now, task_id, worker_id, lease_token),
             )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                connection.rollback()
+                raise WorkerLeaseLost("worker no longer owns the job lease")
             self._insert_event(
                 connection, task_id, f"stage:{stage}:{hashlib.sha256(_json(payload or {}).encode()).hexdigest()[:12]}",
                 stage, span_record(trace_id=task_id, name=f"job.{stage}", attributes=payload or {}, status="ok"),
@@ -296,40 +332,197 @@ class HarnessServiceStore:
             )
             connection.commit()
 
-    def renew_lease(self, task_id: str, worker_id: str, *, lease_seconds: float = 900.0) -> None:
+    def renew_lease(
+        self, task_id: str, worker_id: str, *, lease_token: str, lease_seconds: float = 900.0
+    ) -> None:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                "UPDATE service_jobs SET lease_until=?,updated_at=? WHERE task_id=? AND worker_id=? AND status='running'",
-                (time.time() + lease_seconds, _now(), task_id, worker_id),
+                "UPDATE service_jobs SET lease_until=?,updated_at=? WHERE task_id=? AND worker_id=? "
+                "AND lease_token=? AND status IN ('running','pause_requested','cancel_requested')",
+                (time.time() + lease_seconds, _now(), task_id, worker_id, lease_token),
             )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                connection.rollback()
+                raise WorkerLeaseLost("worker no longer owns the job lease")
             connection.execute(
                 "UPDATE service_workers SET last_seen_at=? WHERE worker_id=? AND current_task_id=?",
                 (time.time(), worker_id, task_id),
             )
             connection.commit()
 
-    def complete(self, task_id: str, worker_id: str, result: Mapping[str, object], *, elapsed_ms: float) -> None:
+    def request_control(
+        self,
+        task_id: str,
+        *,
+        action: str,
+        operator_id: str,
+        reason: str,
+    ) -> dict[str, object]:
+        if action not in {"pause", "resume", "cancel"}:
+            raise ValueError("action must be pause, resume, or cancel")
+        if not operator_id.strip() or not reason.strip():
+            raise ValueError("operator identity and control reason are required")
+        now = _now()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status,attempt_count FROM service_jobs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            previous = str(row["status"])
+            no_op = (
+                (action == "pause" and previous in {"paused", "pause_requested"})
+                or (action == "resume" and previous == "queued")
+                or (action == "cancel" and previous in {"cancelled", "cancel_requested"})
+            )
+            if no_op:
+                connection.commit()
+                return {"task_id": task_id, "status": previous, "changed": False}
+            transitions = {
+                ("pause", "queued"): "paused",
+                ("pause", "running"): "pause_requested",
+                ("resume", "paused"): "queued",
+                ("cancel", "queued"): "cancelled",
+                ("cancel", "paused"): "cancelled",
+                ("cancel", "running"): "cancel_requested",
+                ("cancel", "pause_requested"): "cancel_requested",
+            }
+            next_status = transitions.get((action, previous))
+            if next_status is None:
+                raise ServiceConflict(f"cannot {action} a task in {previous} state")
+            if next_status in {"paused", "cancelled", "queued"}:
+                connection.execute(
+                    "UPDATE service_jobs SET status=?,stage=?,worker_id=NULL,lease_token=NULL,lease_until=NULL,updated_at=? WHERE task_id=?",
+                    (next_status, next_status, now, task_id),
+                )
+                if previous == "running":
+                    connection.execute(
+                        "UPDATE service_workers SET state='idle',last_seen_at=?,current_task_id=NULL WHERE current_task_id=?",
+                        (time.time(), task_id),
+                    )
+            else:
+                connection.execute(
+                    "UPDATE service_jobs SET status=?,stage=?,updated_at=? WHERE task_id=?",
+                    (next_status, next_status, now, task_id),
+                )
+            attempt = int(row["attempt_count"])
+            self._insert_event(
+                connection,
+                task_id,
+                f"job_control:{attempt}:{uuid.uuid4().hex}",
+                f"control_{action}",
+                span_record(
+                    trace_id=task_id,
+                    name=f"job.control.{action}",
+                    attributes={
+                        "operator_id": operator_id,
+                        "reason": reason.strip()[:1000],
+                        "previous_status": previous,
+                        "next_status": next_status,
+                        "attempt_count": attempt,
+                    },
+                    status="ok",
+                ),
+            )
+            connection.commit()
+        return {"task_id": task_id, "status": next_status, "changed": True}
+
+    def current_control(self, task_id: str, worker_id: str, lease_token: str) -> str | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT status,worker_id,lease_token FROM service_jobs WHERE task_id=?", (task_id,)
+            ).fetchone()
+        if row is None or row["worker_id"] != worker_id or row["lease_token"] != lease_token:
+            return "lease_lost"
+        status = str(row["status"])
+        if status in {"pause_requested", "cancel_requested"}:
+            return status.removesuffix("_requested")
+        return None
+
+    def acknowledge_control(self, task_id: str, worker_id: str, lease_token: str) -> str | None:
+        now = _now()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status,attempt_count FROM service_jobs WHERE task_id=? AND worker_id=? AND lease_token=?",
+                (task_id, worker_id, lease_token),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            previous = str(row["status"])
+            next_status = {"pause_requested": "paused", "cancel_requested": "cancelled"}.get(previous)
+            if next_status is None:
+                connection.commit()
+                return None
+            attempt = int(row["attempt_count"])
+            connection.execute(
+                "UPDATE service_jobs SET status=?,stage=?,worker_id=NULL,lease_token=NULL,lease_until=NULL,updated_at=? "
+                "WHERE task_id=? AND worker_id=? AND lease_token=? AND status=?",
+                (next_status, next_status, now, task_id, worker_id, lease_token, previous),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                connection.rollback()
+                return None
+            connection.execute(
+                "UPDATE service_workers SET state='idle',last_seen_at=?,current_task_id=NULL WHERE worker_id=? AND current_task_id=?",
+                (time.time(), worker_id, task_id),
+            )
+            self._insert_event(
+                connection,
+                task_id,
+                f"job_control_ack:{attempt}:{next_status}",
+                next_status,
+                span_record(
+                    trace_id=task_id,
+                    name=f"job.control.{next_status}",
+                    attributes={"worker_id": worker_id, "attempt_count": attempt},
+                    status="ok",
+                ),
+            )
+            connection.commit()
+            return next_status
+
+    def complete(
+        self,
+        task_id: str,
+        worker_id: str,
+        lease_token: str,
+        result: Mapping[str, object],
+        *,
+        elapsed_ms: float,
+    ) -> None:
         now = _now()
         result_json = _json(dict(result))
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT status,result_json,worker_id FROM service_jobs WHERE task_id=?", (task_id,)
+                "SELECT status,result_json,worker_id,lease_token FROM service_jobs WHERE task_id=?", (task_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(task_id)
             if row["status"] == "completed":
+                if row["worker_id"] != worker_id or row["lease_token"] != lease_token:
+                    raise WorkerLeaseLost("worker attempt no longer owns the completed job")
                 if row["result_json"] != result_json:
                     raise ServiceConflict("completed job result is immutable")
                 connection.commit()
                 return
-            if row["worker_id"] != worker_id:
-                raise ServiceConflict("worker no longer owns the job lease")
+            if row["worker_id"] != worker_id or row["lease_token"] != lease_token:
+                raise WorkerLeaseLost("worker attempt no longer owns the job lease")
+            if row["status"] in {"pause_requested", "cancel_requested"}:
+                connection.rollback()
+                raise WorkflowControlRequested(str(row["status"]).removesuffix("_requested"))
             connection.execute(
-                "UPDATE service_jobs SET status='completed',stage='completed',result_json=?,error_json=NULL,lease_until=NULL,updated_at=? WHERE task_id=?",
-                (result_json, now, task_id),
+                "UPDATE service_jobs SET status='completed',stage='completed',result_json=?,error_json=NULL,lease_until=NULL,updated_at=? "
+                "WHERE task_id=? AND worker_id=? AND lease_token=? AND status='running'",
+                (result_json, now, task_id, worker_id, lease_token),
             )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                connection.rollback()
+                raise WorkerLeaseLost("worker attempt no longer owns the job lease")
             self._insert_event(
                 connection, task_id, "job_completed", "completed",
                 span_record(
@@ -347,16 +540,35 @@ class HarnessServiceStore:
             )
             connection.commit()
 
-    def fail(self, task_id: str, worker_id: str, error: Mapping[str, object], *, unknown: bool = False) -> None:
+    def fail(
+        self,
+        task_id: str,
+        worker_id: str,
+        lease_token: str,
+        error: Mapping[str, object],
+        *,
+        unknown: bool = False,
+    ) -> None:
         now = _now()
         status = "unknown" if unknown else "failed"
         error_json = _json(safe_attributes(error))
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM service_jobs WHERE task_id=? AND worker_id=? AND lease_token=?",
+                (task_id, worker_id, lease_token),
+            ).fetchone()
+            if row is not None and row["status"] in {"pause_requested", "cancel_requested"}:
+                connection.rollback()
+                raise WorkflowControlRequested(str(row["status"]).removesuffix("_requested"))
             connection.execute(
-                "UPDATE service_jobs SET status=?,stage=?,error_json=?,lease_until=NULL,updated_at=? WHERE task_id=? AND worker_id=? AND status='running'",
-                (status, status, error_json, now, task_id, worker_id),
+                "UPDATE service_jobs SET status=?,stage=?,error_json=?,lease_token=NULL,lease_until=NULL,updated_at=? "
+                "WHERE task_id=? AND worker_id=? AND lease_token=? AND status='running'",
+                (status, status, error_json, now, task_id, worker_id, lease_token),
             )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                connection.rollback()
+                raise WorkerLeaseLost("worker attempt no longer owns the job lease")
             self._insert_event(
                 connection, task_id, f"job_{status}", status,
                 span_record(trace_id=task_id, name=f"job.{status}", attributes=error, status=status),
@@ -395,10 +607,13 @@ class HarnessServiceStore:
                 raise ServiceConflict("job attempt changed; refresh the task before reconciling")
             prior_error = json.loads(row["error_json"]) if row["error_json"] else {}
             connection.execute(
-                "UPDATE service_jobs SET status='queued',stage='reconciled_retry',error_json=NULL,worker_id=NULL,lease_until=NULL,updated_at=? "
+                "UPDATE service_jobs SET status='queued',stage='reconciled_retry',error_json=NULL,worker_id=NULL,lease_token=NULL,lease_until=NULL,updated_at=? "
                 "WHERE task_id=? AND status='unknown' AND attempt_count=?",
                 (now, task_id, expected_attempt),
             )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                connection.rollback()
+                raise ServiceConflict("job attempt changed; refresh the task before reconciling")
             event = span_record(
                 trace_id=task_id,
                 name="job.reconciled",
@@ -421,6 +636,66 @@ class HarnessServiceStore:
             "status": "queued",
             "stage": "reconciled_retry",
             "reconciled_attempt": expected_attempt,
+            "operator_id": operator_id,
+        }
+
+    def dead_letter_unknown_job(
+        self,
+        task_id: str,
+        *,
+        expected_attempt: int,
+        operator_id: str,
+        reason: str,
+    ) -> dict[str, object]:
+        if isinstance(expected_attempt, bool) or expected_attempt < 1:
+            raise ValueError("expected_attempt must be positive")
+        if not operator_id.strip() or not reason.strip():
+            raise ValueError("operator identity and dead-letter reason are required")
+        now = _now()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status,attempt_count,error_json FROM service_jobs WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] != "unknown":
+                raise ServiceConflict("only an unknown job can be closed as a dead letter")
+            if int(row["attempt_count"]) != expected_attempt:
+                raise ServiceConflict("job attempt changed; refresh the task before resolving it")
+            prior_error = json.loads(row["error_json"]) if row["error_json"] else {}
+            connection.execute(
+                "UPDATE service_jobs SET status='dead_letter',stage='dead_letter',worker_id=NULL,lease_token=NULL,lease_until=NULL,updated_at=? "
+                "WHERE task_id=? AND status='unknown' AND attempt_count=?",
+                (now, task_id, expected_attempt),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                connection.rollback()
+                raise ServiceConflict("job attempt changed; refresh the task before resolving it")
+            self._insert_event(
+                connection,
+                task_id,
+                f"job_dead_letter:{expected_attempt}",
+                "dead_letter",
+                span_record(
+                    trace_id=task_id,
+                    name="job.dead_letter",
+                    attributes={
+                        "operator_id": operator_id,
+                        "reason": reason.strip()[:1000],
+                        "resolved_attempt": expected_attempt,
+                        "prior_error": prior_error,
+                        "action": "close_without_retry",
+                    },
+                    status="ok",
+                ),
+            )
+            connection.commit()
+        return {
+            "task_id": task_id,
+            "status": "dead_letter",
+            "stage": "dead_letter",
+            "resolved_attempt": expected_attempt,
             "operator_id": operator_id,
         }
 
@@ -724,7 +999,13 @@ def validate_execution_ledger_request(request: Mapping[str, object]) -> dict[str
     return dict(request)
 
 
-def _replay_runner(job: Mapping[str, object], *, project_root: Path, database_path: Path) -> dict[str, object]:
+def _replay_runner(
+    job: Mapping[str, object],
+    *,
+    project_root: Path,
+    database_path: Path,
+    control_check: Callable[[], str | None] | None = None,
+) -> dict[str, object]:
     request = job["request"]
     assert isinstance(request, Mapping)
     root = project_root
@@ -765,18 +1046,39 @@ def _replay_runner(job: Mapping[str, object], *, project_root: Path, database_pa
             "QWEN_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "POPAGENT_LLM_KEY"
         } or name.upper().endswith("_API_KEY"):
             environment.pop(name, None)
-    completed = subprocess.run(
+    process = subprocess.Popen(
         command,
         cwd=root,
         env=environment,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=1800,
-        check=False,
     )
-    if completed.returncode != 0:
-        error = (completed.stderr or completed.stdout or "decision replay failed")[-4000:]
-        raise RuntimeError(f"offline decision replay exited {completed.returncode}: {error}")
+    started_at = time.monotonic()
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            if control_check is not None:
+                control = control_check()
+                if control is not None:
+                    process.terminate()
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+                    if control == "lease_lost":
+                        raise WorkflowControlRequested("lease_lost")
+                    raise WorkflowControlRequested(control)
+            if time.monotonic() - started_at >= 1800:
+                process.kill()
+                stdout, stderr = process.communicate()
+                raise RuntimeError(f"offline decision replay exceeded 1800 seconds: {(stderr or stdout)[-4000:]}")
+    if process.returncode != 0:
+        error = (stderr or stdout or "decision replay failed")[-4000:]
+        raise RuntimeError(f"offline decision replay exited {process.returncode}: {error}")
     try:
         result = json.loads(output_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -805,36 +1107,65 @@ class HarnessJobWorker:
         if job is None:
             return False
         task_id = str(job["task_id"])
+        lease_token = str(job["lease_token"])
         started = time.monotonic()
+        lease_stop = threading.Event()
+        lease_thread: threading.Thread | None = None
         try:
-            self.store.update_stage(task_id, "running_replay", worker_id=self.worker_id)
-            lease_stop = threading.Event()
+            self.store.update_stage(
+                task_id, "running_replay", worker_id=self.worker_id, lease_token=lease_token,
+            )
 
             def keep_lease() -> None:
                 while not lease_stop.wait(30.0):
-                    self.store.renew_lease(task_id, self.worker_id)
+                    try:
+                        self.store.renew_lease(task_id, self.worker_id, lease_token=lease_token)
+                    except WorkerLeaseLost:
+                        return
 
             lease_thread = threading.Thread(target=keep_lease, daemon=True)
             lease_thread.start()
+            if self.store.acknowledge_control(task_id, self.worker_id, lease_token) is not None:
+                return True
             if self.runner is None:
-                result = _replay_runner(job, project_root=self.project_root, database_path=self.store.database_path)
+                result = _replay_runner(
+                    job,
+                    project_root=self.project_root,
+                    database_path=self.store.database_path,
+                    control_check=lambda: self.store.current_control(task_id, self.worker_id, lease_token),
+                )
             else:
                 result = dict(self.runner(job))
-            lease_stop.set()
-            lease_thread.join(timeout=1)
-            self.store.update_stage(task_id, "persisting_result", worker_id=self.worker_id)
+            if self.store.acknowledge_control(task_id, self.worker_id, lease_token) is not None:
+                return True
+            self.store.update_stage(
+                task_id, "persisting_result", worker_id=self.worker_id, lease_token=lease_token,
+            )
             self.store.complete(
-                task_id, self.worker_id, result,
+                task_id, self.worker_id, lease_token, result,
                 elapsed_ms=(time.monotonic() - started) * 1000,
             )
+        except WorkflowControlRequested as exc:
+            if exc.action != "lease_lost":
+                self.store.acknowledge_control(task_id, self.worker_id, lease_token)
+        except WorkerLeaseLost:
+            pass
         except Exception as exc:
-            if "lease_stop" in locals():
-                lease_stop.set()
-            self.store.fail(
-                task_id,
-                self.worker_id,
-                {"error_type": type(exc).__name__, "message": str(exc)[:1000]},
-            )
+            try:
+                self.store.fail(
+                    task_id,
+                    self.worker_id,
+                    lease_token,
+                    {"error_type": type(exc).__name__, "message": str(exc)[:1000]},
+                )
+            except WorkflowControlRequested:
+                self.store.acknowledge_control(task_id, self.worker_id, lease_token)
+            except WorkerLeaseLost:
+                pass
+        finally:
+            lease_stop.set()
+            if lease_thread is not None:
+                lease_thread.join(timeout=1)
         return True
 
     def run_forever(self, *, poll_seconds: float = 1.0, stop_event: threading.Event | None = None) -> None:
@@ -1006,6 +1337,45 @@ class HarnessRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("task_id is not a safe identifier")
                 job = context["store"].submit(task_id, idempotency_key, request)  # type: ignore[union-attr]
                 self._send_json(202, self._job_payload(job))
+                return
+            if path.startswith("/api/tasks/") and path.endswith("/control"):
+                task_id = path.removeprefix("/api/tasks/").removesuffix("/control").strip("/")
+                if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", task_id):
+                    raise ValueError("task_id is not a safe identifier")
+                if set(payload) != {"action", "reason"}:
+                    raise ValueError("task control requires action and reason")
+                action = payload["action"]
+                reason = payload["reason"]
+                if not isinstance(action, str) or action not in {"pause", "resume", "cancel"}:
+                    raise ValueError("action must be pause, resume, or cancel")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("reason must be a nonempty string")
+                operator_id = self._require_workflow_operator(context)
+                result = context["store"].request_control(  # type: ignore[union-attr]
+                    task_id, action=action, operator_id=operator_id, reason=reason,
+                )
+                self._send_json(200, result)
+                return
+            if path.startswith("/api/tasks/") and path.endswith("/dead-letter"):
+                task_id = path.removeprefix("/api/tasks/").removesuffix("/dead-letter").strip("/")
+                if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", task_id):
+                    raise ValueError("task_id is not a safe identifier")
+                if set(payload) != {"expected_attempt", "reason"}:
+                    raise ValueError("dead-letter resolution requires expected_attempt and reason")
+                expected_attempt = payload["expected_attempt"]
+                if isinstance(expected_attempt, bool) or not isinstance(expected_attempt, int):
+                    raise ValueError("expected_attempt must be an integer")
+                reason = payload["reason"]
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("reason must be a nonempty string")
+                operator_id = self._require_workflow_operator(context)
+                result = context["store"].dead_letter_unknown_job(  # type: ignore[union-attr]
+                    task_id,
+                    expected_attempt=expected_attempt,
+                    operator_id=operator_id,
+                    reason=reason,
+                )
+                self._send_json(200, result)
                 return
             if path.startswith("/api/tasks/") and path.endswith("/reconcile"):
                 task_id = path.removeprefix("/api/tasks/").removesuffix("/reconcile").strip("/")

@@ -1,8 +1,122 @@
 """Seed text components that GEPA evolves as a genuine multi-component candidate."""
 
+import json
+from typing import Any
+
 
 MAX_COMPONENT_UTF8_BYTES = 8_000
-MAX_CANDIDATE_UTF8_BYTES = 24_000
+MAX_CANDIDATE_UTF8_BYTES = 32_000
+
+_LEGACY_TEXT_COMPONENTS = {
+    "market_prompt",
+    "fundamental_prompt",
+    "manager_prompt",
+    "context_policy",
+    "handoff_schema",
+    "procedural_experience",
+}
+_POLICY_KEYS = {
+    "channels",
+    "max_searches",
+    "candidate_limit",
+    "symbol_limit",
+    "evidence_limit",
+    "rrf_rank_constant",
+    "reranker_profile",
+    "table_expansion_limit",
+    "parent_context_mode",
+    "context_char_limit",
+    "context_source_limit",
+    "challenge_policy",
+    "stop_policy",
+    "memory_refs",
+}
+_ALLOWED_CHANNELS = {
+    "structured_facts", "bm25", "toc_page", "dense", "vision", "source_relations",
+}
+
+
+def _compact_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def default_research_policy() -> dict[str, object]:
+    return {
+        "channels": ["structured_facts", "bm25"],
+        "max_searches": 8,
+        "candidate_limit": 2,
+        "symbol_limit": 4,
+        "evidence_limit": 4,
+        "rrf_rank_constant": 60,
+        "reranker_profile": "configured",
+        "table_expansion_limit": 12,
+        "parent_context_mode": "reviewed_parent_and_child",
+        "context_char_limit": 1_200,
+        "context_source_limit": 2,
+        "challenge_policy": "mandatory_correction_search",
+        "stop_policy": "coverage_then_bounded_search",
+        "memory_refs": ["procedural_experience"],
+    }
+
+
+def parse_research_policy(value: str | None = None) -> dict[str, object]:
+    """Parse the non-executable, bounded strategy package used by the harness."""
+    if value is None:
+        policy = default_research_policy()
+    else:
+        if not isinstance(value, str):
+            raise ValueError("research policy must be a JSON string")
+
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError("research policy cannot contain duplicate keys")
+                result[key] = item
+            return result
+
+        try:
+            policy = json.loads(value, object_pairs_hook=reject_duplicate_keys)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError("research policy must be valid JSON") from exc
+    if not isinstance(policy, dict) or set(policy) != _POLICY_KEYS:
+        raise ValueError("research policy must contain exactly the declared bounded fields")
+    channels = policy["channels"]
+    if (
+        not isinstance(channels, list)
+        or not 1 <= len(channels) <= 3
+        or any(not isinstance(channel, str) or channel not in _ALLOWED_CHANNELS for channel in channels)
+        or len(set(channels)) != len(channels)
+        or not set(channels).intersection({"structured_facts", "bm25"})
+    ):
+        raise ValueError("research policy channels must be unique, bounded, and include a primary channel")
+    bounded_integers = {
+        "max_searches": (2, 8),
+        "candidate_limit": (1, 2),
+        "symbol_limit": (1, 4),
+        "evidence_limit": (2, 32),
+        "rrf_rank_constant": (20, 100),
+        "table_expansion_limit": (0, 12),
+        "context_char_limit": (400, 1_200),
+        "context_source_limit": (1, 2),
+    }
+    for key, (minimum, maximum) in bounded_integers.items():
+        item = policy[key]
+        if isinstance(item, bool) or not isinstance(item, int) or not minimum <= item <= maximum:
+            raise ValueError(f"research policy {key} must be an integer within {minimum}..{maximum}")
+    if policy["reranker_profile"] not in ("configured", "disabled"):
+        raise ValueError("research policy reranker_profile is unsupported")
+    if policy["parent_context_mode"] not in ("reviewed_parent_and_child", "source_row_only"):
+        raise ValueError("research policy parent_context_mode is unsupported")
+    if policy["challenge_policy"] != "mandatory_correction_search":
+        raise ValueError("research policy cannot disable the mandatory correction search")
+    if policy["stop_policy"] != "coverage_then_bounded_search":
+        raise ValueError("research policy cannot change the bounded coverage stop contract")
+    if policy["memory_refs"] != ["procedural_experience"]:
+        raise ValueError("research policy memory_refs must use the active procedural experience only")
+    if policy["parent_context_mode"] == "source_row_only" and policy["table_expansion_limit"] != 0:
+        raise ValueError("source_row_only policy must set table_expansion_limit to zero")
+    return {**policy, "channels": list(channels), "memory_refs": list(policy["memory_refs"])}
 
 
 def seed_candidate() -> dict[str, str]:
@@ -58,15 +172,20 @@ def seed_candidate() -> dict[str, str]:
             "vintages or reporting dates are not verified. This is cross-task process guidance, "
             "not task-specific memory."
         ),
+        "research_policy_json": _compact_json(default_research_policy()),
     }
 
 
 def validate_candidate(candidate: object) -> dict[str, str]:
     expected = set(seed_candidate())
-    if not isinstance(candidate, dict) or set(candidate) != expected:
-        raise ValueError("candidate must contain exactly the six declared evolvable text components")
+    if not isinstance(candidate, dict) or frozenset(candidate) not in {frozenset(expected), frozenset(_LEGACY_TEXT_COMPONENTS)}:
+        raise ValueError("candidate must contain exactly the seven declared strategy components")
+    if set(candidate) == _LEGACY_TEXT_COMPONENTS:
+        candidate = {**candidate, "research_policy_json": _compact_json(default_research_policy())}
     if any(not isinstance(value, str) or not value.strip() for value in candidate.values()):
         raise ValueError("every evolvable text component must be a nonempty string")
+    policy = parse_research_policy(candidate["research_policy_json"])
+    candidate = {**candidate, "research_policy_json": _compact_json(policy)}
     encoded_sizes = {key: len(value.encode("utf-8")) for key, value in candidate.items()}
     if any(size > MAX_COMPONENT_UTF8_BYTES for size in encoded_sizes.values()):
         raise ValueError("candidate component exceeds its fixed UTF-8 size bound")

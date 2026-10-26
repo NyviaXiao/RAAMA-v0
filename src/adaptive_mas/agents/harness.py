@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from adaptive_mas.agents.public_prompt_context import build_public_context
+from adaptive_mas.agents.harness_prompts import parse_research_policy
 from adaptive_mas.agents.quantitative import quantitative_agents
 from adaptive_mas.data.research import ResearchData
 from adaptive_mas.harness_state import HarnessStateStore
@@ -1216,8 +1217,10 @@ def _fundamental_handlers(
     industrial_rag_service: IndustrialRagService | None = None,
     industrial_rag_principal_id: str = "local-public",
     industrial_rag_release_id: str | None = None,
+    research_policy_json: str | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object], dict[str, dict[str, object]]]:
     snapshot = public_snapshot or {}
+    research_policy = parse_research_policy(research_policy_json)
     source_records: dict[str, dict[str, object]] = {}
     source_ids: dict[str, str] = {}
     public_sources: list[dict[str, object]] = []
@@ -1355,9 +1358,9 @@ def _fundamental_handlers(
         if not isinstance(question, str) or not question.strip() or len(question) > 200:
             raise InvalidToolInput("question must be a nonempty string up to 200 characters")
         symbols = arguments.get("symbols", [])
-        limit = arguments.get("limit", 4)
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 4:
-            raise InvalidToolInput("fundamental search limit must be an integer within 1..4")
+        limit = arguments.get("limit", int(research_policy["symbol_limit"]))
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= int(research_policy["symbol_limit"]):
+            raise InvalidToolInput("fundamental search limit exceeds the active research policy")
         if not isinstance(symbols, list) or any(
             not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit() for symbol in symbols
         ):
@@ -1424,8 +1427,8 @@ def _fundamental_handlers(
                 question=question,
                 sources=[row for row in selected if row["symbol"] == symbol],
                 role="fundamental",
-                max_sources=2,
-                max_context_chars=1_200,
+                max_sources=int(research_policy["context_source_limit"]),
+                max_context_chars=int(research_policy["context_char_limit"]),
                 max_context_token_upper_bound=4_000,
                 output_token_reserve=400,
             )
@@ -1478,13 +1481,13 @@ def _fundamental_handlers(
         if available_at > decision_time:
             raise InvalidToolInput("source is unavailable at the requested decision time")
         offset = arguments.get("offset", 0)
-        length = arguments.get("length", 1_200)
+        length = arguments.get("length", int(research_policy["context_char_limit"]))
         if (
             isinstance(offset, bool) or not isinstance(offset, int)
             or isinstance(length, bool) or not isinstance(length, int)
-            or offset < 0 or not 1 <= length <= 1_600
+            or offset < 0 or not 1 <= length <= int(research_policy["context_char_limit"])
         ):
-            raise InvalidToolInput("read offset must be a nonnegative integer and length an integer within 1..1600")
+            raise InvalidToolInput("read length exceeds the active research policy")
         text = source["full_text"]
         if source.get("extracted_text_ref"):
             text = Path(str(source["extracted_text_ref"])).read_text(encoding="utf-8")
@@ -1545,7 +1548,7 @@ def _fundamental_handlers(
             {
                 "question": {"type": "string", "maxLength": 200},
                 "symbols": {"type": "array", "items": {"type": "string", "pattern": "^[0-9]{6}$"}, "maxItems": 12},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 4},
+                "limit": {"type": "integer", "minimum": 1, "maximum": int(research_policy["symbol_limit"])},
             },
         ),
         _tool(
@@ -1554,7 +1557,7 @@ def _fundamental_handlers(
             {
                 "evidence_id": {"type": "string"},
                 "offset": {"type": "integer", "minimum": 0},
-                "length": {"type": "integer", "minimum": 1, "maximum": 1_600},
+                "length": {"type": "integer", "minimum": 1, "maximum": int(research_policy["context_char_limit"])},
             },
             ["evidence_id"],
         ),
@@ -1596,7 +1599,7 @@ def _fundamental_handlers(
         def search_indexed_documents(arguments: dict[str, object]) -> dict[str, object]:
             question = arguments.get("question")
             symbols = arguments.get("symbols")
-            limit = arguments.get("limit", 2)
+            limit = arguments.get("limit", int(research_policy["candidate_limit"]))
             periods = arguments.get("report_periods", [])
             basis = arguments.get("accounting_basis")
             task_type = arguments.get("task_type", "fact")
@@ -1607,8 +1610,8 @@ def _fundamental_handlers(
                 for symbol in symbols
             ):
                 raise InvalidToolInput("symbols must contain one to four six-digit security codes")
-            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2:
-                raise InvalidToolInput("indexed-document limit must be an integer within 1..2 per security")
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= int(research_policy["candidate_limit"]):
+                raise InvalidToolInput("indexed-document limit exceeds the active research policy")
             if not isinstance(periods, list) or len(periods) > 8 or any(
                 not isinstance(period, str) or not period.strip() for period in periods
             ):
@@ -1637,13 +1640,21 @@ def _fundamental_handlers(
                     accounting_basis=basis,
                     report_periods=tuple(periods),
                     release_id=industrial_rag_release_id,
-                    channels=("structured_facts", "bm25"),
+                    channels=tuple(str(channel) for channel in research_policy["channels"]),
                     top_k=limit,
                     time_mode="strict_forward",
                 )
                 result = industrial_rag_service.research(
                     plan,
-                    evidence_limit=max(2, limit * 2),
+                    max_searches=int(research_policy["max_searches"]),
+                    evidence_limit=int(research_policy["evidence_limit"]),
+                    table_expansion_limit=(
+                        int(research_policy["table_expansion_limit"])
+                        if research_policy["parent_context_mode"] == "reviewed_parent_and_child"
+                        else 0
+                    ),
+                    rrf_rank_constant=int(research_policy["rrf_rank_constant"]),
+                    use_reranker=research_policy["reranker_profile"] == "configured",
                 )
                 channel_status.append({
                     "symbol": symbol,
@@ -1752,7 +1763,7 @@ def _fundamental_handlers(
                         )
                         retrieved.append({
                             **source_ref,
-                            "text_excerpt": excerpt[:1_200],
+                            "text_excerpt": excerpt[:int(research_policy["context_char_limit"])],
                             "page_number": citation.get("page_number"),
                             "financial_fact": {
                                 key: citation.get(key)
@@ -1782,6 +1793,7 @@ def _fundamental_handlers(
                     else "no_evidence"
                 ),
                 "release_id": industrial_rag_release_id,
+                "research_policy": research_policy,
                 "retrieved": retrieved,
                 "reused_evidence_ids": reused_evidence_ids,
                 "channels": channel_status,
@@ -1825,7 +1837,7 @@ def _fundamental_handlers(
                 content_scope = "reopened_source_table_row"
             return {
                 "evidence_id": evidence_id,
-                "text_excerpt": text[:2_400],
+                "text_excerpt": text[:int(research_policy["context_char_limit"])],
                 "citation": citation,
                 "next_offset": None,
                 "content_scope": content_scope,
@@ -1841,7 +1853,7 @@ def _fundamental_handlers(
                     "report_periods": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
                     "accounting_basis": {"type": "string", "maxLength": 120},
                     "task_type": {"type": "string", "enum": ["fact", "comparison", "table", "narrative", "refutation", "unknown"]},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 2},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": int(research_policy["candidate_limit"])},
                 },
                 ["question", "symbols"],
             ),
@@ -3571,6 +3583,7 @@ def run_research_harness(
         industrial_rag_service=industrial_rag_service,
         industrial_rag_principal_id=industrial_rag_principal_id,
         industrial_rag_release_id=pinned_release_id,
+        research_policy_json=candidate["research_policy_json"],
     )
     fundamental_finalized: dict[str, object] = {}
     fundamental_visible_evidence_ids: set[str] = set()

@@ -276,8 +276,16 @@ def test_cli_ingest_release_status_and_live_local_api_flow(tmp_path) -> None:
 
         prior_search = service.search
 
-        def revoke_after_search(plan, *, use_cache=True, control=None):
-            response = prior_search(plan, use_cache=use_cache, control=control)
+        def revoke_after_search(
+            plan, *, use_cache=True, rrf_rank_constant=60, use_reranker=True, control=None,
+        ):
+            response = prior_search(
+                plan,
+                use_cache=use_cache,
+                rrf_rank_constant=rrf_rank_constant,
+                use_reranker=use_reranker,
+                control=control,
+            )
             store.set_access("local-public", "synthetic-doc-1", can_read=False)
             return response
 

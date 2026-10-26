@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
-from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +14,7 @@ from adaptive_mas.harness_service import (
     HarnessServiceStore,
     LocalHarnessHTTPServer,
     ServiceConflict,
+    WorkerLeaseLost,
     _replay_runner,
     validate_decision_job,
     validate_execution_ledger_request,
@@ -234,15 +234,21 @@ def test_worker_handoff_preserves_the_same_canonical_profile(tmp_path, monkeypat
     normalized = validate_decision_job(request, root)
     observed = {}
 
-    def fake_run(command, **kwargs):
+    class CompletedProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_popen(command, **kwargs):
         risk_path = command[command.index("--risk-profile-json") + 1]
         output_path = command[command.index("--output") + 1]
         observed["profile"] = json.loads((root / risk_path).read_text(encoding="utf-8")) if not Path(risk_path).is_absolute() else json.loads(Path(risk_path).read_text(encoding="utf-8"))
         observed["command"] = command
         Path(output_path).write_text("{}", encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return CompletedProcess()
 
-    monkeypatch.setattr("adaptive_mas.harness_service.subprocess.run", fake_run)
+    monkeypatch.setattr("adaptive_mas.harness_service.subprocess.Popen", fake_popen)
     result = _replay_runner(
         {"task_id": "profile-handoff", "request": normalized},
         project_root=root,
@@ -330,6 +336,201 @@ def test_expired_worker_lease_is_quarantined_until_audited_reconciliation(tmp_pa
     assert event["payload"]["attributes"]["action"] == "retry_after_confirmed_no_external_effect"
     retried = store.claim_next("worker-after-crash")
     assert retried is not None and retried["attempt_count"] == 2
+
+
+def test_expired_lease_generation_fences_every_stale_worker_write(tmp_path):
+    root = _project(tmp_path)
+    store = HarnessServiceStore(tmp_path / "lease-generation.sqlite3")
+    request = validate_decision_job(_request(root), root)
+    store.submit("fenced-job", "fenced-idempotency", request)
+    first = store.claim_next("restarted-worker", lease_seconds=60)
+    assert first is not None and first["attempt_count"] == 1
+    first_token = first["lease_token"]
+
+    connection = store._connect()
+    try:
+        connection.execute("UPDATE service_jobs SET lease_until=0 WHERE task_id=?", ("fenced-job",))
+    finally:
+        connection.close()
+    assert store.claim_next("lease-checker") is None
+    store.reconcile_unknown_job(
+        "fenced-job", expected_attempt=1, operator_id="local-supervisor", reason="No replay effect was applied."
+    )
+
+    second = store.claim_next("restarted-worker", lease_seconds=60)
+    assert second is not None and second["attempt_count"] == 2
+    second_token = second["lease_token"]
+    assert first_token != second_token
+    before = store.get_job("fenced-job")
+    before_events = store.events("fenced-job")
+    before_workers = store.worker_status()
+
+    with pytest.raises(WorkerLeaseLost):
+        store.update_stage("fenced-job", "stale-stage", worker_id="restarted-worker", lease_token=first_token)
+    with pytest.raises(WorkerLeaseLost):
+        store.renew_lease("fenced-job", "restarted-worker", lease_token=first_token)
+    with pytest.raises(WorkerLeaseLost):
+        store.complete("fenced-job", "restarted-worker", first_token, {"attempt": 1}, elapsed_ms=1)
+    with pytest.raises(WorkerLeaseLost):
+        store.fail("fenced-job", "restarted-worker", first_token, {"error": "stale attempt"})
+    assert store.acknowledge_control("fenced-job", "restarted-worker", first_token) is None
+
+    after = store.get_job("fenced-job")
+    assert after["status"] == "running" and after["attempt_count"] == 2
+    assert after.get("result") is None and after["lease_token"] == second_token
+    assert store.events("fenced-job") == before_events
+    assert store.worker_status() == before_workers
+    assert before.get("result") is None
+
+    store.complete("fenced-job", "restarted-worker", second_token, {"attempt": 2}, elapsed_ms=1)
+    completed = store.get_job("fenced-job")
+    assert completed["status"] == "completed"
+    assert completed["result"] == {"attempt": 2}
+
+
+def test_pause_resume_and_cancel_are_durable_worker_control_transitions(tmp_path):
+    root = _project(tmp_path)
+    store = HarnessServiceStore(tmp_path / "workflow-controls.sqlite3")
+    request = validate_decision_job(_request(root), root)
+    store.submit("controlled-job", "controlled-idempotency", request)
+
+    def pause_runner(job):
+        store.request_control(
+            str(job["task_id"]), action="pause", operator_id="local-supervisor", reason="Pause after this activity."
+        )
+        return {"attempt": 1}
+
+    worker = HarnessJobWorker(store, project_root=root, worker_id="control-worker", runner=pause_runner)
+    assert worker.run_once() is True
+    paused = store.get_job("controlled-job")
+    assert paused["status"] == "paused" and paused.get("result") is None
+    assert store.events("controlled-job")[-1]["stage"] == "paused"
+
+    resumed = store.request_control(
+        "controlled-job", action="resume", operator_id="local-supervisor", reason="Resume for cancellation check."
+    )
+    assert resumed["status"] == "queued"
+
+    def cancel_runner(job):
+        store.request_control(
+            str(job["task_id"]), action="cancel", operator_id="local-supervisor", reason="Stop this attempt."
+        )
+        return {"attempt": 2}
+
+    worker = HarnessJobWorker(store, project_root=root, worker_id="control-worker", runner=cancel_runner)
+    assert worker.run_once() is True
+    cancelled = store.get_job("controlled-job")
+    assert cancelled["status"] == "cancelled" and cancelled.get("result") is None
+    events = store.events("controlled-job")
+    controls = [event for event in events if event["stage"].startswith("control_")]
+    assert [event["payload"]["attributes"]["operator_id"] for event in controls] == [
+        "local-supervisor", "local-supervisor", "local-supervisor",
+    ]
+    assert any(event["stage"] == "paused" for event in events)
+    assert any(event["stage"] == "cancelled" for event in events)
+
+
+def test_task_control_api_requires_server_operator_and_rejects_forged_identity(tmp_path):
+    server, thread = _server(tmp_path)
+    try:
+        store = server.context["store"]
+        store.submit("api-control", "api-control-idempotency", {"mode": "decision_reuse"})
+        body = {"action": "pause", "reason": "Operator requested a hold."}
+        status, error = _http(server, "POST", "/api/tasks/api-control/control", body)
+        assert status == 403 and "authorization" in error["error"]
+
+        status, error = _http(
+            server,
+            "POST",
+            "/api/tasks/api-control/control",
+            body | {"operator_id": "forged"},
+            token="workflow-test-token",
+        )
+        assert status == 400 and "requires action and reason" in error["error"]
+
+        status, paused = _http(
+            server, "POST", "/api/tasks/api-control/control", body, token="workflow-test-token"
+        )
+        assert status == 200 and paused["status"] == "paused"
+        status, resumed = _http(
+            server,
+            "POST",
+            "/api/tasks/api-control/control",
+            {"action": "resume", "reason": "Operator resumed the task."},
+            token="workflow-test-token",
+        )
+        assert status == 200 and resumed["status"] == "queued"
+        event = store.events("api-control")[-1]
+        assert event["payload"]["attributes"]["operator_id"] == "local-supervisor"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_unknown_job_can_be_closed_as_audited_dead_letter_without_retry(tmp_path):
+    server, thread = _server(tmp_path)
+    try:
+        store = server.context["store"]
+        store.submit("api-dead-letter", "api-dead-letter-idempotency", {"mode": "decision_reuse"})
+        claimed = store.claim_next("worker-may-still-be-running", lease_seconds=60)
+        assert claimed is not None
+        connection = store._connect()
+        try:
+            connection.execute("UPDATE service_jobs SET lease_until=0 WHERE task_id=?", ("api-dead-letter",))
+        finally:
+            connection.close()
+        assert store.claim_next("lease-checker") is None
+
+        body = {"expected_attempt": 1, "reason": "The outcome is uncertain; do not repeat this attempt."}
+        status, error = _http(server, "POST", "/api/tasks/api-dead-letter/dead-letter", body)
+        assert status == 403 and "authorization" in error["error"]
+        status, error = _http(
+            server,
+            "POST",
+            "/api/tasks/api-dead-letter/dead-letter",
+            body | {"operator_id": "forged"},
+            token="workflow-test-token",
+        )
+        assert status == 400 and "requires expected_attempt and reason" in error["error"]
+        status, error = _http(
+            server,
+            "POST",
+            "/api/tasks/api-dead-letter/dead-letter",
+            body | {"expected_attempt": 2},
+            token="workflow-test-token",
+        )
+        assert status == 409 and "attempt changed" in error["error"]
+
+        status, result = _http(
+            server,
+            "POST",
+            "/api/tasks/api-dead-letter/dead-letter",
+            body,
+            token="workflow-test-token",
+        )
+        assert status == 200 and result["status"] == "dead_letter"
+        job = store.get_job("api-dead-letter")
+        assert job["status"] == "dead_letter" and job["attempt_count"] == 1
+        with pytest.raises(WorkerLeaseLost):
+            store.complete(
+                "api-dead-letter", "worker-may-still-be-running", claimed["lease_token"],
+                {"attempt": 1}, elapsed_ms=1,
+            )
+        assert store.get_job("api-dead-letter")["status"] == "dead_letter"
+        event = store.events("api-dead-letter")[-1]
+        assert event["stage"] == "dead_letter"
+        assert event["payload"]["attributes"]["operator_id"] == "local-supervisor"
+        assert event["payload"]["attributes"]["action"] == "close_without_retry"
+        assert event["payload"]["attributes"]["reason"] == body["reason"]
+        with pytest.raises(ServiceConflict, match="only an unknown job"):
+            store.reconcile_unknown_job(
+                "api-dead-letter", expected_attempt=1, operator_id="local-supervisor", reason="retry"
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_unknown_job_reconciliation_requires_server_operator_and_rejects_caller_identity(tmp_path):

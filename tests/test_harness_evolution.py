@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from types import SimpleNamespace
@@ -24,12 +25,18 @@ from adaptive_mas.agents.harness import (
     _validate_report,
     compact_agent_messages,
 )
-from adaptive_mas.agents.harness_prompts import seed_candidate, validate_candidate
+from adaptive_mas.agents.harness_prompts import (
+    default_research_policy,
+    parse_research_policy,
+    seed_candidate,
+    validate_candidate,
+)
 from adaptive_mas.harness_evolution import (
     HarnessCase,
     HarnessVersionStore,
     build_retrospective_cases,
     _public_tool_projection,
+    _paired_case_deltas,
     _selection_summary,
     _reflection_safe_info,
     score_research_result,
@@ -126,11 +133,11 @@ def test_evolvable_candidate_schema_is_exact_and_bounded(tmp_path) -> None:
     candidate = seed_candidate()
     assert set(validate_candidate(candidate)) == set(seed_candidate())
 
-    with pytest.raises(ValueError, match="exactly the six declared"):
+    with pytest.raises(ValueError, match="exactly the seven declared"):
         validate_candidate({**candidate, "hard_policy": "candidate supplied"})
     with pytest.raises(ValueError, match="component exceeds"):
         validate_candidate({**candidate, "market_prompt": "x" * 8_001})
-    with pytest.raises(ValueError, match="exactly the six declared"):
+    with pytest.raises(ValueError, match="exactly the seven declared"):
         store.adopt(
             {**candidate, "tool_schema": "mutable"},
             previous_version_id="seed",
@@ -138,6 +145,58 @@ def test_evolvable_candidate_schema_is_exact_and_bounded(tmp_path) -> None:
             reason="invalid fixture candidate",
             run_id="schema-rejection",
         )
+
+
+def test_research_policy_is_schema_limited_and_migrates_legacy_prompt_versions() -> None:
+    candidate = seed_candidate()
+    legacy = {key: value for key, value in candidate.items() if key != "research_policy_json"}
+    assert validate_candidate(legacy) == candidate
+    assert parse_research_policy(candidate["research_policy_json"]) == default_research_policy()
+
+    unsafe_policy = default_research_policy()
+    unsafe_policy["rrf_rank_constant"] = 19
+    with pytest.raises(ValueError, match="rrf_rank_constant"):
+        validate_candidate({**candidate, "research_policy_json": json.dumps(unsafe_policy)})
+
+    unsafe_policy = default_research_policy()
+    unsafe_policy["challenge_policy"] = "disabled"
+    with pytest.raises(ValueError, match="cannot disable"):
+        validate_candidate({**candidate, "research_policy_json": json.dumps(unsafe_policy)})
+
+    with pytest.raises(ValueError, match="duplicate keys"):
+        parse_research_policy('{"channels":[],"channels":[]}')
+
+
+def test_version_store_loads_and_hash_checks_a_legacy_six_component_version(tmp_path) -> None:
+    store = HarnessVersionStore(tmp_path)
+    legacy_candidate = {
+        key: value for key, value in seed_candidate().items()
+        if key != "research_policy_json"
+    }
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    legacy_sha256 = hashlib.sha256(json.dumps(
+        legacy_candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    (versions_dir / "legacy.json").write_text(json.dumps({
+        "version_id": "legacy",
+        "candidate": legacy_candidate,
+        "candidate_sha256": legacy_sha256,
+        "procedural_memory_file": None,
+    }), encoding="utf-8")
+    store.active_path.write_text(json.dumps({
+        "version_id": "legacy",
+        "version_file": "versions/legacy.json",
+    }), encoding="utf-8")
+
+    candidate, version_id, version = store.load_active()
+    selected, metadata = store.candidate_for_version("legacy")
+
+    assert version_id == "legacy"
+    assert candidate == seed_candidate()
+    assert version["procedural_memory"]["status"] == "legacy_version_without_memory_snapshot"
+    assert selected == seed_candidate()
+    assert metadata["candidate_sha256"] == legacy_sha256
 
 
 def test_fixed_runtime_policy_is_appended_after_evolvable_prompt() -> None:
@@ -306,6 +365,14 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
         "exploration", "selection", "frozen_evaluation", "reuse_demo",
     }
     assert all(entry["actions"][0]["agents"]["market"]["tool_trace"] for entry in trace_payload["evaluations"])
+    paired_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "paired_evaluation.json"
+    paired_payload = json.loads(paired_file.read_text(encoding="utf-8"))
+    assert result["paired_evaluation_file"] == "paired_evaluation.json"
+    assert paired_payload["selection"]["case_count"] == 2
+    assert paired_payload["frozen_evaluation"]["case_count"] == 2
+    assert paired_payload["candidate_changed_components"] == ["manager_prompt"]
+    assert paired_payload["frozen_evaluation"]["pairs"][0]["metric_deltas"]["score"] == pytest.approx(0.3)
+    assert paired_payload["frozen_evaluation"]["pairs"][0]["quality_regressions"] == []
 
     report_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "evolution_report.json"
     original_report = report_file.read_bytes()
@@ -321,6 +388,31 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
         )
     assert len(optimizer_calls) == 1
     assert report_file.read_bytes() == original_report
+
+
+def test_paired_case_deltas_name_metric_and_cost_regressions_without_claiming_causality() -> None:
+    baseline = [{
+        "as_of": "2026-04-20",
+        "score": 0.8,
+        "metrics": {"citation_precision": 1.0, "fact_accuracy": 1.0},
+        "task_model_usage": {"logical_estimated_cost_cny": 0.01},
+    }]
+    comparison = [{
+        "as_of": "2026-04-20",
+        "score": 0.7,
+        "metrics": {"citation_precision": 0.8, "fact_accuracy": 1.0},
+        "task_model_usage": {"logical_estimated_cost_cny": 0.02},
+    }]
+
+    result = _paired_case_deltas(baseline, comparison)
+
+    assert result["case_count"] == 1
+    assert result["pairs"][0]["quality_regressions"] == ["citation_precision", "score"]
+    assert result["pairs"][0]["logical_estimated_cost_cny_delta"] == pytest.approx(0.01)
+    assert result["pairs"][0]["logical_cost_increased"] is True
+    assert "not causal" in result["pairs"][0]["failure_attribution_scope"]
+    with pytest.raises(ValueError, match="same fixed case dates"):
+        _paired_case_deltas(baseline, [{**comparison[0], "as_of": "2026-04-21"}])
 
 
 def test_public_tool_projection_keeps_retrospective_capture_audit_fields() -> None:
@@ -1575,6 +1667,67 @@ def test_compacted_fundamental_tool_result_retains_fact_card_and_exact_reopen_pa
     assert projected["recall_audit"][0]["selected_source_count"] == 1
     assert reopened["facts"]["revenue_yoy_pct"] == 12.5
     assert reopened["reopen_ref"]["arguments"]["evidence_id"] == reference["evidence_id"]
+
+
+def test_bounded_gepa_policy_controls_indexed_research_without_changing_hard_search_rules() -> None:
+    policy = default_research_policy()
+    policy.update({
+        "channels": ["structured_facts", "bm25", "dense"],
+        "max_searches": 4,
+        "candidate_limit": 1,
+        "evidence_limit": 6,
+        "rrf_rank_constant": 35,
+        "reranker_profile": "disabled",
+        "table_expansion_limit": 0,
+        "parent_context_mode": "source_row_only",
+        "context_char_limit": 800,
+    })
+
+    class CapturingRagService:
+        def __init__(self) -> None:
+            self.plan = None
+            self.options = None
+
+        def research(self, plan, **kwargs):
+            self.plan = plan
+            self.options = kwargs
+            return {
+                "status": "no_evidence",
+                "channel_status": {},
+                "stop_policy": {"stop_reason": "no_supporting_evidence_after_bounded_search"},
+                "planner": {"max_searches": kwargs["max_searches"]},
+                "coverage": [],
+                "warnings": [],
+                "supporting_evidence": [],
+                "candidate_evidence": [],
+                "counter_evidence": {"candidates": []},
+            }
+
+    service = CapturingRagService()
+    _, handlers, _ = _fundamental_handlers(
+        {},
+        datetime.fromisoformat("2026-09-01T16:00:00+08:00"),
+        industrial_rag_service=service,
+        industrial_rag_release_id="release-fixture",
+        research_policy_json=json.dumps(policy),
+    )
+    result = handlers["search_indexed_financial_documents"]({
+        "question": "2024年营业收入",
+        "symbols": ["600000"],
+        "limit": 1,
+    })
+
+    assert service.plan.channels == ("structured_facts", "bm25", "dense")
+    assert service.plan.top_k == 1
+    assert service.options == {
+        "max_searches": 4,
+        "evidence_limit": 6,
+        "table_expansion_limit": 0,
+        "rrf_rank_constant": 35,
+        "use_reranker": False,
+    }
+    assert result["research_policy"]["challenge_policy"] == "mandatory_correction_search"
+    assert result["research_policy"]["stop_policy"] == "coverage_then_bounded_search"
 
 
 def test_compaction_fallback_keeps_multi_symbol_source_identity_and_reopens_each_fact() -> None:
