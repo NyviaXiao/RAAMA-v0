@@ -11,9 +11,10 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -23,6 +24,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from adaptive_mas.industrial_rag.cli import _outbox_verify_once  # noqa: E402
 from adaptive_mas.industrial_rag.models import (  # noqa: E402
     Block,
+    ContractError,
     CorpusReleaseSpec,
     Document,
     DocumentBundle,
@@ -31,6 +33,7 @@ from adaptive_mas.industrial_rag.models import (  # noqa: E402
 )
 from adaptive_mas.industrial_rag.object_store import S3CompatibleObjectStore  # noqa: E402
 from adaptive_mas.industrial_rag.postgres import PostgresIndustrialRagStore  # noqa: E402
+from adaptive_mas.industrial_rag.repository import ReleaseNotReady  # noqa: E402
 from adaptive_mas.research_provenance import stable_hash  # noqa: E402
 
 
@@ -217,12 +220,77 @@ def main() -> None:
         document=document, version=version, payload=payload, spans=(span,), blocks=(block,),
         read_principals=tuple(str(item) for item in fixture["read_principals"]),
     )
+    rollback_payload = payload + b" injected transaction rollback fixture"
+    rollback_sha256 = hashlib.sha256(rollback_payload).hexdigest()
+    rollback_version_id = f"rollback-version-{suffix}"
+    rollback_span = replace(
+        span, span_id=f"rollback-span-{suffix}", version_id=rollback_version_id,
+        char_end=len(rollback_payload), text=rollback_payload.decode("utf-8"),
+    )
+    rollback_block = replace(
+        block, block_id=f"rollback-block-{suffix}", version_id=rollback_version_id,
+        text=rollback_payload.decode("utf-8"), char_end=len(rollback_payload), span_id=rollback_span.span_id,
+    )
+    rollback_bundle = DocumentBundle(
+        document=replace(document, document_id=f"rollback-document-{suffix}"),
+        version=replace(
+            version, version_id=rollback_version_id, source_id=f"rollback-source-{suffix}",
+            content_sha256=rollback_sha256, captured_at=now + timedelta(seconds=1),
+            ingested_at=now + timedelta(seconds=1, milliseconds=1),
+        ),
+        payload=rollback_payload, spans=(rollback_span,), blocks=(rollback_block,),
+        read_principals=("x" * 129,),
+    )
+    try:
+        store.ingest_bundle(rollback_bundle)
+    except ContractError as error:
+        if str(error) != "read principal is empty or too long":
+            raise
+    else:
+        raise AssertionError("invalid synthetic read principal did not abort PostgreSQL ingest")
+    with store._connect() as connection:
+        rollback_rows = {
+            "document": connection.execute("SELECT COUNT(*) FROM rag_documents WHERE document_id=?", (rollback_bundle.document.document_id,)).fetchone()[0],
+            "version": connection.execute("SELECT COUNT(*) FROM rag_document_versions WHERE version_id=?", (rollback_version_id,)).fetchone()[0],
+            "outbox": connection.execute("SELECT COUNT(*) FROM rag_outbox WHERE event_key=?", (f"rag.document.ingested:{rollback_version_id}:{rollback_sha256}",)).fetchone()[0],
+        }
+    if any(rollback_rows.values()) or objects.get(rollback_sha256) != rollback_payload:
+        raise AssertionError("failed PostgreSQL ingest left partial SQL rows or lost the content-addressed fixture object")
+    output["postgres_ingest_transaction_rollback"] = {
+        "document_version_and_outbox_rows_rolled_back": True,
+        "content_addressed_object_remains_until_isolated_volume_cleanup": True,
+    }
+
     ingested = store.ingest_bundle(bundle)
     if ingested.get("status") != "ingested" or objects.get(payload_sha256) != payload:
         raise AssertionError("PostgreSQL/S3 application ingest did not reopen the source object")
+
+    def fail_synthetic_outbox_handler(
+        _event_key: str, _event_type: str, _payload: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        raise RuntimeError("injected synthetic outbox handler failure")
+
+    try:
+        store.consume_outbox_once("synthetic-failing-consumer", fail_synthetic_outbox_handler, lease_seconds=0.05)
+    except RuntimeError as error:
+        if str(error) != "injected synthetic outbox handler failure":
+            raise
+    else:
+        raise AssertionError("injected outbox handler failure did not escape to the caller")
+    with store._connect() as connection:
+        failed_outbox = connection.execute("SELECT status,attempts FROM rag_outbox WHERE event_key=?", (ingested["outbox_event_key"],)).fetchone()
+        failed_receipt = connection.execute(
+            "SELECT 1 FROM rag_consumer_receipts WHERE consumer_id=? AND event_key=?",
+            ("synthetic-failing-consumer", ingested["outbox_event_key"]),
+        ).fetchone()
+    if failed_outbox is None or failed_outbox["status"] != "processing" or int(failed_outbox["attempts"]) != 1 or failed_receipt is not None:
+        raise AssertionError("failed outbox handler did not leave only a recoverable lease without a receipt")
+    time.sleep(0.06)
     outbox = _outbox_verify_once(store)
     if outbox is None or outbox.get("committed") is not True:
         raise AssertionError("PostgreSQL outbox consume did not commit its receipt")
+    if _outbox_verify_once(store) is not None:
+        raise AssertionError("completed PostgreSQL outbox event was consumed a second time")
     with store._connect() as connection:
         receipt = connection.execute(
             "SELECT result_json FROM rag_consumer_receipts WHERE consumer_id=? AND event_key=?",
@@ -244,6 +312,29 @@ def main() -> None:
         text_index_manifest_sha256=str(text_index["index_manifest_sha256"]),
         vector_index_manifest_sha256=vector_index_sha256,
     )
+    missing_receipt_release_id = f"{release_id}-missing-backend"
+    missing_receipt_spec = replace(
+        release_spec,
+        release_id=missing_receipt_release_id,
+        required_backends=("opensearch",),
+        text_index_manifest_sha256=str(store.preview_reference_index_manifest(missing_receipt_release_id, [version_id])["index_manifest_sha256"]),
+    )
+    active_before_failed_publish = store.active_release_id()
+    store.create_release(missing_receipt_spec, [version_id])
+    try:
+        store.publish_release(missing_receipt_release_id, actor_id="integration-smoke", reason="Verify failed publication transaction rollback.")
+    except ReleaseNotReady:
+        pass
+    else:
+        raise AssertionError("release publication without its required backend receipt unexpectedly succeeded")
+    after_failed_publish = store.release_summaries()
+    failed_release_row = next((row for row in after_failed_publish["releases"] if row["release_id"] == missing_receipt_release_id), None)
+    if after_failed_publish["active_release_id"] != active_before_failed_publish or failed_release_row is None or failed_release_row["status"] != "building":
+        raise AssertionError("failed release publication changed the active pointer or release status")
+    output["postgres_release_publication_failure_atomic"] = {
+        "active_release_unchanged": True, "incomplete_release_remains_building": True,
+    }
+
     store.create_release(release_spec, [version_id])
     reference_receipt = store.build_reference_index_receipt(release_id)
     ready = store.mark_backend_ready(reference_receipt, store.verify_reference_index)
@@ -252,6 +343,7 @@ def main() -> None:
         raise AssertionError("PostgreSQL reference receipt and release publication did not complete")
     output["postgres_application_ingest_outbox_release_publish"] = {
         "ingested": True, "object_reopened": True, "outbox_receipt_committed": True,
+        "outbox_handler_failure_retried_once": True, "duplicate_ack_prevented": True,
         "reference_receipt_ready": True, "release_published": True,
     }
 
