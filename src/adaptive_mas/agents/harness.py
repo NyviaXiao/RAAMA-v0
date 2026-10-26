@@ -1671,30 +1671,31 @@ def _fundamental_handlers(
                     top_k=limit,
                     time_mode="strict_forward",
                 )
-                result = industrial_rag_service.research(
-                    plan,
-                    max_searches=int(research_policy["max_searches"]),
-                    evidence_limit=int(research_policy["evidence_limit"]),
-                    table_expansion_limit=(
+                research_options = {
+                    "max_searches": int(research_policy["max_searches"]),
+                    "evidence_limit": int(research_policy["evidence_limit"]),
+                    "table_expansion_limit": (
                         int(research_policy["table_expansion_limit"])
                         if research_policy["parent_context_mode"] == "reviewed_parent_and_child"
                         and research_ablation_id != 13
                         else 0
                     ),
-                    rrf_rank_constant=int(research_policy["rrf_rank_constant"]),
-                    use_reranker=(
+                    "rrf_rank_constant": int(research_policy["rrf_rank_constant"]),
+                    "use_reranker": (
                         research_policy["reranker_profile"] == "configured"
                         and research_ablation_id != 12
                     ),
-                    query_rewrite_enabled=research_ablation_id != 7,
-                    multi_hop_enabled=research_ablation_id != 8,
-                    fusion_strategy=(
+                    "query_rewrite_enabled": research_ablation_id != 7,
+                    "multi_hop_enabled": research_ablation_id != 8,
+                    "fusion_strategy": (
                         "first_available_channel" if research_ablation_id == 11 else "rrf"
                     ),
-                    row_group_chunking=research_ablation_id != 3,
-                    include_continuation_context=research_ablation_id != 2,
-                    trace_callback=retrieval_trace_callback,
-                )
+                    "row_group_chunking": research_ablation_id != 3,
+                    "include_continuation_context": research_ablation_id != 2,
+                }
+                if retrieval_trace_callback is not None:
+                    research_options["trace_callback"] = retrieval_trace_callback
+                result = industrial_rag_service.research(plan, **research_options)
                 channel_status.append({
                     "symbol": symbol,
                     "channels": result["channel_status"],

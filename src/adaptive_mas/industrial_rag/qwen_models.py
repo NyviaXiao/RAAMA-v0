@@ -352,6 +352,12 @@ class LocalQwenDenseAdapter:
         ).hexdigest()
         return key, metadata
 
+    def _remember_vector(self, key: str, vector: np.ndarray) -> None:
+        self._vectors[key] = vector
+        self._vectors.move_to_end(key)
+        while len(self._vectors) > self.cache_capacity:
+            self._vectors.popitem(last=False)
+
     def _read_persistent_vector(self, key: str, metadata: dict[str, object]) -> np.ndarray | None:
         if self._cache_connection is None:
             return None
@@ -485,8 +491,7 @@ class LocalQwenDenseAdapter:
             vector = self._read_persistent_vector(key, metadata)
             if vector is not None:
                 persistent_cache_hits += 1
-                self._vectors[key] = vector
-                self._vectors.move_to_end(key)
+                self._remember_vector(key, vector)
                 ranked.append((float(np.dot(query_vector, vector)), row))
                 continue
             missing_rows.append(row)
@@ -580,11 +585,8 @@ class LocalQwenDenseAdapter:
                 self._cache_connection.rollback()
             raise
         for row, key, vector in zip(rows, keys, vectors):
-            self._vectors[key] = vector
-            self._vectors.move_to_end(key)
+            self._remember_vector(key, vector)
             ranked.append((float(np.dot(query_vector, vector)), row))
-        while len(self._vectors) > self.cache_capacity:
-            self._vectors.popitem(last=False)
 
     @staticmethod
     def _ranked_candidate(rank: int, score: float, row: Any) -> dict[str, object]:

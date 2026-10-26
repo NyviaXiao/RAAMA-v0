@@ -212,3 +212,13 @@ Git 仅传源码、配置模板、依赖锁、schema、测试、允许上传的�
 ### 2026-10-26 capture恢复现行权限复核
 
 本地 `68002cff5069f59c9ffe16f994056e08273e2a9e`（含106b328、0bbc38e）对应备份 `480d34d0b977a73ec2a0819f0fd0830b55ba1a9e`、tree `1ea4a468b3326ba9aa55174933cc58a09d20246f`；4改动blob/ref一致，无.tmp。父精确归档7项针对性检查通过（2.33秒）。在父真实SQLite副本中，权限revision相同时已完成CMB工具链可复用；实际set_access撤权后旧completed结果被RunIdentityError(access_scope)拒绝，G-P1-02独立关闭。受控修改父DB续表revision也被拒绝，此项仅验证版本漂移，不冒充真实人工复核动作。未重复未变442项全量与模型推理。106b328使decision_time在release之后设置as_of后生成，已审源码，新的完整模型运行仍待结果。其余真实模型、多专家LLM Agent、完整模块比较及A–G和干净Git克隆自检继续pending。
+
+
+### Parent checkpoint 1a96efc (2026-10-26)
+
+- Exact local source `1a96efce71bac8e77f999e9dc2e8a1df19a80377` maps to backup `9d2ec3b2506c6ecf32bc34f09481a210e1f85e59`, tree `711c7adfd9bbf2322bd5d5536a732e1011a52ee8`; nine changed blobs match, no `.tmp` paths. Prior parent handoff draft is included in that snapshot.
+- Parent exact archive suite: **445 passed, 2 failed, 49.92s**. Failures are the strict policy options assertion and live API in-flight revocation shim receiving the added `trace_callback` parameter. Preserve the actual revoke-denial assertion while repairing compatibility.
+- Open **G-P2-03**: after deleting complete trailing journal events and retaining a valid header, completed case progress still returns its cached result although it references missing sequence 1. Verify all progress event sequence/hash references against the journal before any completed-result reuse, including overall case and module progress. This is a controlled integrity test, not a real model result.
+- Open **D-P2-04**: `cache_capacity=1` with two persistent hits leaves two in-memory vectors. Bound persistent-hit insertions with the same LRU policy as newly embedded vectors.
+- Controlled positive/negative evidence: identical runtime/source reuses persisted vectors; coherent-checksum NaN and wrong-dimension payloads recompute; real synthetic SQLite retrieval emits structured candidates before a controlled dense-channel failure and preserves its failure event. No new Qwen inference, full LLM Agent, blind study, or complete 20-module acceptance is implied.
+- Fresh clone reproduction after installing the documented dependencies: `python -m pytest -p no:cacheprovider -q`; relevant committed suites are `tests/test_qwen_models.py`, `tests/test_financial_rag_current_capture.py`, `tests/test_harness_evolution.py`, and `tests/test_industrial_rag_api_e2e.py`. Private parent probes are diagnostic only and are not required by the handoff. A-G remains incomplete.

@@ -926,15 +926,16 @@ class IndustrialRagService:
                 top_k=min(pinned_plan.top_k, 10),
             )
             try:
-                result = self.search(
-                    subplan,
-                    rrf_rank_constant=rrf_rank_constant,
-                    use_reranker=use_reranker,
-                    fusion_strategy=fusion_strategy,
-                    row_group_chunking=row_group_chunking,
-                    control=control,
-                    trace_callback=trace_callback,
-                )
+                search_options = {
+                    "rrf_rank_constant": rrf_rank_constant,
+                    "use_reranker": use_reranker,
+                    "fusion_strategy": fusion_strategy,
+                    "row_group_chunking": row_group_chunking,
+                    "control": control,
+                }
+                if trace_callback is not None:
+                    search_options["trace_callback"] = trace_callback
+                result = self.search(subplan, **search_options)
             except Exception as error:
                 if trace_callback is not None:
                     trace_callback({

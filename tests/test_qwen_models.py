@@ -134,11 +134,12 @@ def test_dense_vectors_are_reused_only_for_verified_source_and_model_identity(tm
 
     second_embedding = _FakeEmbedding()
     second_events: list[dict[str, object]] = []
-    second = LocalQwenDenseAdapter(store, second_embedding, cache_path=cache_path)
+    second = LocalQwenDenseAdapter(store, second_embedding, cache_capacity=1, cache_path=cache_path)
     second_results = second.search_with_trace(_dense_plan(), ["version-1"], None, second_events.append)
     assert [item.evidence_id for item in second_results] == [item.evidence_id for item in first_results]
     assert second_embedding.calls == [(('revenue 2024',), True)]
     assert second_events[-1]["cache"]["persistent_hits"] == 2
+    assert len(second._vectors) == 1
 
     changed_model = _FakeEmbedding(instruction_sha256="instruction-b")
     changed = LocalQwenDenseAdapter(store, changed_model, cache_path=cache_path)

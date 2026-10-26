@@ -151,6 +151,7 @@ class RetrievalTraceJournal:
         self.runtime_model_identity_sha256 = runtime_model_identity_sha256
         self.sequence = 0
         self.previous_event_sha256 = "0" * 64
+        self.event_hashes: dict[int, str] = {}
         if self.path.exists():
             self._read_and_validate()
         else:
@@ -198,8 +199,45 @@ class RetrievalTraceJournal:
             ):
                 raise RunIdentityError("retrieval trace event chain failed integrity validation")
             previous = str(record["event_sha256"])
+            self.event_hashes[expected_sequence] = previous
         self.sequence = len(lines) - 1
         self.previous_event_sha256 = previous
+
+    def verify_references(
+        self,
+        references: object,
+        *,
+        require_nonempty: bool = False,
+    ) -> None:
+        if not isinstance(references, list) or (require_nonempty and not references):
+            raise RunIdentityError("saved progress has no retrieval trace journal references")
+        previous_sequence = 0
+        for reference in references:
+            if not isinstance(reference, dict):
+                raise RunIdentityError("saved retrieval trace reference is malformed")
+            sequence = reference.get("sequence")
+            digest = reference.get("event_sha256")
+            if (
+                isinstance(sequence, bool)
+                or not isinstance(sequence, int)
+                or sequence < 1
+                or sequence <= previous_sequence
+                or not isinstance(digest, str)
+                or self.event_hashes.get(sequence) != digest
+            ):
+                raise RunIdentityError("saved progress references a missing, changed, or reordered retrieval trace event")
+            previous_sequence = sequence
+
+    def verify_references_in(self, value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "retrieval_trace_records":
+                    self.verify_references(item)
+                else:
+                    self.verify_references_in(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.verify_references_in(item)
 
     def append(self, context: Mapping[str, object], event: Mapping[str, object]) -> dict[str, object]:
         body: dict[str, object] = {
@@ -214,7 +252,15 @@ class RetrievalTraceJournal:
         self._append_line(record)
         self.sequence = int(record["sequence"])
         self.previous_event_sha256 = str(record["event_sha256"])
+        self.event_hashes[self.sequence] = self.previous_event_sha256
         return record
+
+    def references_between(self, first_sequence: int, last_sequence: int | None = None) -> list[dict[str, object]]:
+        end = self.sequence if last_sequence is None else min(last_sequence, self.sequence)
+        return [
+            {"sequence": sequence, "event_sha256": self.event_hashes[sequence]}
+            for sequence in range(first_sequence, end + 1)
+        ]
 
 
 def _case_calculation_reasons(spec: Mapping[str, Any]) -> list[str]:
@@ -285,6 +331,8 @@ def _build_run_identity(
     qwen_manifest_path: Path,
     source_records: list[Mapping[str, Any]],
     store: IndustrialRagStore,
+    case_ids: list[str] | None = None,
+    module_matrix_enabled: bool = True,
 ) -> dict[str, object]:
     release_summary = store.release_summaries()
     release = next(
@@ -305,6 +353,10 @@ def _build_run_identity(
         "time_mode": "strict_forward",
         "query": QUERY_TEXT,
         "qwen_inference_enabled": use_qwen,
+        "evaluation_scope": {
+            "case_ids": sorted(case_ids) if case_ids is not None else sorted(str(spec["case_id"]) for spec in CASE_SPECS),
+            "module_matrix_enabled": module_matrix_enabled,
+        },
         "retrieval_channels": ["structured_facts", "bm25", "dense"] if use_qwen else ["structured_facts", "bm25"],
         "research_policy_json": policy_json,
         "research_policy_sha256": _sha256(policy_json.encode("utf-8")),
@@ -1174,6 +1226,34 @@ def _merge_search_results(results: list[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _collect_retrieval_trace_references(*values: object) -> list[dict[str, object]]:
+    references_by_sequence: dict[int, dict[str, object]] = {}
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "retrieval_trace_records" and isinstance(item, list):
+                    for reference in item:
+                        if not isinstance(reference, dict):
+                            raise RunIdentityError("saved retrieval trace reference is malformed")
+                        sequence = reference.get("sequence")
+                        if isinstance(sequence, bool) or not isinstance(sequence, int):
+                            raise RunIdentityError("saved retrieval trace reference is malformed")
+                        existing = references_by_sequence.get(sequence)
+                        if existing is not None and existing != reference:
+                            raise RunIdentityError("saved retrieval trace references conflict")
+                        references_by_sequence[sequence] = dict(reference)
+                else:
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    for value in values:
+        visit(value)
+    return [references_by_sequence[sequence] for sequence in sorted(references_by_sequence)]
+
+
 def _run_agent_chain(
     *,
     service: IndustrialRagService,
@@ -1194,6 +1274,9 @@ def _run_agent_chain(
     saved_progress = _existing_progress_record(progress_path, identity_fields)
     if saved_progress is not None:
         saved_attempts = saved_progress.get("attempts")
+        if not isinstance(saved_attempts, list):
+            raise RunIdentityError("saved agent progress has no attempt list")
+        retrieval_trace_journal.verify_references_in(saved_attempts)
         completed_result = saved_progress.get("completed_result")
         if (
             isinstance(saved_attempts, list)
@@ -1203,6 +1286,10 @@ def _run_agent_chain(
             and isinstance(completed_result, dict)
             and saved_progress.get("completed_result_sha256") == _canonical_hash(completed_result)
         ):
+            retrieval_trace_journal.verify_references(
+                saved_attempts[-1].get("retrieval_trace_records"),
+                require_nonempty=True,
+            )
             identity_check()
             return completed_result
     attempts = _resume_attempts(progress_path, identity_fields)
@@ -1386,6 +1473,7 @@ def _run_agent_chain(
     completed_result = {
         "agent_driver": client.model,
         "agent_model_called": False,
+        "retrieval_trace_records": list(attempt["retrieval_trace_records"]),
         "query": query,
         "security_code": symbol,
         "research_ablation_id": research_ablation_id,
@@ -1472,6 +1560,7 @@ def _module_matrix(
     active_period_results: list[dict[str, Any]] = []
     elapsed_by_module: dict[int, float] = {}
     if saved_progress is not None:
+        retrieval_trace_journal.verify_references_in(saved_progress)
         saved_results = saved_progress.get("results", {})
         if isinstance(saved_results, dict):
             result_by_module = {
@@ -1495,7 +1584,10 @@ def _module_matrix(
     runnable_ids = {2, 3, 7, 8, 9, 11, 13, 14, 15, 16}
     if use_qwen:
         runnable_ids.update({10, 12})
-        result_by_module[12] = dict(reranker_disabled.get("search_result", {}))
+        result_by_module[12] = {
+            **dict(reranker_disabled.get("search_result", {})),
+            "retrieval_trace_records": list(reranker_disabled.get("retrieval_trace_records", [])),
+        }
     descriptions = {
         2: "Disable reviewed cross-page continuation context.",
         3: "Remove semantic row-group chunks from the retrieval candidate set.",
@@ -1524,16 +1616,47 @@ def _module_matrix(
         identity_check()
         module_started = time.perf_counter()
         period_results = active_period_results if module_id == active_module_id else []
-        completed_periods = {str(row.get("report_period")) for row in period_results}
+        completed_periods = {
+            str(row.get("report_period"))
+            for row in period_results
+            if isinstance(row.get("result"), dict) and row.get("status", "completed") == "completed"
+        }
+        active_period_record: dict[str, Any] | None = None
         try:
             for period in ("2023", "2024"):
                 if period in completed_periods:
                     continue
                 identity_check()
                 search_started = time.perf_counter()
+                active_period_record = next(
+                    (
+                        row for row in period_results
+                        if str(row.get("report_period")) == period and row.get("status") == "running"
+                    ),
+                    None,
+                )
+                if active_period_record is None:
+                    active_period_record = {
+                        "report_period": period,
+                        "status": "running",
+                        "retrieval_trace_records": [],
+                    }
+                    period_results.append(active_period_record)
+                period_trace_records = active_period_record["retrieval_trace_records"]
+                persist_module_progress({
+                    **identity_fields,
+                    "security_code": symbol,
+                    "model_identity": dict(runtime_model_identity),
+                    "phase": "running",
+                    "active_module_id": module_id,
+                    "completed_module_ids": sorted(result_by_module),
+                    "elapsed_seconds_by_module": elapsed_by_module,
+                    "results": result_by_module,
+                    "active_module_period_results": period_results,
+                })
 
                 def trace_intervention(event: dict[str, object]) -> None:
-                    retrieval_trace_journal.append(
+                    record = retrieval_trace_journal.append(
                         {
                             **identity_fields,
                             "progress_kind": "module_matrix",
@@ -1542,6 +1665,21 @@ def _module_matrix(
                         },
                         event,
                     )
+                    period_trace_records.append({
+                        "sequence": record["sequence"],
+                        "event_sha256": record["event_sha256"],
+                    })
+                    persist_module_progress({
+                        **identity_fields,
+                        "security_code": symbol,
+                        "model_identity": dict(runtime_model_identity),
+                        "phase": "running",
+                        "active_module_id": module_id,
+                        "completed_module_ids": sorted(result_by_module),
+                        "elapsed_seconds_by_module": elapsed_by_module,
+                        "results": result_by_module,
+                        "active_module_period_results": period_results,
+                    })
 
                 result = _run_rag_intervention(
                     service=service,
@@ -1553,8 +1691,8 @@ def _module_matrix(
                     use_qwen=use_qwen,
                     retrieval_trace_callback=trace_intervention,
                 )
-                period_results.append({
-                    "report_period": period,
+                active_period_record.update({
+                    "status": "completed",
                     "result": result,
                     "elapsed_seconds": round(time.perf_counter() - search_started, 3),
                 })
@@ -1570,14 +1708,36 @@ def _module_matrix(
                     "active_module_period_results": period_results,
                 })
                 identity_check()
-            result_by_module[module_id] = _merge_search_results([item["result"] for item in period_results])
+            merged_period_results = [
+                row["result"] for row in period_results
+                if isinstance(row.get("result"), dict)
+            ]
+            result_by_module[module_id] = {
+                **_merge_search_results(merged_period_results),
+                "retrieval_trace_records": [
+                    reference
+                    for row in period_results
+                    for reference in row.get("retrieval_trace_records", [])
+                ],
+            }
         except Exception as exc:
             if isinstance(exc, RunIdentityError):
                 raise
+            if active_period_record is not None and active_period_record.get("status") == "running":
+                active_period_record.update({
+                    "status": "failed",
+                    "failure": {"type": type(exc).__name__, "message": str(exc)},
+                    "elapsed_seconds": round(time.perf_counter() - module_started, 3),
+                })
             result_by_module[module_id] = {
                 "status": "execution_error",
                 "execution_error": {"type": type(exc).__name__, "message": str(exc)},
                 "partial_period_results": period_results,
+                "retrieval_trace_records": [
+                    reference
+                    for row in period_results
+                    for reference in row.get("retrieval_trace_records", [])
+                ],
                 "retrieved": [],
             }
         elapsed_by_module[module_id] = round(time.perf_counter() - module_started, 3)
@@ -1614,6 +1774,7 @@ def _module_matrix(
                 "evidence_order_changed": baseline_ids != after_ids,
                 "channels": result.get("channels"),
                 "coverage": result.get("coverage"),
+                "retrieval_trace_records": list(result.get("retrieval_trace_records", [])),
                 "numeric_fact_periods_returned": sorted({
                     str((item.get("financial_fact") or {}).get("report_period"))
                     for item in retrieved
@@ -1670,7 +1831,13 @@ def main() -> None:
     parser.add_argument("--run-id", help="Unique local run directory")
     parser.add_argument("--resume-existing", action="store_true", help="Reuse parsed documents and a published release in the named run directory")
     parser.add_argument("--skip-qwen", action="store_true", help="Run retrieval and claim validation without local Qwen inference")
+    parser.add_argument("--case-id", choices=[str(spec["case_id"]) for spec in CASE_SPECS], help="Restrict this diagnostic run to one reviewed issuer case")
+    parser.add_argument("--skip-module-matrix", action="store_true", help="Run the primary tool chain and paired reranker check without the 20-module matrix")
     args = parser.parse_args()
+    selected_specs = [
+        spec for spec in CASE_SPECS
+        if args.case_id is None or str(spec["case_id"]) == args.case_id
+    ]
 
     run_id = args.run_id or datetime.now(timezone.utc).strftime("current-capture-%Y%m%dT%H%M%SZ")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", run_id):
@@ -1689,6 +1856,12 @@ def main() -> None:
             raise RunIdentityError("saved run identity names a different run id")
         if saved_run_identity.get("qwen_inference_enabled") is not use_qwen:
             raise RunIdentityError("resume-existing Qwen mode differs from the saved run; refusing before model initialization")
+        requested_scope = {
+            "case_ids": sorted(str(spec["case_id"]) for spec in selected_specs),
+            "module_matrix_enabled": not args.skip_module_matrix,
+        }
+        if saved_run_identity.get("evaluation_scope") != requested_scope:
+            raise RunIdentityError("resume-existing evaluation scope differs from the saved run; refusing before model initialization")
         as_of = datetime.fromisoformat(str(saved_run_identity["as_of"])).astimezone(timezone.utc)
     else:
         as_of = None
@@ -1702,7 +1875,7 @@ def main() -> None:
     )
     source_records: list[dict[str, Any]] = []
     version_ids: list[str] = []
-    for spec in CASE_SPECS:
+    for spec in selected_specs:
         source_record = manifest_records.get(str(spec["source_id"]))
         if source_record is None:
             raise ValueError(f"source record is missing: {spec['source_id']}")
@@ -1758,6 +1931,8 @@ def main() -> None:
         qwen_manifest_path=qwen_manifest_path,
         source_records=source_records,
         store=store,
+        case_ids=[str(spec["case_id"]) for spec in selected_specs],
+        module_matrix_enabled=not args.skip_module_matrix,
     )
     run_identity_sha256 = _canonical_hash(run_identity)
     identity_path = output_dir / "run_identity.json"
@@ -1788,7 +1963,7 @@ def main() -> None:
                 str(saved_runtime_identity_sha256) if saved_runtime_identity_sha256 is not None else None
             ),
         )
-    spec_by_case_id = {str(spec["case_id"]): spec for spec in CASE_SPECS}
+    spec_by_case_id = {str(spec["case_id"]): spec for spec in selected_specs}
     source_by_case_id = {str(source["case_id"]): source for source in source_records}
     retrieval_policy_sha256 = str(run_identity["research_policy_sha256"])
     case_identity_by_id: dict[str, dict[str, object]] = {
@@ -1853,6 +2028,8 @@ def main() -> None:
             qwen_manifest_path=qwen_manifest_path,
             source_records=source_records,
             store=store,
+            case_ids=[str(spec["case_id"]) for spec in selected_specs],
+            module_matrix_enabled=not args.skip_module_matrix,
         )
         _verify_run_identity(run_identity, current_identity)
         current_runtime_identity = _runtime_model_identity(
@@ -1887,6 +2064,11 @@ def main() -> None:
         run_identity_sha256=run_identity_sha256,
         runtime_model_identity_sha256=runtime_model_identity_sha256,
     )
+    for query_record in query_runs:
+        retrieval_trace_journal.verify_references(
+            query_record.get("retrieval_trace_records"),
+            require_nonempty=True,
+        )
 
     service = IndustrialRagService(
         store,
@@ -1906,7 +2088,7 @@ def main() -> None:
         "asset_manifest_sha256": _sha256(qwen_manifest_path.read_bytes()),
     }
     completed_case_ids = {str(item["case_id"]) for item in query_runs}
-    for source, spec in zip(source_records, CASE_SPECS):
+    for source, spec in zip(source_records, selected_specs):
         identity_check()
         if str(source["case_id"]) in completed_case_ids:
             identity_check()
@@ -1959,23 +2141,31 @@ def main() -> None:
         )
         baseline_order = [item["evidence_id"] for item in baseline["retrieval_order"]]
         no_reranker_order = [item["evidence_id"] for item in no_reranker.get("retrieval_order", [])]
-        module_rows = _module_matrix(
-            service=service,
-            release_id=run_id,
-            symbol=str(spec["security_code"]),
-            decision_time=decision_time,
-            baseline=baseline,
-            reranker_disabled=no_reranker,
-            use_qwen=use_qwen,
-            progress_path=output_dir / f"module_progress_{spec['security_code']}.json",
-            identity_fields={**case_progress_identity, "progress_kind": "module_matrix"},
-            runtime_model_identity=runtime_model_identity,
-            identity_check=identity_check,
-            retrieval_trace_journal=retrieval_trace_journal,
+        module_rows = (
+            _module_matrix(
+                service=service,
+                release_id=run_id,
+                symbol=str(spec["security_code"]),
+                decision_time=decision_time,
+                baseline=baseline,
+                reranker_disabled=no_reranker,
+                use_qwen=use_qwen,
+                progress_path=output_dir / f"module_progress_{spec['security_code']}.json",
+                identity_fields={**case_progress_identity, "progress_kind": "module_matrix"},
+                runtime_model_identity=runtime_model_identity,
+                identity_check=identity_check,
+                retrieval_trace_journal=retrieval_trace_journal,
+            )
+            if not args.skip_module_matrix else []
         )
         identity_check()
         query_record = {
             **case_identity,
+            "retrieval_trace_records": _collect_retrieval_trace_references(
+                baseline,
+                no_reranker,
+                module_rows,
+            ),
             "runtime_model_identity_sha256": runtime_model_identity_sha256,
             "case_identity_sha256": case_identity_sha256,
             "numeric_calculation_eligible": bool(case["calculator_eligible"]),
@@ -1985,7 +2175,12 @@ def main() -> None:
             "module_ablation_matrix": module_rows,
             "module_comparison": {
                 "same_question_release_and_source": True,
-                "changed_module": "configured Qwen3 reranker disabled for ablation 12" if use_qwen else "no Qwen intervention; supplemental baseline has dense retrieval and reranking disabled",
+                "changed_module": (
+                    "configured Qwen3 reranker disabled for ablation 12"
+                    if use_qwen else
+                    "no Qwen intervention; supplemental baseline has dense retrieval and reranking disabled"
+                ),
+                "paired_ablation_status": no_reranker.get("status", no_reranker.get("search_status")),
                 "baseline_reranker_identity": model_identity["reranker_cache_identity"],
                 "baseline_dense_identity": model_identity["embedding_cache_identity"],
                 "retrieval_order_changed": baseline_order != no_reranker_order if use_qwen else None,
@@ -2003,6 +2198,7 @@ def main() -> None:
         "schema_version": "raama.financial-rag.current-capture.v1",
         "run_id": run_id,
         "capture_classification": "current-capture",
+        "evaluation_scope": run_identity["evaluation_scope"],
         "capture_resume": {
             "resumed_existing_capture": args.resume_existing,
             "prior_attempt_reused_same_local_sources_and_release": args.resume_existing,
@@ -2015,7 +2211,7 @@ def main() -> None:
         "provider_calls": 0,
         "agent_model_called": False,
         "agent_tool_protocol": "real fundamental tool handlers, reopened evidence, deterministic Decimal calculator, and report validator driven by deterministic offline scripted tool calls",
-        "query_text_shared_by_all_issuers_and_ablations": QUERY_TEXT,
+        "query_text_shared_by_selected_cases_and_ablations": QUERY_TEXT,
         "release": release,
         "release_id": run_id,
         "time_mode": "strict_forward",
@@ -2046,17 +2242,21 @@ def main() -> None:
             "retrieval_trace_persisted": False,
             "candidates_or_ranks_available": False,
         },
-        "module_ablation_scope": "Actual bounded retrieval handler interventions for modules 2, 3, and 7-16; parser rebuild, immutable citation/alias/time contracts, and safety guards are recorded as not ablated.",
+        "module_ablation_scope": (
+            "Not run in this targeted single-case scope."
+            if args.skip_module_matrix else
+            "Actual bounded retrieval handler interventions for modules 2, 3, and 7-16; parser rebuild, immutable citation/alias/time contracts, and safety guards are recorded as not ablated."
+        ),
         "queries": query_runs,
         "limitations": [
-            "Three viewed development documents and one manually scoped table page per document are not an independent or blind benchmark.",
+            f"{len(source_records)} viewed development document(s) and one manually scoped table page per document are not an independent or blind benchmark.",
             "Full-source page text uses pypdf; Docling parses only the reviewed revenue-table page, not every page.",
             "Numeric facts were locally reviewed by Codex against the page images and parser output; this review is not independent.",
             "The tool protocol is real, but the tool-call sequence is scripted; no language model or provider was called.",
             "A separate historical local Qwen attempt returned without both annual facts exposed to the scripted driver; its exact retrieval response was not persisted. This run's retrieval results and failure traces are checkpointed under the bound run and runtime identities.",
             "CATL's reviewed table labels the values in 千元 but does not state currency; source observations are validated, but no currency calculation is attempted for that case.",
             "Ping An and CATL target tables do not state accounting basis; their values remain source observations and no growth calculation is eligible.",
-            "The module matrix records single-query retrieval outcomes only; it is not a causal ablation study, independent acceptance result, or quality score.",
+            "The module matrix records single-query retrieval outcomes only when enabled; it is not a causal ablation study, independent acceptance result, or quality score.",
             "Retrieval ranks and exact claim validation do not establish semantic entailment or investment quality.",
         ],
     }

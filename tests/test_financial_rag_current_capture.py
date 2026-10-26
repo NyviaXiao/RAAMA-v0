@@ -48,6 +48,7 @@ def test_run_identity_rejects_changes_to_mode_policy_time_code_source_or_release
     saved = {
         "run_id": "capture-1",
         "qwen_inference_enabled": False,
+        "evaluation_scope": {"case_ids": ["case-a", "case-b"], "module_matrix_enabled": True},
         "as_of": "2026-10-26T00:00:00+00:00",
         "research_policy_sha256": "policy-a",
         "implementation_sha256": {"harness.py": "code-a"},
@@ -58,6 +59,7 @@ def test_run_identity_rejects_changes_to_mode_policy_time_code_source_or_release
 
     for key, changed_value in (
         ("qwen_inference_enabled", True),
+        ("evaluation_scope", {"case_ids": ["case-a"], "module_matrix_enabled": False}),
         ("as_of", "2026-10-27T00:00:00+00:00"),
         ("research_policy_sha256", "policy-b"),
         ("implementation_sha256", {"harness.py": "code-b"}),
@@ -125,6 +127,10 @@ def test_run_identity_and_each_case_bind_live_permission_and_continuation_revisi
         )
 
     saved = build_identity()
+    assert saved["evaluation_scope"] == {
+        "case_ids": sorted(str(spec["case_id"]) for spec in capture.CASE_SPECS),
+        "module_matrix_enabled": True,
+    }
     assert saved["access_scope"] == {
         "principal_id": "local-public",
         "permission_revision": 3,
@@ -149,6 +155,19 @@ def test_run_identity_and_each_case_bind_live_permission_and_continuation_revisi
     store.continuation = 8
     with pytest.raises(capture.RunIdentityError, match="access_scope"):
         capture._verify_run_identity(saved, build_identity())
+
+
+def test_narrow_evaluation_scope_is_bound_into_run_identity() -> None:
+    saved = {
+        "run_id": "capture-1",
+        "evaluation_scope": {"case_ids": ["case-a", "case-b"], "module_matrix_enabled": True},
+    }
+    changed = {
+        **saved,
+        "evaluation_scope": {"case_ids": ["case-a"], "module_matrix_enabled": False},
+    }
+    with pytest.raises(capture.RunIdentityError, match="run identity mismatch: evaluation_scope"):
+        capture._verify_run_identity(saved, changed)
 
 
 def test_query_progress_accepts_same_mode_results_and_rejects_tampering_or_model_change() -> None:
@@ -246,6 +265,13 @@ def test_retrieval_trace_journal_is_append_only_identity_bound_and_integrity_che
     )
     assert resumed.sequence == 2
     assert resumed.previous_event_sha256 == second["event_sha256"]
+    resumed.verify_references(
+        [
+            {"sequence": first["sequence"], "event_sha256": first["event_sha256"]},
+            {"sequence": second["sequence"], "event_sha256": second["event_sha256"]},
+        ],
+        require_nonempty=True,
+    )
     with pytest.raises(capture.RunIdentityError, match="model identity"):
         capture.RetrievalTraceJournal(
             path,
@@ -264,6 +290,43 @@ def test_retrieval_trace_journal_is_append_only_identity_bound_and_integrity_che
             run_identity_sha256="run-hash",
             runtime_model_identity_sha256="runtime-hash",
         )
+
+
+def test_truncated_trace_tail_cannot_back_a_completed_case_or_module_cache(tmp_path) -> None:
+    path = tmp_path / "retrieval_trace.jsonl"
+    journal = capture.RetrievalTraceJournal(
+        path,
+        run_identity_sha256="run-hash",
+        runtime_model_identity_sha256="runtime-hash",
+    )
+    first = journal.append({"case_id": "case-1"}, {"stage": "search_started"})
+    second = journal.append({"case_id": "case-1"}, {"stage": "search_completed"})
+    case_progress = {
+        "retrieval_trace_records": [
+            {"sequence": first["sequence"], "event_sha256": first["event_sha256"]},
+            {"sequence": second["sequence"], "event_sha256": second["event_sha256"]},
+        ]
+    }
+    module_progress = {
+        "results": {
+            "12": {
+                "retrieval_trace_records": [
+                    {"sequence": second["sequence"], "event_sha256": second["event_sha256"]}
+                ]
+            }
+        }
+    }
+    lines = path.read_bytes().splitlines(keepends=True)
+    path.write_bytes(b"".join(lines[:-1]))
+    truncated = capture.RetrievalTraceJournal(
+        path,
+        run_identity_sha256="run-hash",
+        runtime_model_identity_sha256="runtime-hash",
+    )
+    with pytest.raises(capture.RunIdentityError, match="missing, changed, or reordered"):
+        truncated.verify_references_in(case_progress)
+    with pytest.raises(capture.RunIdentityError, match="missing, changed, or reordered"):
+        truncated.verify_references_in(module_progress)
 
 
 def test_progress_header_rejects_legacy_and_cross_mode_progress_before_runtime_setup() -> None:
@@ -327,4 +390,35 @@ def test_cross_mode_resume_fails_before_model_construction(tmp_path, monkeypatch
     monkeypatch.setattr(capture, "Qwen3RerankerRuntime", lambda *_args, **_kwargs: pytest.fail("model runtime constructed"))
 
     with pytest.raises(capture.RunIdentityError, match="mode differs"):
+        capture.main()
+
+
+def test_resume_scope_mismatch_fails_before_model_construction(tmp_path, monkeypatch) -> None:
+    run_dir = tmp_path / "capture-1"
+    run_dir.mkdir()
+    (run_dir / "industrial_rag.sqlite3").touch()
+    run_identity = {
+        "run_id": "capture-1",
+        "as_of": datetime(2026, 10, 26, tzinfo=timezone.utc).isoformat(),
+        "qwen_inference_enabled": False,
+        "evaluation_scope": {"case_ids": ["another-case"], "module_matrix_enabled": False},
+    }
+    (run_dir / "run_identity.json").write_text(json.dumps({
+        "schema_version": "raama.financial-rag.current-capture.run-identity-envelope.v1",
+        "run_identity": run_identity,
+        "run_identity_sha256": capture._canonical_hash(run_identity),
+        "runtime_model_identity": None,
+        "runtime_model_identity_sha256": None,
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "run_financial_rag_current_capture.py",
+        "--run-id", "capture-1",
+        "--output-root", str(tmp_path),
+        "--resume-existing",
+        "--skip-qwen",
+        "--case-id", str(capture.CASE_SPECS[0]["case_id"]),
+        "--skip-module-matrix",
+    ])
+    monkeypatch.setattr(capture, "Qwen3EmbeddingRuntime", lambda *_args, **_kwargs: pytest.fail("model runtime constructed"))
+    with pytest.raises(capture.RunIdentityError, match="evaluation scope differs"):
         capture.main()
