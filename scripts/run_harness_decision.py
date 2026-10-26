@@ -15,6 +15,7 @@ from adaptive_mas.data import load_oos_research_data
 from adaptive_mas.decision import PortfolioState
 from adaptive_mas.harness_runtime import create_harness_daily_decision
 from adaptive_mas.risk_profile import resolve_risk_profile, validate_canonical_risk_profile
+from adaptive_mas.runtime_binding import validate_workflow_runtime_binding
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -82,6 +83,9 @@ def main() -> None:
         type=Path,
         help="Use a completed research_result_file from the shared GEPA evolution run without making another provider request.",
     )
+    parser.add_argument("--workflow-binding-json", type=Path)
+    parser.add_argument("--pinned-runtime-package-id")
+    parser.add_argument("--pinned-runtime-package-sha256")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -89,6 +93,32 @@ def main() -> None:
         raise ValueError("prediction horizon must be a positive integer")
     if args.announcement_text_limit and args.announcement_document_dir is None:
         raise ValueError("reading cached announcement text requires --announcement-document-dir")
+    workflow_binding_sha256 = None
+    if args.workflow_binding_json is not None:
+        workflow_binding = json.loads(args.workflow_binding_json.read_text(encoding="utf-8"))
+        if not isinstance(workflow_binding, dict):
+            raise ValueError("workflow binding must be a JSON object")
+        if args.pinned_runtime_package_id is None:
+            raise ValueError("workflow binding requires a pinned runtime package ID")
+        pinned_package = workflow_binding.get("runtime_package")
+        if not isinstance(pinned_package, dict):
+            raise ValueError("workflow binding has no complete runtime package reference")
+        if (
+            pinned_package.get("package_id") != args.pinned_runtime_package_id
+            or pinned_package.get("package_sha256") != args.pinned_runtime_package_sha256
+        ):
+            raise ValueError("workflow runtime package arguments differ from the queued snapshot")
+        workflow_binding_sha256 = validate_workflow_runtime_binding(
+            workflow_binding,
+            project_root=project_dir,
+            request_paths={
+                "baostock_run_dir": args.baostock_run_dir,
+                "config": args.config,
+                "public_cache_dir": args.public_cache_dir,
+                "reuse_research_json": args.reuse_research_json,
+                "training_seed": args.training_seed,
+            },
+        )
 
     config_bytes = args.config.read_bytes()
     config = tomllib.loads(config_bytes.decode("utf-8"))
@@ -190,6 +220,9 @@ def main() -> None:
         task_id=run_id,
         idempotency_key=run_id,
         risk_profile=risk_profile,
+        workflow_binding_sha256=workflow_binding_sha256,
+        pinned_runtime_package_id=args.pinned_runtime_package_id,
+        pinned_runtime_package_sha256=args.pinned_runtime_package_sha256,
     )
     payload = json.dumps(decision.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:

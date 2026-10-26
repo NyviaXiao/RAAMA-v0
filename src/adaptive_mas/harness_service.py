@@ -31,6 +31,7 @@ from adaptive_mas.execution_ledger import simulate_execution_ledger
 from adaptive_mas.release_governance import HarnessReleaseStore
 from adaptive_mas.research_provenance import stable_hash
 from adaptive_mas.risk_profile import resolve_risk_profile, validate_canonical_risk_profile
+from adaptive_mas.runtime_binding import build_workflow_runtime_binding
 
 
 class ServiceConflict(RuntimeError):
@@ -154,7 +155,9 @@ class HarnessServiceStore:
         self, task_id: str, idempotency_key: str, request: Mapping[str, object]
     ) -> dict[str, object]:
         request_json = _json(dict(request))
-        request_hash = _sha256(request_json)
+        idempotency_request = dict(request)
+        idempotency_request.pop("runtime_binding", None)
+        request_hash = _sha256(_json(idempotency_request))
         now = _now()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1014,6 +1017,7 @@ def _replay_runner(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     portfolio_path = artifact_dir / "portfolio_state.json"
     risk_profile_path = artifact_dir / "risk_profile.json"
+    runtime_binding_path = artifact_dir / "runtime_binding.json"
     output_path = artifact_dir / "decision.json"
     portfolio_path.write_text(
         json.dumps(request["portfolio"], ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1021,6 +1025,11 @@ def _replay_runner(
     risk_profile_path.write_text(
         json.dumps(request["risk_profile"], ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
     )
+    runtime_binding = request.get("runtime_binding")
+    if isinstance(runtime_binding, Mapping):
+        runtime_binding_path.write_text(
+            json.dumps(runtime_binding, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+        )
     command = [
         sys.executable,
         str(root / "scripts" / "run_harness_decision.py"),
@@ -1040,6 +1049,15 @@ def _replay_runner(
         "--reuse-research-json", str(request["reuse_research_json"]),
         "--output", str(output_path),
     ]
+    if isinstance(runtime_binding, Mapping):
+        package = runtime_binding["runtime_package"]
+        assert isinstance(package, Mapping)
+        command.extend((
+            "--workflow-binding-json", str(runtime_binding_path),
+            "--pinned-runtime-package-id", str(package["package_id"]),
+        ))
+        if package.get("package_sha256") is not None:
+            command.extend(("--pinned-runtime-package-sha256", str(package["package_sha256"])))
     environment = dict(os.environ)
     for name in tuple(environment):
         if name.upper() in {
@@ -1178,7 +1196,7 @@ class HarnessJobWorker:
 def _redact_request_for_ui(request: Mapping[str, object]) -> dict[str, object]:
     result = {
         key: value for key, value in request.items()
-        if key not in {"portfolio", "baostock_run_dir", "training_seed", "reuse_research_json", "config", "public_cache_dir", "harness_version_dir"}
+        if key not in {"portfolio", "baostock_run_dir", "training_seed", "reuse_research_json", "config", "public_cache_dir", "harness_version_dir", "runtime_binding"}
     }
     for key in ("baostock_run_dir", "training_seed", "reuse_research_json", "config"):
         value = request.get(key)
@@ -1335,6 +1353,15 @@ class HarnessRequestHandler(BaseHTTPRequestHandler):
                 task_id = str(payload.get("task_id") or uuid.uuid4().hex)
                 if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", task_id):
                     raise ValueError("task_id is not a safe identifier")
+                runtime_package = HarnessReleaseStore(
+                    str(request["harness_version_dir"]),
+                    project_root=context["project_root"],
+                ).pin_active_runtime_package()
+                request["runtime_binding"] = build_workflow_runtime_binding(
+                    request,
+                    project_root=context["project_root"],
+                    runtime_package=runtime_package,
+                )
                 job = context["store"].submit(task_id, idempotency_key, request)  # type: ignore[union-attr]
                 self._send_json(202, self._job_payload(job))
                 return

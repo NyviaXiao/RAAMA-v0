@@ -78,6 +78,9 @@ def create_harness_daily_decision(
     industrial_rag_service: IndustrialRagService | None = None,
     industrial_rag_principal_id: str = "local-public",
     industrial_rag_release_id: str | None = None,
+    workflow_binding_sha256: str | None = None,
+    pinned_runtime_package_id: str | None = None,
+    pinned_runtime_package_sha256: str | None = None,
 ) -> DailyDecision:
     """Run public agents, apply their sourced candidate filter and return a normal DailyDecision.
 
@@ -168,6 +171,12 @@ def create_harness_daily_decision(
             if retrospective_public_cache else "captured_public_cache_cutoff"
         ),
     }
+    if workflow_binding_sha256 is not None:
+        decision_versions["workflow_binding_sha256"] = workflow_binding_sha256
+    if pinned_runtime_package_id is not None:
+        decision_versions["pinned_runtime_package_id"] = pinned_runtime_package_id
+        if pinned_runtime_package_sha256 is not None:
+            decision_versions["pinned_runtime_package_sha256"] = pinned_runtime_package_sha256
     if checked_risk_profile is not None:
         decision_versions.update({
             "risk_profile_sha256": str(checked_risk_profile["profile_sha256"]),
@@ -284,6 +293,8 @@ def create_harness_daily_decision(
         training_state=training_state,
         training_seed_provenance=runtime_seed_provenance,
         versions=versions or {},
+        pinned_package_id=pinned_runtime_package_id,
+        pinned_package_sha256=pinned_runtime_package_sha256,
     )
     task_dir = Path(run_dir)
     candidate_sha256 = hashlib.sha256(
@@ -407,6 +418,11 @@ def create_harness_daily_decision(
             if retrospective_public_cache else "captured_public_cache_cutoff"
         ),
     }
+    if workflow_binding_sha256 is not None:
+        package_identity["workflow_binding_sha256"] = workflow_binding_sha256
+    if pinned_runtime_package_id is not None:
+        package_identity["pinned_runtime_package_id"] = pinned_runtime_package_id
+        package_identity["pinned_runtime_package_sha256"] = pinned_runtime_package_sha256
     runtime_package_identity_sha256 = _stable_hash(package_identity)
     request_identity = {
         "as_of": as_of.isoformat(),
@@ -437,6 +453,11 @@ def create_harness_daily_decision(
         "retrospective_public_cache": retrospective_public_cache,
         "prediction_horizon_sessions": horizon,
     }
+    if workflow_binding_sha256 is not None:
+        request_identity["workflow_binding_sha256"] = workflow_binding_sha256
+    if pinned_runtime_package_id is not None:
+        request_identity["pinned_runtime_package_id"] = pinned_runtime_package_id
+        request_identity["pinned_runtime_package_sha256"] = pinned_runtime_package_sha256
     state_store = HarnessStateStore(state_store_path) if state_store_path is not None else None
     task_state = None
     if state_store is not None:
@@ -710,6 +731,12 @@ def create_harness_daily_decision(
         "tool_schema_sha256": implementation_identity["tool_schema_sha256"],
         "evaluator_sha256": implementation_identity["evaluator_sha256"],
     })
+    if workflow_binding_sha256 is not None:
+        updated_versions["workflow_binding_sha256"] = workflow_binding_sha256
+    if pinned_runtime_package_id is not None:
+        updated_versions["pinned_runtime_package_id"] = pinned_runtime_package_id
+        if pinned_runtime_package_sha256 is not None:
+            updated_versions["pinned_runtime_package_sha256"] = pinned_runtime_package_sha256
     if checked_risk_profile is not None:
         updated_versions.update({
             "risk_profile_sha256": str(checked_risk_profile["profile_sha256"]),

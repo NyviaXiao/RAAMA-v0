@@ -1626,6 +1626,18 @@ class HarnessReleaseStore:
             raise ValueError("release evidence no longer matches the immutable bundle")
         return bundle
 
+    def pin_active_runtime_package(self) -> dict[str, object]:
+        """Return the immutable runtime package selected when a workflow is queued."""
+        with closing(self._connect()) as connection:
+            pointer = connection.execute("SELECT release_id FROM production_pointer WHERE singleton=1").fetchone()
+        if pointer is None or pointer["release_id"] is None:
+            return {"package_id": "seed", "package_sha256": None}
+        bundle = self._load_bundle(str(pointer["release_id"]))
+        return {
+            "package_id": str(bundle["package_id"]),
+            "package_sha256": str(bundle["package_sha256"]),
+        }
+
     def load_active(
         self,
         *,
@@ -1633,38 +1645,67 @@ class HarnessReleaseStore:
         training_state: Mapping[str, object] | None = None,
         training_seed_provenance: Mapping[str, object] | None = None,
         versions: Mapping[str, object] | None = None,
+        pinned_package_id: str | None = None,
+        pinned_package_sha256: str | None = None,
     ) -> tuple[dict[str, str], str, dict[str, object]]:
-        with closing(self._connect()) as connection:
-            pointer = connection.execute("SELECT release_id FROM production_pointer WHERE singleton=1").fetchone()
-        if pointer is None or pointer["release_id"] is None:
-            return seed_candidate(), "seed", {
-                "status": "no_accepted_production_bundle",
-                "procedural_memory": {
-                    "status": "seed_defaults",
-                    "loaded_from_persistent_store": False,
-                    "updated_from_prior_task": False,
-                },
+        bundle: Mapping[str, object] | None = None
+        if pinned_package_id is not None:
+            if pinned_package_id == "seed":
+                if pinned_package_sha256 is not None:
+                    raise ValueError("seed runtime package cannot have a package hash")
+                return seed_candidate(), "seed", {
+                    "status": "queued_seed_runtime_package",
+                    "procedural_memory": {
+                        "status": "seed_defaults",
+                        "loaded_from_persistent_store": False,
+                        "updated_from_prior_task": False,
+                    },
+                }
+            package = self._load_package(pinned_package_id)
+            if stable_hash(package) != pinned_package_sha256:
+                raise ValueError("queued complete runtime package does not match its pinned hash")
+        else:
+            with closing(self._connect()) as connection:
+                pointer = connection.execute("SELECT release_id FROM production_pointer WHERE singleton=1").fetchone()
+            if pointer is None or pointer["release_id"] is None:
+                return seed_candidate(), "seed", {
+                    "status": "no_accepted_production_bundle",
+                    "procedural_memory": {
+                        "status": "seed_defaults",
+                        "loaded_from_persistent_store": False,
+                        "updated_from_prior_task": False,
+                    },
+                }
+            bundle = self._load_bundle(str(pointer["release_id"]))
+            package = bundle["complete_runtime_package"]
+        if not isinstance(package, Mapping):
+            raise ValueError("complete runtime package must be an object")
+        if bundle is None:
+            bundle = {
+                "package_id": pinned_package_id,
+                "package_sha256": pinned_package_sha256,
+                "release_id": None,
             }
-        release_id = str(pointer["release_id"])
-        bundle = self._load_bundle(release_id)
-        package = bundle["complete_runtime_package"]
         if stable_hash(dict(config)) != package["config_sha256"]:
-            raise ValueError("production release bundle is incompatible with the requested configuration")
+            raise ValueError("production runtime package is incompatible with the requested configuration")
         runtime = package["runtime_context"]
         if training_state is not None and stable_hash(dict(training_state)) != stable_hash(runtime["training_state"]):
-            raise ValueError("production release bundle is incompatible with the active training state")
+            raise ValueError("production runtime package is incompatible with the active training state")
         if training_seed_provenance is not None and stable_hash(dict(training_seed_provenance)) != stable_hash(runtime["training_seed_provenance"]):
-            raise ValueError("production release bundle is incompatible with training seed provenance")
+            raise ValueError("production runtime package is incompatible with training seed provenance")
         if versions is not None and stable_hash(dict(versions)) != stable_hash(runtime["versions"]):
-            raise ValueError("production release bundle is incompatible with data/model versions")
+            raise ValueError("production runtime package is incompatible with data/model versions")
         implementation = source_package_identity()
         if package["implementation_identity"] != implementation:
-            raise ValueError("production release bundle is incompatible with the current implementation")
+            raise ValueError("production runtime package is incompatible with the current implementation")
         candidate = validate_candidate(package["candidate"])
         version = {
-            **bundle,
+            **dict(bundle),
             "version_id": package["candidate_version_id"],
-            "origin": "verified_complete_release_bundle",
+            "origin": (
+                "queued_complete_runtime_package"
+                if pinned_package_id is not None else "verified_complete_release_bundle"
+            ),
             "restored_package": package,
         }
         return candidate, str(package["candidate_version_id"]), version
