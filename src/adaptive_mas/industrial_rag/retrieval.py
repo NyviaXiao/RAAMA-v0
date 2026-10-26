@@ -19,6 +19,7 @@ from typing import Callable, Mapping, Sequence
 
 from adaptive_mas.industrial_rag.models import EvidenceResult, QueryPlan, SearchControl, parse_datetime
 from adaptive_mas.industrial_rag.planning import (
+    accounting_basis_status,
     accounting_basis_signature,
     metric_for_source_label,
     normalize_period,
@@ -90,6 +91,7 @@ def _citation(block: Mapping[str, object], *, fact: Mapping[str, object] | None 
             "currency": fact.get("currency"),
             "report_period": fact.get("report_period"),
             "accounting_basis": fact.get("consolidation"),
+            "accounting_basis_status": accounting_basis_status(fact.get("consolidation")),
             "parser_confidence": fact.get("confidence"),
             "review_status": fact.get("review_status"),
         })
@@ -144,10 +146,18 @@ def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object
             "unit_signature": unit_signature(unit, multiplier),
             "multiplier": str(multiplier),
             "basis": basis,
+            "basis_status": accounting_basis_status(basis),
             "basis_signature": accounting_basis_signature(basis),
             "currency": citation.get("currency"),
             "value": value,
-            "numeric_eligible": citation.get("numeric_eligible") is True,
+            "source_observation_eligible": (
+                citation.get("source_observation_eligible") is True
+                or citation.get("numeric_eligible") is True
+            ),
+            "numeric_eligible": (
+                citation.get("numeric_eligible") is True
+                and accounting_basis_status(basis) == "known"
+            ),
         }]
 
     expanded = item.get("reopened_table_row")
@@ -203,9 +213,11 @@ def _financial_observations(item: Mapping[str, object]) -> list[dict[str, object
                 "unit_signature": unit_signature(unit, multiplier),
                 "multiplier": str(multiplier),
                 "basis": basis,
+                "basis_status": accounting_basis_status(basis),
                 "basis_signature": accounting_basis_signature(basis),
                 "currency": cell.get("currency") or source_cell.get("currency"),
                 "value": value,
+                "source_observation_eligible": False,
                 "numeric_eligible": False,
                 "source_metric_label": row_label,
                 "raw_value": cell.get("raw_text"),
@@ -953,7 +965,7 @@ class IndustrialRagService:
                         metric=str(observation["metric"]),
                     ):
                         continue
-                    if observation["unit_signature"] is None or observation["basis_signature"] is None:
+                    if observation["unit_signature"] is None:
                         continue
                     if requested_unit_key is not None and observation["unit_signature"] != requested_unit_key:
                         continue
@@ -976,9 +988,12 @@ class IndustrialRagService:
                     "unit": observation["unit"],
                     "multiplier": observation["multiplier"],
                     "accounting_basis": observation["basis"],
+                    "accounting_basis_raw": observation["basis"],
+                    "accounting_basis_status": observation["basis_status"],
                     "currency": observation["currency"],
                     "raw_value": observation.get("raw_value", citation.get("raw_value")),
                     "normalized_value": str(observation["value"]),
+                    "source_observation_eligible": observation["source_observation_eligible"],
                     "numeric_claim_eligible": observation["numeric_eligible"],
                     "source_location": {
                         "source_id": item.get("source_id") or citation.get("source_id"),
@@ -1068,6 +1083,18 @@ class IndustrialRagService:
                         str(observation["accounting_basis"]) for observation in structured_observations
                         if observation.get("accounting_basis")
                     }),
+                    "observed_accounting_basis_statuses": sorted({
+                        str(observation["accounting_basis_status"])
+                        for observation in structured_observations
+                        if observation.get("accounting_basis_status")
+                    }),
+                    "observed_accounting_basis_details": [
+                        {"raw": observation.get("accounting_basis"), "status": observation.get("accounting_basis_status")}
+                        for _, observation in sorted({
+                            (str(observation.get("accounting_basis")), str(observation.get("accounting_basis_status"))): observation
+                            for observation in structured_observations
+                        }.items())
+                    ],
                     "observed_report_periods": sorted({
                         str(observation["report_period"]) for observation in structured_observations
                         if observation.get("report_period")
@@ -1626,7 +1653,16 @@ class IndustrialRagService:
                 for span in supporting_spans
             ]
             citation["point_in_time_eligible"] = fact["time_basis"] == "strict_forward"
-            citation["numeric_eligible"] = spans_are_valid and fact["review_status"] == "reviewed" and float(fact["confidence"]) >= 0.9
+            citation["accounting_basis_status"] = accounting_basis_status(fact["consolidation"])
+            citation["source_observation_eligible"] = (
+                spans_are_valid
+                and fact["review_status"] == "reviewed"
+                and float(fact["confidence"]) >= 0.9
+            )
+            citation["numeric_eligible"] = (
+                citation["source_observation_eligible"]
+                and citation["accounting_basis_status"] == "known"
+            )
             text = f"{fact['metric']}：{fact['raw_value']} {fact['unit']}；规范值={fact['normalized_value']} {fact['unit']}；报告期={fact['report_period']}；口径={fact['consolidation']}"
             result = EvidenceResult(
                 evidence_id=f"ev-fact-{fact['fact_id']}", channel="structured_facts",

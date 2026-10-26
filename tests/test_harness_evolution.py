@@ -17,6 +17,7 @@ from adaptive_mas.agents.harness import (
     InvalidToolInput,
     SUBMIT_REPORT,
     _accept_report,
+    _calculation_operand,
     _compact_tool_message,
     _financial_calculation,
     _fundamental_handlers,
@@ -1495,7 +1496,7 @@ def test_fundamental_calculator_creates_recomputable_decimal_evidence() -> None:
         str(reference["report_period"]): str(reference["evidence_id"])
         for reference in unreviewed_search["evidence_refs"]
     }
-    with pytest.raises(ValueError, match="not numeric-eligible"):
+    with pytest.raises(ValueError, match="unknown accounting basis|not numeric-eligible"):
         unreviewed_handlers["calculate_financial_metric"]({
             "operation": "growth_percent",
             "operands": [
@@ -1503,6 +1504,142 @@ def test_fundamental_calculator_creates_recomputable_decimal_evidence() -> None:
                 {"evidence_id": unreviewed_ids["2026Q2"], "field": "revenue_yoy_pct"},
             ],
         })
+
+
+def test_unknown_basis_is_source_observable_but_rejected_by_every_calculation_gate() -> None:
+    available = "2025-03-31T18:00:00+08:00"
+    decision_time = datetime.fromisoformat("2026-10-01T16:00:00+08:00")
+
+    def make_snapshot(basis: str) -> dict[str, object]:
+        evidence = []
+        for period, value in (("2023", "339123"), ("2024", "337488")):
+            evidence.append({
+                "source_record_id": f"cmb-revenue-{basis}-{period}",
+                "dataset": "financial_statement",
+                "title": f"招商银行 {period} 年度收入",
+                "report_period": period,
+                "published_at": available,
+                "available_at": available,
+                "fetched_at": available,
+                "content_sha256": f"fixture-{basis}-{period}",
+                "revenue_cny": value,
+                "facts_units": {"revenue_cny": "CNY"},
+                "facts_metadata": {
+                    "revenue_cny": {
+                        "numeric_eligible": True,
+                        "unit": "CNY",
+                        "report_period": period,
+                        "accounting_basis": basis,
+                        "currency": "CNY",
+                    },
+                },
+                "accounting_basis": basis,
+                "currency": "CNY",
+                "vintage_status": "captured_fixture",
+                "vintage_verified": True,
+            })
+        return {"p9_outputs": [{"expert": "fundamental_rule_v1", "symbol": "sh.600036", "evidence": evidence}]}
+
+    known_basis = "本集团"
+    _, known_handlers, known_catalog = _fundamental_handlers(make_snapshot(known_basis), decision_time)
+    known_search = known_handlers["search_financial_facts_and_announcements"]({
+        "question": "revenue_cny", "symbols": ["600036"],
+    })
+    known_ids = {
+        str(reference["report_period"]): str(reference["evidence_id"])
+        for reference in known_search["evidence_refs"]
+    }
+    assert len(known_ids) == 2
+    assert all(
+        known_catalog[evidence_id]["facts_metadata"]["revenue_cny"]["numeric_eligible"] is True
+        for evidence_id in known_ids.values()
+    )
+    calculated = known_handlers["calculate_financial_metric"]({
+        "operation": "growth_percent",
+        "operands": [
+            {"evidence_id": known_ids["2023"], "field": "revenue_cny"},
+            {"evidence_id": known_ids["2024"], "field": "revenue_cny"},
+        ],
+    })
+    with localcontext() as context:
+        context.prec = 50
+        expected_growth = (Decimal("337488") - Decimal("339123")) / Decimal("339123") * 100
+    assert Decimal(str(calculated["value"])) == expected_growth
+
+    unknown_basis = "not_stated_in_target_table"
+    _, unknown_handlers, unknown_catalog = _fundamental_handlers(make_snapshot(unknown_basis), decision_time)
+    unknown_search = unknown_handlers["search_financial_facts_and_announcements"]({
+        "question": "revenue_cny", "symbols": ["600036"],
+    })
+    unknown_ids = {
+        str(reference["report_period"]): str(reference["evidence_id"])
+        for reference in unknown_search["evidence_refs"]
+    }
+    assert len(unknown_ids) == 2
+    for evidence_id in unknown_ids.values():
+        metadata = unknown_catalog[evidence_id]["facts_metadata"]["revenue_cny"]
+        assert metadata["accounting_basis"] == unknown_basis
+        assert metadata["accounting_basis_status"] == "unknown"
+        assert metadata["numeric_eligible"] is False
+    unknown_catalog[unknown_ids["2023"]]["accounting_basis"] = "本集团"
+    unknown_catalog[unknown_ids["2023"]]["facts_metadata"]["revenue_cny"]["accounting_basis"] = None
+    with pytest.raises(ValueError, match="unknown accounting basis"):
+        _calculation_operand(
+            unknown_catalog,
+            {"evidence_id": unknown_ids["2023"], "field": "revenue_cny"},
+            decision_time,
+        )
+    with pytest.raises(ValueError, match="unknown accounting basis"):
+        unknown_handlers["calculate_financial_metric"]({
+            "operation": "growth_percent",
+            "operands": [
+                {"evidence_id": unknown_ids["2023"], "field": "revenue_cny"},
+                {"evidence_id": unknown_ids["2024"], "field": "revenue_cny"},
+            ],
+        })
+
+    observation = {
+        "evidence_id": known_ids["2024"],
+        "field": "revenue_cny",
+        "value": "337488",
+        "unit": "CNY",
+        "report_period": "2024",
+        "period_start": None,
+        "period_end": None,
+    }
+    source_report = {
+        "summary": "Reviewed source revenue.",
+        "findings": [{
+            "symbol": "600036",
+            "conclusion": "Annual revenue matched the reviewed source fact.",
+            "claim_type": "source_fact",
+            "evidence_ids": [known_ids["2024"]],
+            "observations": [dict(observation)],
+            "uncertainties": [],
+        }],
+        "unresolved_items": [],
+    }
+    _validate_report(source_report, known_catalog, "fundamental", visible_evidence_ids=set(known_catalog), decision_time=decision_time)
+    tampered_report = json.loads(json.dumps(source_report))
+    tampered_report["findings"][0]["observations"][0]["value"] = "337489"
+    with pytest.raises(ValueError, match="does not match its cited source"):
+        _validate_report(tampered_report, known_catalog, "fundamental", visible_evidence_ids=set(known_catalog), decision_time=decision_time)
+
+    operands = [
+        {"symbol": "600036", "field": "revenue_cny", "value": Decimal("339123"), "unit": "CNY", "report_period": "2023", "accounting_basis": known_basis, "currency": "CNY"},
+        {"symbol": "600036", "field": "revenue_cny", "value": Decimal("337488"), "unit": "CNY", "report_period": "2024", "accounting_basis": known_basis, "currency": "CNY"},
+    ]
+    different_entity = [dict(operands[0]), dict(operands[1], symbol="000001")]
+    with pytest.raises(ValueError, match="incompatible symbol"):
+        _financial_calculation("growth_percent", different_entity)
+    different_basis = [dict(operands[0]), dict(operands[1], accounting_basis="合并")]
+    with pytest.raises(ValueError, match="incompatible accounting_basis"):
+        _financial_calculation("growth_percent", different_basis)
+
+    current_source = known_catalog[known_ids["2024"]]
+    current_source["facts_metadata"]["revenue_cny"]["report_period"] = "2023"
+    with pytest.raises(ValueError, match="report period conflicts with its source"):
+        _calculation_operand(known_catalog, {"evidence_id": known_ids["2024"], "field": "revenue_cny"}, decision_time)
 
 
 def test_fundamental_margin_serializes_nonterminating_decimal_without_precision_loss() -> None:

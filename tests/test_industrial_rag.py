@@ -171,6 +171,47 @@ def test_annual_period_matching_rejects_interim_dates_and_flow_date_ambiguity() 
     assert _period_matches_request("2024-12-31", "2024-12-31", metric="operating_revenue")
 
 
+def test_unknown_accounting_basis_fact_is_source_visible_but_not_numeric_eligible(tmp_path) -> None:
+    unknown_basis = "not_stated_in_target_table"
+    base = _bundle()
+    bundle = replace(
+        base,
+        document=replace(base.document, accounting_basis=unknown_basis),
+        facts=(replace(base.facts[0], consolidation=unknown_basis),),
+    )
+    unspecified_basis_dir = tmp_path / "unspecified-basis"
+    unspecified_basis_dir.mkdir()
+
+    result = _research_one_bundle(
+        unspecified_basis_dir,
+        bundle,
+        "2024年度营业收入是多少人民币百万元",
+    )
+
+    fact = next(item for item in result["retrieved"] if item.get("fact_id") == "version-1-fact-1")
+    assert fact["citation"]["accounting_basis"] == unknown_basis
+    assert fact["citation"]["accounting_basis_status"] == "unknown"
+    assert fact["citation"]["source_observation_eligible"] is True
+    assert fact["citation"]["numeric_eligible"] is False
+    coverage = result["coverage"][0]
+    assert coverage["status"] == "located"
+    assert coverage["claim_status"] == "review_required"
+    assert coverage["numeric_claim_ready"] is False
+    assert {tuple(sorted(item.items())) for item in coverage["observed_accounting_basis_details"]} == {
+        tuple(sorted({"raw": unknown_basis, "status": "unknown"}.items()))
+    }
+
+    explicit_basis_dir = tmp_path / "explicit-basis"
+    explicit_basis_dir.mkdir()
+    explicit_basis = _research_one_bundle(
+        explicit_basis_dir,
+        bundle,
+        "合并2024年度营业收入是多少人民币百万元",
+    )
+    assert explicit_basis["coverage"][0]["status"] != "located"
+    assert explicit_basis["numeric_claim_ready"] is False
+
+
 @pytest.mark.parametrize(
     ("source_period", "prior_period"),
     (("2024-03-31", "2023-03-31"), ("2024-06-30", "2023-06-30")),

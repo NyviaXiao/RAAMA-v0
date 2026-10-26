@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from adaptive_mas.industrial_rag.models import QueryPlan
 from adaptive_mas.industrial_rag.planning import normalize_period, plan_research, requested_metrics, requested_periods
 
@@ -82,6 +84,24 @@ def test_recall_terms_do_not_conflate_financial_metric_labels() -> None:
     assert metric_for_source_label("资产总计") == "total_assets"
     assert requested_metrics("归属于本行股东的净利润") == ("parent_net_profit",)
     assert "利润总额" in METRIC_RECALL_TERMS["net_profit"]
+
+
+@pytest.mark.parametrize(
+    "basis",
+    [None, "", "unknown", "not_stated_in_target_table", "not disclosed", "未披露", "不适用"],
+)
+def test_unknown_accounting_basis_labels_never_get_a_calculation_signature(basis: str | None) -> None:
+    from adaptive_mas.industrial_rag.planning import accounting_basis_signature, accounting_basis_status
+
+    assert accounting_basis_status(basis) == "unknown"
+    assert accounting_basis_signature(basis) is None
+
+
+def test_known_group_basis_remains_calculation_eligible() -> None:
+    from adaptive_mas.industrial_rag.planning import accounting_basis_signature, accounting_basis_status
+
+    assert accounting_basis_status("本集团") == "known"
+    assert accounting_basis_signature("本集团") == "consolidated"
 
 
 def test_unit_basis_and_q1_labels_are_preserved_for_coverage() -> None:

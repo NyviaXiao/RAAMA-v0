@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -32,6 +34,7 @@ from adaptive_mas.industrial_rag.models import (  # noqa: E402
 )
 from adaptive_mas.harness_evolution import _ABLATION_MODULES  # noqa: E402
 from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore  # noqa: E402
+from adaptive_mas.industrial_rag.planning import accounting_basis_status  # noqa: E402
 from adaptive_mas.industrial_rag.parser import (  # noqa: E402
     _table_row_group_blocks,
     annotate_table_continuation_candidates,
@@ -58,6 +61,12 @@ DOCLING_ASSETS = SUPERVISION / "docling-models"
 QWEN_ASSETS = SUPERVISION / "qwen-models"
 OUTPUT_ROOT = ROOT / ".tmp" / "industrial_rag_current_capture_20261026"
 QUERY_TEXT = "2024年度营业收入是多少，较2023年度增长多少？"
+
+
+class RunIdentityError(RuntimeError):
+    pass
+
+
 CASE_SPECS: tuple[dict[str, object], ...] = (
     {
         "case_id": "current_capture_cmb_2024_revenue",
@@ -90,7 +99,8 @@ CASE_SPECS: tuple[dict[str, object], ...] = (
         "base_unit_conversion_factor": "1000000",
         "unit": "人民币百万元",
         "currency": "CNY",
-        "accounting_basis": "not_stated_in_target_table",
+        "accounting_basis": None,
+        "accounting_basis_status": "unknown",
         "manual_review_note": "Page image labels the table unit as 人民币百万元; row 营业收入, 2024 column is 146,695. The target table does not state its accounting basis.",
     },
     {
@@ -107,7 +117,8 @@ CASE_SPECS: tuple[dict[str, object], ...] = (
         "base_unit_conversion_factor": "1000",
         "unit": "千元",
         "currency": "",
-        "accounting_basis": "not_stated_in_target_table",
+        "accounting_basis": None,
+        "accounting_basis_status": "unknown",
         "manual_review_note": "Page image labels the row unit as 千元; row 营业收入, 2024 column is 362,012,554. The target table does not state its currency or accounting basis.",
     },
 )
@@ -115,11 +126,314 @@ CASE_SPECS: tuple[dict[str, object], ...] = (
 
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary_path, path)
 
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_hash(value: object) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return _sha256(serialized.encode("utf-8"))
+
+
+def _case_calculation_reasons(spec: Mapping[str, Any]) -> list[str]:
+    reasons = []
+    if spec.get("currency") != "CNY":
+        reasons.append("currency_not_stated_in_target_table")
+    if accounting_basis_status(spec.get("accounting_basis")) != "known":
+        reasons.append("accounting_basis_unknown_in_target_table")
+    return reasons
+
+
+def _case_calculation_eligible(spec: Mapping[str, Any]) -> bool:
+    return not _case_calculation_reasons(spec)
+
+
+def _implementation_hashes() -> dict[str, str]:
+    paths = (
+        Path(__file__).resolve(),
+        ROOT / "src" / "adaptive_mas" / "agents" / "harness.py",
+        ROOT / "src" / "adaptive_mas" / "industrial_rag" / "retrieval.py",
+        ROOT / "src" / "adaptive_mas" / "industrial_rag" / "planning.py",
+        ROOT / "src" / "adaptive_mas" / "industrial_rag" / "models.py",
+        ROOT / "src" / "adaptive_mas" / "industrial_rag" / "parser.py",
+        ROOT / "src" / "adaptive_mas" / "industrial_rag" / "qwen_models.py",
+        ROOT / "src" / "adaptive_mas" / "harness_evolution.py",
+    )
+    return {path.relative_to(ROOT).as_posix(): _sha256(path.read_bytes()) for path in paths}
+
+
+def _source_identity(source: Mapping[str, Any]) -> dict[str, object]:
+    return {
+        "case_id": source["case_id"],
+        "source_id": source["source_id"],
+        "source_sha256": source["source_sha256"],
+        "version_id": source["version_id"],
+        "first_available_at": source["first_available_at_used_for_current_capture"],
+    }
+
+
+def _indexed_fact_identity(store: IndustrialRagStore, sources: list[Mapping[str, Any]]) -> list[dict[str, object]]:
+    version_ids = sorted({str(source["version_id"]) for source in sources})
+    rows = [dict(row) for row in store.read_facts(version_ids)]
+    rows.sort(key=lambda row: (str(row.get("version_id")), str(row.get("report_period")), str(row.get("fact_id"))))
+    keys = (
+        "fact_id", "version_id", "source_id", "security_code", "entity_name", "metric", "raw_value",
+        "normalized_value", "unit", "multiplier", "currency", "report_period", "consolidation",
+        "review_status", "confidence", "span_ids",
+    )
+    return [
+        {
+            key: (
+                json.loads(str(row["payload_json"])).get("span_ids", [])
+                if key == "span_ids" else row.get(key)
+            )
+            for key in keys
+        }
+        for row in rows
+    ]
+
+
+def _build_run_identity(
+    *,
+    run_id: str,
+    as_of: datetime,
+    use_qwen: bool,
+    source_manifest_path: Path,
+    docling_manifest_path: Path,
+    qwen_manifest_path: Path,
+    source_records: list[Mapping[str, Any]],
+    store: IndustrialRagStore,
+) -> dict[str, object]:
+    release_summary = store.release_summaries()
+    release = next(
+        (item for item in release_summary["releases"] if item["release_id"] == run_id),
+        None,
+    )
+    if release is None or release_summary["active_release_id"] != run_id or release["status"] != "published":
+        raise RuntimeError("run identity requires the published active source release")
+    _release_spec, release_spec_sha256 = store.release_spec(run_id)
+    for source in source_records:
+        if _sha256(Path(str(source["source_path"])).read_bytes()) != source["source_sha256"]:
+            raise RunIdentityError(f"current-capture source bytes changed: {source['source_id']}")
+    policy_json = _policy_json(use_qwen=use_qwen)
+    return {
+        "schema_version": "raama.financial-rag.current-capture.run-identity.v1",
+        "run_id": run_id,
+        "as_of": as_of.astimezone(timezone.utc).isoformat(),
+        "time_mode": "strict_forward",
+        "query": QUERY_TEXT,
+        "qwen_inference_enabled": use_qwen,
+        "retrieval_channels": ["structured_facts", "bm25", "dense"] if use_qwen else ["structured_facts", "bm25"],
+        "research_policy_json": policy_json,
+        "research_policy_sha256": _sha256(policy_json.encode("utf-8")),
+        "source_manifest_sha256": _sha256(source_manifest_path.read_bytes()),
+        "source_records": [_source_identity(source) for source in source_records],
+        "release": {
+            "release_id": run_id,
+            "spec_sha256": release_spec_sha256,
+            "version_ids": sorted(store.release_versions(run_id)),
+            "active_release_id": release_summary["active_release_id"],
+        },
+        "indexed_financial_facts": _indexed_fact_identity(store, source_records),
+        "docling_asset_manifest_sha256": _sha256(docling_manifest_path.read_bytes()),
+        "model": {
+            "embedding_repo": EMBEDDING_REPO,
+            "embedding_revision": EMBEDDING_REVISION,
+            "reranker_repo": RERANKER_REPO,
+            "reranker_revision": RERANKER_REVISION,
+            "asset_manifest_sha256": _sha256(qwen_manifest_path.read_bytes()),
+            "local_files_only": True,
+            "device": "CPU" if use_qwen else None,
+        },
+        "case_specs_sha256": _canonical_hash(CASE_SPECS),
+        "module_catalog_sha256": _canonical_hash(_ABLATION_MODULES),
+        "implementation_sha256": _implementation_hashes(),
+    }
+
+
+def _read_run_identity(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError("resume-existing requires a bound run_identity.json; legacy runs cannot be resumed")
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    identity = envelope.get("run_identity") if isinstance(envelope, dict) else None
+    identity_sha256 = envelope.get("run_identity_sha256") if isinstance(envelope, dict) else None
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("schema_version") != "raama.financial-rag.current-capture.run-identity-envelope.v1"
+        or not isinstance(identity, dict)
+        or identity_sha256 != _canonical_hash(identity)
+    ):
+        raise ValueError("saved run identity is missing or its hash is invalid")
+    return envelope
+
+
+def _verify_run_identity(saved: Mapping[str, Any], current: Mapping[str, Any]) -> None:
+    if dict(saved) != dict(current):
+        changed = sorted(key for key in set(saved) | set(current) if saved.get(key) != current.get(key))
+        raise RunIdentityError("resume-existing run identity mismatch: " + ", ".join(changed))
+
+
+def _case_identity_fields(
+    run_identity_sha256: str,
+    spec: Mapping[str, Any],
+    source: Mapping[str, Any],
+    *,
+    as_of: datetime,
+    retrieval_policy_sha256: str,
+) -> dict[str, object]:
+    return {
+        "run_identity_sha256": run_identity_sha256,
+        "case_id": str(spec["case_id"]),
+        "security_code": str(spec["security_code"]),
+        "source_id": str(source["source_id"]),
+        "source_sha256": str(source["source_sha256"]),
+        "version_id": str(source["version_id"]),
+        "report_periods": ["2023", "2024"],
+        "query": QUERY_TEXT,
+        "as_of": as_of.astimezone(timezone.utc).isoformat(),
+        "time_mode": "strict_forward",
+        "retrieval_policy_sha256": retrieval_policy_sha256,
+    }
+
+
+def _case_result_sha256(row: Mapping[str, Any]) -> str:
+    return _canonical_hash({key: value for key, value in row.items() if key != "case_result_sha256"})
+
+
+def _validate_query_progress(
+    value: object,
+    *,
+    run_identity_sha256: str,
+    runtime_model_identity_sha256: str,
+    case_identity_by_id: Mapping[str, Mapping[str, object]],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, dict) or value.get("schema_version") != "raama.financial-rag.current-capture.query-progress.v2":
+        raise ValueError("query progress is unbound or uses a legacy schema; refusing to reuse completed cases")
+    if value.get("run_identity_sha256") != run_identity_sha256:
+        raise ValueError("query progress run identity does not match the active configuration")
+    if value.get("runtime_model_identity_sha256") != runtime_model_identity_sha256:
+        raise ValueError("query progress runtime model identity does not match the loaded model")
+    rows = value.get("cases")
+    if not isinstance(rows, list):
+        raise ValueError("query progress cases must be an array")
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("query progress contains a malformed case result")
+        case_id = str(row.get("case_id"))
+        expected_case = case_identity_by_id.get(case_id)
+        if expected_case is None or case_id in seen:
+            raise ValueError("query progress contains an unknown or duplicate case")
+        seen.add(case_id)
+        expected_case_identity = _canonical_hash(expected_case)
+        if (
+            row.get("run_identity_sha256") != run_identity_sha256
+            or row.get("runtime_model_identity_sha256") != runtime_model_identity_sha256
+            or row.get("case_identity_sha256") != expected_case_identity
+            or any(row.get(key) != value for key, value in expected_case.items())
+        ):
+            raise ValueError(f"query progress case identity mismatch: {case_id}")
+        if row.get("case_result_sha256") != _case_result_sha256(row):
+            raise ValueError(f"query progress case result was modified: {case_id}")
+    return rows
+
+
+def _validate_query_progress_header(
+    value: object,
+    *,
+    run_identity_sha256: str,
+    runtime_model_identity_sha256: str | None,
+) -> None:
+    if not isinstance(value, dict) or value.get("schema_version") != "raama.financial-rag.current-capture.query-progress.v2":
+        raise ValueError("query progress is unbound or uses a legacy schema; refusing to reuse completed cases")
+    if value.get("run_identity_sha256") != run_identity_sha256:
+        raise ValueError("query progress run identity does not match the active configuration")
+    if value.get("runtime_model_identity_sha256") != runtime_model_identity_sha256:
+        raise ValueError("query progress runtime model identity does not match the saved run environment")
+    if not isinstance(value.get("cases"), list):
+        raise ValueError("query progress cases must be an array")
+
+
+def _runtime_model_identity(
+    *,
+    use_qwen: bool,
+    dense_adapter: LocalQwenDenseAdapter | None,
+    reranker: LocalQwenReranker | None,
+) -> dict[str, object]:
+    return {
+        "qwen_inference_enabled": use_qwen,
+        "embedding_cache_identity": dict(dense_adapter.cache_identity) if dense_adapter is not None else None,
+        "reranker_cache_identity": dict(reranker.cache_identity) if reranker is not None else None,
+    }
+
+
+def _bind_runtime_model_identity(
+    identity_path: Path,
+    query_progress_path: Path,
+    runtime_identity: Mapping[str, object],
+    *,
+    resuming: bool,
+) -> str:
+    envelope = _read_run_identity(identity_path)
+    saved_runtime_identity = envelope.get("runtime_model_identity")
+    progress_has_cases = False
+    if query_progress_path.is_file():
+        progress = json.loads(query_progress_path.read_text(encoding="utf-8"))
+        if isinstance(progress, dict) and isinstance(progress.get("cases"), list):
+            progress_has_cases = bool(progress["cases"])
+    if saved_runtime_identity is None:
+        if resuming and progress_has_cases:
+            raise ValueError("completed case results exist without a bound runtime model identity")
+        envelope["runtime_model_identity"] = dict(runtime_identity)
+        envelope["runtime_model_identity_sha256"] = _canonical_hash(runtime_identity)
+        _write_json(identity_path, envelope)
+    elif (
+        not isinstance(saved_runtime_identity, dict)
+        or saved_runtime_identity != dict(runtime_identity)
+        or envelope.get("runtime_model_identity_sha256") != _canonical_hash(runtime_identity)
+    ):
+        raise ValueError("loaded runtime model identity differs from the saved run environment")
+    return _canonical_hash(runtime_identity)
+
+
+def _resume_attempts(progress_path: Path, identity_fields: Mapping[str, object]) -> list[dict[str, Any]]:
+    if not progress_path.is_file():
+        return []
+    saved = json.loads(progress_path.read_text(encoding="utf-8"))
+    if not isinstance(saved, dict) or any(saved.get(key) != value for key, value in identity_fields.items()):
+        raise ValueError("per-case progress identity mismatch; refusing to overwrite its trace")
+    attempts = saved.get("attempts")
+    if not isinstance(attempts, list):
+        raise ValueError("per-case progress has no attempt history")
+    return [dict(attempt) for attempt in attempts]
+
+
+def _existing_progress_record(progress_path: Path, identity_fields: Mapping[str, object]) -> dict[str, Any] | None:
+    if not progress_path.is_file():
+        return None
+    saved = json.loads(progress_path.read_text(encoding="utf-8"))
+    if not isinstance(saved, dict) or any(saved.get(key) != value for key, value in identity_fields.items()):
+        raise ValueError("progress identity mismatch; refusing to reuse or overwrite its trace")
+    if "attempts" in saved and saved.get("attempts_sha256") != _canonical_hash(saved.get("attempts")):
+        raise ValueError("saved tool-attempt trace failed its integrity check")
+    if (
+        "completed_result" in saved
+        and saved.get("completed_result_sha256") != _canonical_hash(saved.get("completed_result"))
+    ):
+        raise ValueError("saved completed case result failed its integrity check")
+    if "results" in saved and saved.get("results_sha256") != _canonical_hash(saved.get("results")):
+        raise ValueError("saved module results failed their integrity check")
+    if (
+        "active_module_period_results" in saved
+        and saved.get("active_module_period_results_sha256") != _canonical_hash(saved.get("active_module_period_results"))
+    ):
+        raise ValueError("saved partial module results failed their integrity check")
+    return saved
 
 
 def _read_source_records(path: Path = SOURCE_MANIFEST) -> dict[str, dict[str, Any]]:
@@ -156,7 +470,7 @@ def _map_targeted_page(
     physical_page: int,
     parser_table_id: str,
     unit: str,
-    accounting_basis: str,
+    accounting_basis: str | None,
     currency: str,
 ) -> dict[str, Any]:
     tables = [item for item in targeted_parse.get("tables", []) if item.get("table_id") == parser_table_id]
@@ -307,7 +621,7 @@ def _capture_source(
         physical_page=physical_page,
         parser_table_id=str(spec["parser_table_id"]),
         unit=str(spec["unit"]),
-        accounting_basis=str(spec["accounting_basis"]),
+        accounting_basis=spec.get("accounting_basis"),
         currency=str(spec.get("currency", "")),
     )
     _write_json(source_run_dir / "merged_hybrid_parse.json", merged_parse)
@@ -347,7 +661,7 @@ def _capture_source(
             multiplier="1",
             currency=fact_currency,
             report_period=period,
-            consolidation=str(spec["accounting_basis"]),
+            consolidation=str(spec.get("accounting_basis") or ""),
             span_ids=(page_span.span_id,),
             parser_version=str(targeted_parse["parser_version"]),
             confidence=0.99,
@@ -363,7 +677,7 @@ def _capture_source(
         security_code=str(spec["security_code"]),
         entity_name=str(source_record["issuer"]),
         report_period=None,
-        accounting_basis=str(spec["accounting_basis"]),
+        accounting_basis=spec.get("accounting_basis") or "",
     )
     version = DocumentVersion(
         version_id=version_id,
@@ -434,7 +748,8 @@ def _capture_source(
             "verified_absolute_currency" if calculator_currency == "CNY"
             else "source_observation_only_currency_not_stated_in_target_table"
         ),
-        "accounting_basis": str(spec["accounting_basis"]),
+        "accounting_basis": spec.get("accounting_basis"),
+        "accounting_basis_status": accounting_basis_status(spec.get("accounting_basis")),
         "pypdf_span_contains_metric_and_both_period_values": True,
         "manual_review_note": str(spec["manual_review_note"]),
     }
@@ -495,8 +810,41 @@ def _resume_source(
         or review_record.get("review_status") != "reviewed_local_development_fact"
         or full_parse.get("status") != "parsed"
         or targeted_parse.get("status") != "parsed"
+        or review_record.get("accounting_basis") != spec.get("accounting_basis")
+        or review_record.get("accounting_basis_status") != accounting_basis_status(spec.get("accounting_basis"))
+        or review_record.get("source_unit") != spec.get("source_unit")
     ):
         raise ValueError(f"saved current-capture evidence is incomplete or inconsistent: {spec['source_id']}")
+    reviewed_cells = review_record.get("reviewed_period_cells")
+    if not isinstance(reviewed_cells, dict):
+        raise ValueError(f"saved source-value review is missing: {spec['source_id']}")
+    for period, expected_raw_value in dict(spec["expected_raw_values"]).items():
+        reviewed = reviewed_cells.get(str(period))
+        if not isinstance(reviewed, dict) or reviewed.get("raw_value") != str(expected_raw_value):
+            raise ValueError(f"saved source-value review differs from the reviewed target: {spec['source_id']} {period}")
+    stored_facts = [dict(row) for row in store.read_facts([version_id])]
+    expected_unit = "CNY" if spec.get("currency") == "CNY" else str(spec["source_unit"])
+    expected_basis = str(spec.get("accounting_basis") or "")
+    expected_periods = {str(period) for period in dict(spec["expected_raw_values"])}
+    facts_by_period = {
+        str(row.get("report_period")): row
+        for row in stored_facts
+        if str(row.get("metric")) == "营业收入" and str(row.get("security_code")) == str(spec["security_code"])
+    }
+    if set(facts_by_period) != expected_periods:
+        raise ValueError(f"saved indexed facts do not match reviewed periods: {spec['source_id']}")
+    factor = Decimal(str(spec["base_unit_conversion_factor"])) if spec.get("currency") == "CNY" else Decimal("1")
+    for period, raw_value in dict(spec["expected_raw_values"]).items():
+        fact = facts_by_period[str(period)]
+        expected_value = Decimal(str(raw_value).replace(",", "")) * factor
+        if (
+            Decimal(str(fact.get("normalized_value"))) != expected_value
+            or str(fact.get("unit")) != expected_unit
+            or str(fact.get("consolidation") or "") != expected_basis
+            or str(fact.get("entity_name")) != str(source_record["issuer"])
+            or fact.get("review_status") != "reviewed"
+        ):
+            raise ValueError(f"saved indexed fact differs from the reviewed source: {spec['source_id']} {period}")
     return {
         "case_id": str(spec["case_id"]),
         "source_id": str(source_record["source_id"]),
@@ -553,10 +901,18 @@ class ScriptedToolCallClient:
 
     model = "offline-scripted-tool-protocol-v1"
 
-    def __init__(self, *, query: str, symbol: str, calculator_eligible: bool) -> None:
+    def __init__(
+        self,
+        *,
+        query: str,
+        symbol: str,
+        calculator_eligible: bool,
+        calculation_ineligibility_reasons: list[str],
+    ) -> None:
         self.query = query
         self.symbol = symbol
         self.calculator_eligible = calculator_eligible
+        self.calculation_ineligibility_reasons = list(calculation_ineligibility_reasons)
         self.turn = 0
         self.selected: list[dict[str, Any]] = []
 
@@ -609,7 +965,11 @@ class ScriptedToolCallClient:
                 str(item["financial_fact"].get("report_period")): item
                 for item in retrieved
                 if isinstance(item.get("financial_fact"), dict)
-                and item["financial_fact"].get("numeric_eligible") is True
+                and (
+                    item["financial_fact"].get("numeric_eligible") is True
+                    if self.calculator_eligible
+                    else item["financial_fact"].get("source_observation_eligible") is True
+                )
                 and item["financial_fact"].get("report_period") in {"2023", "2024"}
             }
             if not {"2023", "2024"}.issubset(facts_by_period):
@@ -649,19 +1009,23 @@ class ScriptedToolCallClient:
 
     def _submit_source_observation(self, _messages: list[dict[str, Any]]) -> dict[str, object]:
         report = {
-            "summary": "The source observations were checked against the local captured filing; the requested calculation was withheld because the target table does not state its currency.",
+            "summary": "The source observations were checked against the local captured filing; calculation was withheld because a required unit or accounting basis is unknown.",
             "findings": [{
                 "symbol": self.symbol,
                 "conclusion": (
                     "同一来源表的2023年度和2024年度营业收入单元格已核对；"
-                    "目标表未注明币种，因此不报告同比计算。"
+                    "目标表的币种或会计口径未明确，因此仅报告来源观察，不报告同比计算。"
                 ),
                 "claim_type": "source_fact",
                 "evidence_ids": [str(item["evidence_id"]) for item in self.selected],
                 "observations": self._source_observations(),
-                "uncertainties": ["Target table does not state currency or accounting basis."],
+                "uncertainties": [
+                    reason.replace("_", " ") for reason in self.calculation_ineligibility_reasons
+                ],
             }],
-            "unresolved_items": ["Growth calculation withheld because the target table does not state its currency."],
+            "unresolved_items": [
+                "Growth calculation withheld: " + ", ".join(self.calculation_ineligibility_reasons)
+            ],
         }
         return self._response([("submit_report", report)])
 
@@ -678,11 +1042,8 @@ class ScriptedToolCallClient:
             raise RuntimeError("deterministic financial calculator did not return a result")
         result_id = str(calculation["evidence_id"])
         result_value = str(calculation["value"])
-        facts = {str(item["financial_fact"]["report_period"]): item for item in self.selected}
         conclusion = f"同一来源表中，营业收入从2023年度到2024年度变化了{result_value}%；该值由Decimal计算得出。"
         uncertainties = []
-        if facts["2024"]["financial_fact"].get("accounting_basis") == "not_stated_in_target_table":
-            uncertainties.append("The target table does not state accounting basis; the calculation uses its adjacent annual columns.")
         report = {
             "summary": "The reported percentage is a deterministic calculation from two reviewed source facts; source meaning remains unverified.",
             "findings": [{
@@ -735,6 +1096,10 @@ def _run_agent_chain(
     decision_time: datetime,
     research_ablation_id: int | None,
     use_qwen: bool,
+    progress_path: Path,
+    identity_fields: Mapping[str, object],
+    runtime_model_identity: Mapping[str, object],
+    identity_check: Callable[[], None],
 ) -> dict[str, Any]:
     query = QUERY_TEXT
     symbol = str(case["security_code"])
@@ -755,11 +1120,97 @@ def _run_agent_chain(
         visible_evidence_ids=visible_ids,
         decision_time=decision_time,
     )
+    saved_progress = _existing_progress_record(progress_path, identity_fields)
+    if saved_progress is not None:
+        saved_attempts = saved_progress.get("attempts")
+        completed_result = saved_progress.get("completed_result")
+        if (
+            isinstance(saved_attempts, list)
+            and saved_attempts
+            and isinstance(saved_attempts[-1], dict)
+            and saved_attempts[-1].get("status") == "completed"
+            and isinstance(completed_result, dict)
+            and saved_progress.get("completed_result_sha256") == _canonical_hash(completed_result)
+        ):
+            identity_check()
+            return completed_result
+    attempts = _resume_attempts(progress_path, identity_fields)
+    attempt: dict[str, Any] = {
+        "attempt_number": len(attempts) + 1,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "tool_events": [],
+    }
+    attempts.append(attempt)
+    progress_record = {
+        **identity_fields,
+        "case_id": case["case_id"],
+        "security_code": symbol,
+        "model_identity": dict(runtime_model_identity),
+        "attempts": attempts,
+    }
+
+    def persist_progress() -> None:
+        attempt["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+        progress_record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        progress_record["attempts_sha256"] = _canonical_hash(attempts)
+        _write_json(progress_path, progress_record)
+
+    started = time.perf_counter()
+    persist_progress()
+    for name, handler in tuple(handlers.items()):
+        def traced_handler(arguments: dict[str, object], *, tool_name=name, tool_handler=handler):
+            identity_check()
+            event = {
+                "tool": tool_name,
+                "arguments": dict(arguments),
+                "status": "started",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            attempt["tool_events"].append(event)
+            persist_progress()
+            tool_started = time.perf_counter()
+            try:
+                result = tool_handler(arguments)
+            except Exception as error:
+                event.update({
+                    "status": "error",
+                    "error": {"type": type(error).__name__, "message": str(error)},
+                    "elapsed_seconds": round(time.perf_counter() - tool_started, 3),
+                    "ended_at": datetime.now(timezone.utc).isoformat(),
+                })
+                persist_progress()
+                raise
+            event.update({
+                "status": "returned",
+                "result": result,
+                "elapsed_seconds": round(time.perf_counter() - tool_started, 3),
+                "ended_at": datetime.now(timezone.utc).isoformat(),
+            })
+            persist_progress()
+            identity_check()
+            return result
+        handlers[name] = traced_handler
     client = ScriptedToolCallClient(
         query=query,
         symbol=symbol,
         calculator_eligible=bool(case["calculator_eligible"]),
+        calculation_ineligibility_reasons=list(case.get("calculation_ineligibility_reasons", [])),
     )
+
+    def persist_failure(error: Exception) -> None:
+        failure: dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
+        partial_trace = getattr(error, "partial_tool_trace", None)
+        if partial_trace is not None:
+            failure["partial_tool_trace"] = partial_trace
+        attempt.update({
+            "status": "failed",
+            "failure": failure,
+            "selected_candidates": list(client.selected),
+            "ended_at": datetime.now(timezone.utc).isoformat(),
+        })
+        persist_progress()
+
     try:
         result = _run_tool_agent(
             role_id="fundamental",
@@ -777,25 +1228,51 @@ def _run_agent_chain(
             max_turns=4,
             visible_evidence_ids=visible_ids,
         )
-    except InvalidResearchOutput as exc:
-        raise RuntimeError(f"fundamental report validation failed: {exc.category}: {exc.correction_detail}") from None
+    except Exception as exc:
+        persist_failure(exc)
+        if isinstance(exc, InvalidResearchOutput):
+            raise RuntimeError(f"fundamental report validation failed: {exc.category}: {exc.correction_detail}") from None
+        raise
+    attempt["driver_candidate"] = {
+        "status": result.get("status"),
+        "report": result.get("report"),
+        "tool_trace": result.get("tool_trace"),
+    }
+    persist_progress()
     if result.get("status") != "completed":
-        raise RuntimeError("fundamental tool protocol did not complete")
+        error = RuntimeError("fundamental tool protocol did not complete")
+        persist_failure(error)
+        raise error
     trace = list(result["tool_trace"])
     search_results = [item["result"] for item in trace if item["tool"] == "search_indexed_financial_documents"]
     search = _merge_search_results(search_results)
     reads = [item["result"] for item in trace if item["tool"] == "read_indexed_financial_evidence"]
     finding = result["report"]["findings"][0]
     if not reads or not all(item.get("content_scope", "").startswith("reopened_source") for item in reads):
-        raise RuntimeError("agent tool chain did not reopen source evidence")
+        error = RuntimeError("agent tool chain did not reopen source evidence")
+        persist_failure(error)
+        raise error
     expected_validation = (
         "calculation_recomputed_decimal_50_half_even_semantics_unverified"
         if case["calculator_eligible"]
         else "source_observations_validated_semantics_unverified"
     )
     if finding.get("claim_validation", {}).get("status") != expected_validation:
-        raise RuntimeError("agent report did not pass the expected exact source or Decimal validation")
-    return {
+        error = RuntimeError("agent report did not pass the expected exact source or Decimal validation")
+        persist_failure(error)
+        raise error
+    try:
+        identity_check()
+    except Exception as exc:
+        persist_failure(exc)
+        raise
+    attempt.update({
+        "status": "completed",
+        "claim_validation": finding.get("claim_validation"),
+        "ended_at": datetime.now(timezone.utc).isoformat(),
+    })
+    persist_progress()
+    completed_result = {
         "agent_driver": client.model,
         "agent_model_called": False,
         "query": query,
@@ -825,6 +1302,10 @@ def _run_agent_chain(
         "validated_report": result["report"],
         "tool_trace": trace,
     }
+    progress_record["completed_result"] = completed_result
+    progress_record["completed_result_sha256"] = _canonical_hash(completed_result)
+    persist_progress()
+    return completed_result
 
 
 def _run_rag_intervention(
@@ -865,10 +1346,38 @@ def _module_matrix(
     reranker_disabled: Mapping[str, Any],
     use_qwen: bool,
     progress_path: Path,
+    identity_fields: Mapping[str, object],
+    runtime_model_identity: Mapping[str, object],
+    identity_check: Callable[[], None],
 ) -> list[dict[str, Any]]:
     baseline_items = list(baseline.get("retrieval_order", []))
     baseline_ids = [str(item.get("evidence_id")) for item in baseline_items]
     result_by_module: dict[int, dict[str, Any]] = {}
+    saved_progress = _existing_progress_record(progress_path, identity_fields)
+    active_module_id: int | None = None
+    active_period_results: list[dict[str, Any]] = []
+    elapsed_by_module: dict[int, float] = {}
+    if saved_progress is not None:
+        saved_results = saved_progress.get("results", {})
+        if isinstance(saved_results, dict):
+            result_by_module = {
+                int(module_id): dict(result)
+                for module_id, result in saved_results.items()
+                if str(module_id).isdigit() and isinstance(result, dict)
+            }
+        saved_elapsed = saved_progress.get("elapsed_seconds_by_module", {})
+        if isinstance(saved_elapsed, dict):
+            elapsed_by_module = {
+                int(module_id): float(seconds)
+                for module_id, seconds in saved_elapsed.items()
+                if str(module_id).isdigit()
+            }
+        raw_active_id = saved_progress.get("active_module_id")
+        if isinstance(raw_active_id, int) and raw_active_id not in result_by_module:
+            active_module_id = raw_active_id
+            raw_period_results = saved_progress.get("active_module_period_results", [])
+            if isinstance(raw_period_results, list):
+                active_period_results = [dict(row) for row in raw_period_results if isinstance(row, dict)]
     runnable_ids = {2, 3, 7, 8, 9, 11, 13, 14, 15, 16}
     if use_qwen:
         runnable_ids.update({10, 12})
@@ -887,10 +1396,28 @@ def _module_matrix(
         15: "Remove the candidate context cap under the fixed tool ceiling.",
         16: "Remove the candidate evidence cap under the service ceiling.",
     }
-    for module_id in sorted(runnable_ids - ({12} if use_qwen else set())):
+
+    def persist_module_progress(progress_record: dict[str, Any]) -> None:
+        progress_record["results_sha256"] = _canonical_hash(progress_record.get("results", {}))
+        if "active_module_period_results" in progress_record:
+            progress_record["active_module_period_results_sha256"] = _canonical_hash(
+                progress_record["active_module_period_results"]
+            )
+        _write_json(progress_path, progress_record)
+
+    module_ids_to_run = sorted((runnable_ids - ({12} if use_qwen else set())) - set(result_by_module))
+    for module_id in module_ids_to_run:
+        identity_check()
+        module_started = time.perf_counter()
+        period_results = active_period_results if module_id == active_module_id else []
+        completed_periods = {str(row.get("report_period")) for row in period_results}
         try:
-            period_results = [
-                _run_rag_intervention(
+            for period in ("2023", "2024"):
+                if period in completed_periods:
+                    continue
+                identity_check()
+                search_started = time.perf_counter()
+                result = _run_rag_intervention(
                     service=service,
                     release_id=release_id,
                     symbol=symbol,
@@ -899,20 +1426,46 @@ def _module_matrix(
                     report_period=period,
                     use_qwen=use_qwen,
                 )
-                for period in ("2023", "2024")
-            ]
-            result_by_module[module_id] = _merge_search_results(period_results)
+                period_results.append({
+                    "report_period": period,
+                    "result": result,
+                    "elapsed_seconds": round(time.perf_counter() - search_started, 3),
+                })
+                persist_module_progress({
+                    **identity_fields,
+                    "security_code": symbol,
+                    "model_identity": dict(runtime_model_identity),
+                    "phase": "running",
+                    "active_module_id": module_id,
+                    "completed_module_ids": sorted(result_by_module),
+                    "elapsed_seconds_by_module": elapsed_by_module,
+                    "results": result_by_module,
+                    "active_module_period_results": period_results,
+                })
+                identity_check()
+            result_by_module[module_id] = _merge_search_results([item["result"] for item in period_results])
         except Exception as exc:
+            if isinstance(exc, RunIdentityError):
+                raise
             result_by_module[module_id] = {
                 "status": "execution_error",
                 "execution_error": {"type": type(exc).__name__, "message": str(exc)},
+                "partial_period_results": period_results,
                 "retrieved": [],
             }
-        _write_json(progress_path, {
+        elapsed_by_module[module_id] = round(time.perf_counter() - module_started, 3)
+        active_module_id = None
+        active_period_results = []
+        persist_module_progress({
+            **identity_fields,
             "security_code": symbol,
+            "model_identity": dict(runtime_model_identity),
+            "phase": "running",
             "completed_module_ids": sorted(result_by_module),
+            "elapsed_seconds_by_module": elapsed_by_module,
             "results": result_by_module,
         })
+        identity_check()
     rows = []
     for module_id, module_name, mode in _ABLATION_MODULES:
         if module_id in runnable_ids:
@@ -968,6 +1521,16 @@ def _module_matrix(
                 "reason": reasons[module_id],
                 "baseline_evidence_ids": baseline_ids,
             })
+    persist_module_progress({
+        **identity_fields,
+        "security_code": symbol,
+        "model_identity": dict(runtime_model_identity),
+        "phase": "completed",
+        "completed_module_ids": sorted(result_by_module),
+        "elapsed_seconds_by_module": elapsed_by_module,
+        "results": result_by_module,
+        "module_rows": rows,
+    })
     return rows
 
 
@@ -986,10 +1549,23 @@ def main() -> None:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", run_id):
         raise ValueError("run-id must be a safe immutable identifier")
     output_dir = args.output_root.resolve() / run_id
+    use_qwen = not args.skip_qwen
+    as_of: datetime | None = None
+    saved_identity_envelope: dict[str, Any] | None = None
+    saved_run_identity: dict[str, Any] | None = None
     if args.resume_existing:
         if not output_dir.is_dir() or not (output_dir / "industrial_rag.sqlite3").is_file():
             raise FileNotFoundError("resume-existing requires an existing materialized current-capture run")
+        saved_identity_envelope = _read_run_identity(output_dir / "run_identity.json")
+        saved_run_identity = dict(saved_identity_envelope["run_identity"])
+        if saved_run_identity.get("run_id") != run_id:
+            raise RunIdentityError("saved run identity names a different run id")
+        if saved_run_identity.get("qwen_inference_enabled") is not use_qwen:
+            raise RunIdentityError("resume-existing Qwen mode differs from the saved run; refusing before model initialization")
+        as_of = datetime.fromisoformat(str(saved_run_identity["as_of"])).astimezone(timezone.utc)
     else:
+        as_of = None
+    if not args.resume_existing:
         output_dir.mkdir(parents=True, exist_ok=False)
 
     manifest_records = _read_source_records(args.source_manifest)
@@ -1036,22 +1612,85 @@ def main() -> None:
             actor_id="local-supervision",
             reason="Current-capture multi-issuer strict-forward development evidence",
         )
-    query_progress_path = output_dir / "query_progress.json"
-    query_runs: list[dict[str, Any]] = (
-        json.loads(query_progress_path.read_text(encoding="utf-8"))
-        if args.resume_existing and query_progress_path.is_file()
-        else []
-    )
-    as_of = (
-        datetime.fromisoformat(str(query_runs[0]["as_of"])).astimezone(timezone.utc)
-        if query_runs else datetime.now(timezone.utc)
-    )
     decision_time = as_of.astimezone(SHANGHAI)
     release_id = store.active_release_id()
     if release_id != run_id:
         raise RuntimeError("new current-capture release is not the active release")
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
 
-    use_qwen = not args.skip_qwen
+    source_manifest_path = (ROOT / args.source_manifest).resolve() if not args.source_manifest.is_absolute() else args.source_manifest.resolve()
+    docling_manifest_path = args.docling_assets / ASSET_MANIFEST
+    qwen_manifest_path = args.qwen_assets / "raama_qwen_models.json"
+    run_identity = _build_run_identity(
+        run_id=run_id,
+        as_of=as_of,
+        use_qwen=use_qwen,
+        source_manifest_path=source_manifest_path,
+        docling_manifest_path=docling_manifest_path,
+        qwen_manifest_path=qwen_manifest_path,
+        source_records=source_records,
+        store=store,
+    )
+    run_identity_sha256 = _canonical_hash(run_identity)
+    identity_path = output_dir / "run_identity.json"
+    if args.resume_existing:
+        assert saved_identity_envelope is not None and saved_run_identity is not None
+        _verify_run_identity(saved_run_identity, run_identity)
+        saved_runtime_identity_sha256 = saved_identity_envelope.get("runtime_model_identity_sha256")
+    else:
+        saved_runtime_identity_sha256 = None
+        saved_identity_envelope = {
+            "schema_version": "raama.financial-rag.current-capture.run-identity-envelope.v1",
+            "run_identity": run_identity,
+            "run_identity_sha256": run_identity_sha256,
+            "runtime_model_identity": None,
+            "runtime_model_identity_sha256": None,
+        }
+        _write_json(identity_path, saved_identity_envelope)
+
+    query_progress_path = output_dir / "query_progress.json"
+    query_progress_exists = query_progress_path.is_file()
+    raw_query_progress: object | None = None
+    if query_progress_exists:
+        raw_query_progress = json.loads(query_progress_path.read_text(encoding="utf-8"))
+        _validate_query_progress_header(
+            raw_query_progress,
+            run_identity_sha256=run_identity_sha256,
+            runtime_model_identity_sha256=(
+                str(saved_runtime_identity_sha256) if saved_runtime_identity_sha256 is not None else None
+            ),
+        )
+    spec_by_case_id = {str(spec["case_id"]): spec for spec in CASE_SPECS}
+    source_by_case_id = {str(source["case_id"]): source for source in source_records}
+    retrieval_policy_sha256 = str(run_identity["research_policy_sha256"])
+    case_identity_by_id: dict[str, dict[str, object]] = {
+        case_id: _case_identity_fields(
+            run_identity_sha256,
+            spec,
+            source_by_case_id[case_id],
+            as_of=as_of,
+            retrieval_policy_sha256=retrieval_policy_sha256,
+        )
+        for case_id, spec in spec_by_case_id.items()
+    }
+    saved_runtime_identity = saved_identity_envelope.get("runtime_model_identity") if saved_identity_envelope else None
+    if saved_runtime_identity is not None and (
+        not isinstance(saved_runtime_identity, dict)
+        or saved_runtime_identity_sha256 != _canonical_hash(saved_runtime_identity)
+    ):
+        raise RunIdentityError("saved runtime model identity or its hash is invalid")
+    if query_progress_exists:
+        if isinstance(raw_query_progress, dict) and raw_query_progress.get("cases"):
+            if not isinstance(saved_runtime_identity_sha256, str):
+                raise RunIdentityError("completed cases have no saved runtime model identity")
+            _validate_query_progress(
+                raw_query_progress,
+                run_identity_sha256=run_identity_sha256,
+                runtime_model_identity_sha256=saved_runtime_identity_sha256,
+                case_identity_by_id=case_identity_by_id,
+            )
+
     dense_adapter = None
     reranker = None
     if use_qwen:
@@ -1059,14 +1698,65 @@ def main() -> None:
         reranker_runtime = Qwen3RerankerRuntime(args.qwen_assets)
         dense_adapter = LocalQwenDenseAdapter(store, embedding)
         reranker = LocalQwenReranker(reranker_runtime)
+    runtime_model_identity = _runtime_model_identity(
+        use_qwen=use_qwen,
+        dense_adapter=dense_adapter,
+        reranker=reranker,
+    )
+    runtime_model_identity_sha256 = _bind_runtime_model_identity(
+        identity_path,
+        query_progress_path,
+        runtime_model_identity,
+        resuming=args.resume_existing,
+    )
+    saved_identity_envelope = _read_run_identity(identity_path)
+
+    def identity_check() -> None:
+        current_identity = _build_run_identity(
+            run_id=run_id,
+            as_of=as_of,
+            use_qwen=use_qwen,
+            source_manifest_path=source_manifest_path,
+            docling_manifest_path=docling_manifest_path,
+            qwen_manifest_path=qwen_manifest_path,
+            source_records=source_records,
+            store=store,
+        )
+        _verify_run_identity(run_identity, current_identity)
+        current_runtime_identity = _runtime_model_identity(
+            use_qwen=use_qwen,
+            dense_adapter=dense_adapter,
+            reranker=reranker,
+        )
+        if current_runtime_identity != runtime_model_identity:
+            raise RunIdentityError("runtime model identity changed during the run")
+
+    identity_check()
+    if not query_progress_exists:
+        query_progress: dict[str, Any] = {
+            "schema_version": "raama.financial-rag.current-capture.query-progress.v2",
+            "run_identity_sha256": run_identity_sha256,
+            "runtime_model_identity_sha256": runtime_model_identity_sha256,
+            "cases": [],
+        }
+    else:
+        validated_rows = _validate_query_progress(
+            raw_query_progress,
+            run_identity_sha256=run_identity_sha256,
+            runtime_model_identity_sha256=runtime_model_identity_sha256,
+            case_identity_by_id=case_identity_by_id,
+        )
+        query_progress = dict(raw_query_progress)
+        query_progress["cases"] = validated_rows
+    query_runs = list(query_progress["cases"])
+    _write_json(query_progress_path, query_progress)
+
     service = IndustrialRagService(
         store,
         channel_adapters={"dense": dense_adapter} if dense_adapter is not None else {},
         reranker=reranker,
         allow_retrospective_diagnostic=False,
     )
-    model_manifest_path = args.qwen_assets / "raama_qwen_models.json"
-    docling_manifest_path = args.docling_assets / ASSET_MANIFEST
     model_identity = {
         "embedding_repo": EMBEDDING_REPO,
         "embedding_revision": EMBEDDING_REVISION,
@@ -1076,18 +1766,28 @@ def main() -> None:
         "reranker_cache_identity": reranker.cache_identity if reranker is not None else None,
         "qwen_inference_enabled_this_run": use_qwen,
         "local_files_only": True,
-        "asset_manifest_sha256": _sha256(model_manifest_path.read_bytes()),
+        "asset_manifest_sha256": _sha256(qwen_manifest_path.read_bytes()),
     }
     completed_case_ids = {str(item["case_id"]) for item in query_runs}
     for source, spec in zip(source_records, CASE_SPECS):
+        identity_check()
         if str(source["case_id"]) in completed_case_ids:
+            identity_check()
             continue
+        case_identity = case_identity_by_id[str(source["case_id"])]
+        case_identity_sha256 = _canonical_hash(case_identity)
+        case_progress_identity = {
+            **case_identity,
+            "runtime_model_identity_sha256": runtime_model_identity_sha256,
+            "case_identity_sha256": case_identity_sha256,
+        }
         case = {
             "case_id": source["case_id"],
             "question": QUERY_TEXT,
             "security_code": spec["security_code"],
             "report_periods": ["2023", "2024"],
-            "calculator_eligible": spec.get("currency") == "CNY",
+            "calculator_eligible": _case_calculation_eligible(spec),
+            "calculation_ineligibility_reasons": _case_calculation_reasons(spec),
             "source_id": source["source_id"],
         }
         baseline = _run_agent_chain(
@@ -1097,8 +1797,11 @@ def main() -> None:
             decision_time=decision_time,
             research_ablation_id=None,
             use_qwen=use_qwen,
+            progress_path=output_dir / f"agent_progress_{spec['security_code']}.json",
+            identity_fields={**case_progress_identity, "progress_kind": "agent", "research_ablation_id": None},
+            runtime_model_identity=runtime_model_identity,
+            identity_check=identity_check,
         )
-        _write_json(output_dir / f"agent_progress_{spec['security_code']}.json", baseline)
         no_reranker = (
             _run_agent_chain(
                 service=service,
@@ -1107,6 +1810,10 @@ def main() -> None:
                 decision_time=decision_time,
                 research_ablation_id=12,
                 use_qwen=True,
+                progress_path=output_dir / f"agent_progress_{spec['security_code']}_ablation12.json",
+                identity_fields={**case_progress_identity, "progress_kind": "agent", "research_ablation_id": 12},
+                runtime_model_identity=runtime_model_identity,
+                identity_check=identity_check,
             )
             if use_qwen
             else {"status": "not_run_qwen_disabled_in_supplemental_baseline"}
@@ -1122,15 +1829,17 @@ def main() -> None:
             reranker_disabled=no_reranker,
             use_qwen=use_qwen,
             progress_path=output_dir / f"module_progress_{spec['security_code']}.json",
+            identity_fields={**case_progress_identity, "progress_kind": "module_matrix"},
+            runtime_model_identity=runtime_model_identity,
+            identity_check=identity_check,
         )
+        identity_check()
         query_record = {
-            "case_id": source["case_id"],
-            "question": QUERY_TEXT,
-            "security_code": spec["security_code"],
-            "report_periods": ["2023", "2024"],
-            "as_of": as_of.isoformat(),
-            "time_mode": "strict_forward",
+            **case_identity,
+            "runtime_model_identity_sha256": runtime_model_identity_sha256,
+            "case_identity_sha256": case_identity_sha256,
             "numeric_calculation_eligible": bool(case["calculator_eligible"]),
+            "calculation_ineligibility_reasons": list(case["calculation_ineligibility_reasons"]),
             "baseline_retrieval": baseline,
             "paired_ablation_reranker_disabled": no_reranker,
             "module_ablation_matrix": module_rows,
@@ -1144,9 +1853,11 @@ def main() -> None:
                 "reranker_disabled_order": no_reranker_order,
             },
         }
+        query_record["case_result_sha256"] = _case_result_sha256(query_record)
         query_runs.append(query_record)
         completed_case_ids.add(str(source["case_id"]))
-        _write_json(query_progress_path, query_runs)
+        query_progress["cases"] = query_runs
+        _write_json(query_progress_path, query_progress)
 
     record = {
         "schema_version": "raama.financial-rag.current-capture.v1",
@@ -1155,10 +1866,7 @@ def main() -> None:
         "capture_resume": {
             "resumed_existing_capture": args.resume_existing,
             "prior_attempt_reused_same_local_sources_and_release": args.resume_existing,
-            "prior_attempt_note": (
-                "The first attempt completed parsing, ingestion, and release publication, then stopped before inference because candidate_limit=8 exceeded the enforced maximum of 2. A second attempt loaded the pinned Qwen embedding and reranker and completed retrieval, but the scripted driver observed fewer than both annual facts in one query and stopped before persisting the retrieval result or a claim. The supplementary record does not repeat Qwen inference."
-                if args.resume_existing else None
-            ),
+            "prior_attempt_note": "Saved source and release artifacts passed run-identity and indexed-fact checks before continuation." if args.resume_existing else None,
         },
         "as_of": as_of.isoformat(),
         "available_from_rule": "recorded local source capture time is used as first_available_at",
@@ -1172,17 +1880,20 @@ def main() -> None:
         "release_id": run_id,
         "time_mode": "strict_forward",
         "source_records": source_records,
+        "run_identity_sha256": run_identity_sha256,
+        "runtime_model_identity_sha256": runtime_model_identity_sha256,
         "model_identity": model_identity,
         "docling_asset_manifest_sha256": _sha256(docling_manifest_path.read_bytes()) if docling_manifest_path.is_file() else None,
         "local_inference_device": "CPU" if use_qwen else None,
         "retrieval_channel_scope": ["structured_facts", "bm25", "dense"] if use_qwen else ["structured_facts", "bm25"],
-        "qwen_prior_attempt": {
-            "status": "retrieval_returned_without_both_annual_source_facts_captured" if args.resume_existing else "not_applicable",
+        "historical_qwen_attempt": {
+            "status": "retrieval_returned_without_both_annual_source_facts_captured",
             "embedding_revision": EMBEDDING_REVISION,
             "reranker_revision": RERANKER_REVISION,
             "provider_calls": 0,
             "retrieval_trace_persisted": False,
-        } if args.resume_existing else None,
+            "candidates_or_ranks_available": False,
+        },
         "module_ablation_scope": "Actual bounded retrieval handler interventions for modules 2, 3, and 7-16; parser rebuild, immutable citation/alias/time contracts, and safety guards are recorded as not ablated.",
         "queries": query_runs,
         "limitations": [
@@ -1190,9 +1901,9 @@ def main() -> None:
             "Full-source page text uses pypdf; Docling parses only the reviewed revenue-table page, not every page.",
             "Numeric facts were locally reviewed by Codex against the page images and parser output; this review is not independent.",
             "The tool protocol is real, but the tool-call sequence is scripted; no language model or provider was called.",
-            "A prior local Qwen retrieval attempt returned without both annual facts exposed to the scripted driver; its exact retrieval response was not persisted. Results in this record use structured-fact and BM25 retrieval only.",
+            "A separate historical local Qwen attempt returned without both annual facts exposed to the scripted driver; its exact retrieval response was not persisted. This run's retrieval results and failure traces are checkpointed under the bound run and runtime identities.",
             "CATL's reviewed table labels the values in 千元 but does not state currency; source observations are validated, but no currency calculation is attempted for that case.",
-            "Ping An and CATL target tables do not state accounting basis; any calculation for Ping An is limited to adjacent annual columns and records that uncertainty.",
+            "Ping An and CATL target tables do not state accounting basis; their values remain source observations and no growth calculation is eligible.",
             "The module matrix records single-query retrieval outcomes only; it is not a causal ablation study, independent acceptance result, or quality score.",
             "Retrieval ranks and exact claim validation do not establish semantic entailment or investment quality.",
         ],

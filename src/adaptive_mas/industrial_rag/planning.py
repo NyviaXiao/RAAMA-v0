@@ -217,8 +217,58 @@ def requested_accounting_basis(query: str, explicit_basis: str | None = None) ->
     return None
 
 
+_UNKNOWN_ACCOUNTING_BASIS_LABELS = {
+    "",
+    "unknown",
+    "unknown basis",
+    "unspecified",
+    "not stated",
+    "not stated in source",
+    "not stated in source table",
+    "not stated in target table",
+    "not specified",
+    "not provided",
+    "not disclosed",
+    "not reported",
+    "not available",
+    "not applicable",
+    "unreported",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "nil",
+    "-",
+    "—",
+    "–",
+    "－",
+    "未知",
+    "不明",
+    "未注明",
+    "未说明",
+    "未披露",
+    "未提供",
+    "未标注",
+    "未提取",
+    "未识别",
+    "不适用",
+    "无口径",
+    "口径未知",
+    "口径未注明",
+    "会计口径未知",
+    "会计口径未注明",
+}
+
+
+def accounting_basis_status(value: object) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    label = re.sub(r"[\s_-]+", " ", value.strip()).strip(" .,:;，。；：").casefold()
+    return "unknown" if label in _UNKNOWN_ACCOUNTING_BASIS_LABELS else "known"
+
+
 def accounting_basis_signature(value: object) -> str | None:
-    if not isinstance(value, str) or not value.strip():
+    if accounting_basis_status(value) != "known":
         return None
     text = re.sub(r"\s+", "", value).casefold()
     if any(token in text for token in ("本集团", "合并", "集团")):

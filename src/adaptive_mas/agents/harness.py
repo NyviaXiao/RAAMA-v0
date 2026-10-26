@@ -24,6 +24,7 @@ from adaptive_mas.agents.quantitative import quantitative_agents
 from adaptive_mas.data.research import ResearchData
 from adaptive_mas.harness_state import HarnessStateStore
 from adaptive_mas.industrial_rag.models import QueryPlan
+from adaptive_mas.industrial_rag.planning import accounting_basis_status
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
 
 
@@ -1266,10 +1267,16 @@ def _fundamental_handlers(
                 for field in safe_facts:
                     metadata = raw_facts_metadata.get(field)
                     if isinstance(metadata, Mapping):
+                        raw_basis = metadata.get("accounting_basis", source.get("accounting_basis"))
+                        basis_status = accounting_basis_status(raw_basis)
                         facts_metadata[field] = {
-                            key: metadata[key]
-                            for key in ("numeric_eligible", "unit", "report_period", "accounting_basis", "currency")
-                            if key in metadata
+                            **{
+                                key: metadata[key]
+                                for key in ("unit", "report_period", "accounting_basis", "currency")
+                                if key in metadata
+                            },
+                            "accounting_basis_status": basis_status,
+                            "numeric_eligible": metadata.get("numeric_eligible") is True and basis_status == "known",
                         }
             reopen_ref = {
                 "tool": "read_cached_source",
@@ -1296,6 +1303,7 @@ def _fundamental_handlers(
                 "facts_metadata": facts_metadata,
                 "reopen_ref": reopen_ref,
                 "accounting_basis": source.get("accounting_basis"),
+                "accounting_basis_status": accounting_basis_status(source.get("accounting_basis")),
                 "currency": source.get("currency"),
                 "report_period": source.get("report_period"),
                 "published_at": source.get("published_at"),
@@ -1323,6 +1331,7 @@ def _fundamental_handlers(
                 "facts_units": facts_units,
                 "facts_metadata": facts_metadata,
                 "accounting_basis": source.get("accounting_basis"),
+                "accounting_basis_status": accounting_basis_status(source.get("accounting_basis")),
                 "currency": source.get("currency"),
                 "reopen_ref": reopen_ref,
                 "title": title,
@@ -1732,15 +1741,23 @@ def _fundamental_handlers(
                     fact_values = {}
                     fact_units = {}
                     fact_metadata = {}
-                    if item.get("fact_id") and citation.get("numeric_eligible"):
+                    source_observation_eligible = (
+                        citation.get("source_observation_eligible") is True
+                        or citation.get("numeric_eligible") is True
+                    )
+                    if item.get("fact_id") and source_observation_eligible:
                         metric = str(citation["metric"])
                         fact_values[metric] = citation["normalized_value"]
                         fact_units[metric] = citation["unit"]
+                        raw_basis = citation.get("accounting_basis")
+                        basis_status = accounting_basis_status(raw_basis)
                         fact_metadata[metric] = {
-                            "numeric_eligible": True,
+                            "numeric_eligible": citation.get("numeric_eligible") is True and basis_status == "known",
+                            "source_observation_eligible": source_observation_eligible,
                             "unit": citation.get("unit"),
                             "report_period": citation.get("report_period"),
-                            "accounting_basis": citation.get("accounting_basis"),
+                            "accounting_basis": raw_basis,
+                            "accounting_basis_status": basis_status,
                             "currency": citation.get("currency"),
                         }
                     title = str(citation.get("title") or "")
@@ -1763,6 +1780,7 @@ def _fundamental_handlers(
                         "facts_units": fact_units,
                         "facts_metadata": fact_metadata,
                         "accounting_basis": citation.get("accounting_basis"),
+                        "accounting_basis_status": accounting_basis_status(citation.get("accounting_basis")),
                         "currency": citation.get("currency"),
                         "reopen_ref": reference,
                         "content_scope": "table_row_group" if citation.get("table_id") is not None else "page_span_excerpt",
@@ -1799,7 +1817,8 @@ def _fundamental_handlers(
                                 for key in (
                                     "fact_id", "metric", "raw_value", "normalized_value", "unit",
                                     "multiplier", "currency", "report_period", "accounting_basis",
-                                    "review_status", "numeric_eligible",
+                                    "review_status", "numeric_eligible", "source_observation_eligible",
+                                    "accounting_basis_status",
                                 )
                                 if citation.get(key) is not None
                             },
@@ -2241,18 +2260,24 @@ def _calculation_operand(
         raise ValueError(f"source {evidence_id} does not expose financial fact {field_name!r}")
     fact_metadata = source.get("facts_metadata", {})
     metadata = fact_metadata.get(field_name, {}) if isinstance(fact_metadata, Mapping) else {}
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    accounting_basis = (
+        metadata.get("accounting_basis")
+        if "accounting_basis" in metadata
+        else source.get("accounting_basis")
+    )
+    if accounting_basis_status(accounting_basis) != "known":
+        raise ValueError(f"source fact {field_name!r} has unknown accounting basis")
     if not isinstance(metadata, Mapping) or metadata.get("numeric_eligible") is not True:
         raise ValueError(f"source fact {field_name!r} is not numeric-eligible")
     report_period = metadata.get("report_period") or source.get("report_period")
     unit = metadata.get("unit") or (source.get("facts_units", {}) or {}).get(field_name)
-    accounting_basis = metadata.get("accounting_basis") or source.get("accounting_basis")
     currency = metadata.get("currency") or source.get("currency")
     if not isinstance(report_period, str) or not report_period.strip():
         raise ValueError(f"source fact {field_name!r} has no report period")
     if not isinstance(unit, str) or not unit.strip():
         raise ValueError(f"source fact {field_name!r} has no verified unit")
-    if not isinstance(accounting_basis, str) or not accounting_basis.strip():
-        raise ValueError(f"source fact {field_name!r} has no verified accounting basis")
     source_period = source.get("report_period")
     if source_period is not None and report_period != source_period:
         raise ValueError(f"source fact {field_name!r} report period conflicts with its source")
@@ -2324,6 +2349,8 @@ def _financial_calculation(
     if len(operands) != 2:
         raise ValueError("financial calculation requires exactly two cited source operands")
     left, right = operands
+    if any(accounting_basis_status(item.get("accounting_basis")) != "known" for item in (left, right)):
+        raise ValueError("financial calculation operands require a verified accounting basis")
     for key in ("symbol", "unit", "accounting_basis", "currency"):
         if left.get(key) != right.get(key):
             raise ValueError(f"financial calculation operands have incompatible {key}")
@@ -2972,20 +2999,26 @@ def _validate_report(
                     f"{role_id} structured observation value does not match its cited source "
                     + ("within market observation tolerance" if market_observation else "under exact Decimal equality")
                 )
+            field_metadata: Mapping[str, object] = {}
+            source_accounting_basis: object = None
             if "facts" in source:
                 source_metadata = source.get("facts_metadata", {})
-                field_metadata = (
+                raw_field_metadata = (
                     source_metadata.get(field_name, {})
                     if isinstance(source_metadata, Mapping) else {}
                 )
-                if not isinstance(field_metadata, Mapping):
-                    field_metadata = {}
+                if isinstance(raw_field_metadata, Mapping):
+                    field_metadata = raw_field_metadata
+                source_accounting_basis = (
+                    field_metadata.get("accounting_basis")
+                    if "accounting_basis" in field_metadata else source.get("accounting_basis")
+                )
                 conflict_key = (
                     symbol,
                     field_name,
                     str(report_period),
                     str(expected_unit),
-                    str(field_metadata.get("accounting_basis") or source.get("accounting_basis") or ""),
+                    str(source_accounting_basis or ""),
                     str(field_metadata.get("currency") or source.get("currency") or ""),
                 )
                 financial_observation_groups.setdefault(conflict_key, []).append((evidence_id, expected_decimal))
@@ -2996,8 +3029,9 @@ def _validate_report(
                 "source_available_at": str(available_at),
                 "source_vintage_verified": bool(source.get("vintage_verified", False)),
                 "source_timing_status": citation_timing[evidence_id],
-                "source_accounting_basis": (
-                    field_metadata.get("accounting_basis") or source.get("accounting_basis")
+                "source_accounting_basis": source_accounting_basis,
+                "source_accounting_basis_status": (
+                    accounting_basis_status(source_accounting_basis)
                     if "facts" in source else None
                 ),
                 "source_currency": (
