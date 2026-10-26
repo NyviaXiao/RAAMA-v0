@@ -437,6 +437,8 @@ class IndustrialRagService:
         use_cache: bool = True,
         rrf_rank_constant: int = 60,
         use_reranker: bool = True,
+        fusion_strategy: str = "rrf",
+        row_group_chunking: bool = True,
         control: SearchControl | None = None,
     ) -> dict[str, object]:
         if control is not None:
@@ -445,6 +447,10 @@ class IndustrialRagService:
             raise ValueError("rrf_rank_constant must be an integer within 1..200")
         if not isinstance(use_reranker, bool):
             raise ValueError("use_reranker must be a boolean")
+        if fusion_strategy not in {"rrf", "first_available_channel"}:
+            raise ValueError("fusion_strategy is unsupported")
+        if not isinstance(row_group_chunking, bool):
+            raise ValueError("row_group_chunking must be a boolean")
         if plan.time_mode == "retrospective_diagnostic" and not self.allow_retrospective_diagnostic:
             raise PermissionError("retrospective diagnostic queries are disabled by server policy")
         release_id = plan.release_id or self.store.active_release_id()
@@ -501,6 +507,8 @@ class IndustrialRagService:
             "reranker_implementation": reranker_identity,
             "rrf_rank_constant": rrf_rank_constant,
             "reranker_enabled": reranker_enabled,
+            "fusion_strategy": fusion_strategy,
+            "row_group_chunking": row_group_chunking,
         }
         cache_key = stable_hash(safe_plan)
         cached = self.store.cache_get(cache_key) if use_cache and runtime_cacheable else None
@@ -524,6 +532,8 @@ class IndustrialRagService:
         if control is not None:
             control.check()
         blocks = self.store.read_blocks(version_ids)
+        if not row_group_chunking:
+            blocks = [row for row in blocks if row.get("block_type") != "table_row_group"]
         if control is not None:
             control.check()
         facts = self.store.read_facts(version_ids)
@@ -563,11 +573,29 @@ class IndustrialRagService:
                 channel_results[channel] = []
                 channel_status[channel] = {"status": "unavailable", "reason": self._unavailable_reason(channel)}
 
-        fused, fusion_trace = reciprocal_rank_fusion(
-            channel_results,
-            rank_constant=rrf_rank_constant,
-            limit=plan.top_k * 5,
-        )
+        if fusion_strategy == "rrf":
+            fused, fusion_trace = reciprocal_rank_fusion(
+                channel_results,
+                rank_constant=rrf_rank_constant,
+                limit=plan.top_k * 5,
+            )
+        else:
+            selected_channel = next(
+                (channel for channel in plan.channels if channel_results.get(channel)),
+                None,
+            )
+            fused = (
+                channel_results[selected_channel][: plan.top_k * 5]
+                if selected_channel is not None else []
+            )
+            fusion_trace = {
+                "method": "fusion_disabled_first_available_channel",
+                "selected_channel": selected_channel,
+                "channels_with_results": [
+                    channel for channel in plan.channels if channel_results.get(channel)
+                ],
+                "score_is_probability": False,
+            }
         rerank_status: dict[str, object]
         if reranker_enabled and fused:
             if control is not None:
@@ -730,6 +758,11 @@ class IndustrialRagService:
         table_expansion_limit: int = 12,
         rrf_rank_constant: int = 60,
         use_reranker: bool = True,
+        query_rewrite_enabled: bool = True,
+        multi_hop_enabled: bool = True,
+        fusion_strategy: str = "rrf",
+        row_group_chunking: bool = True,
+        include_continuation_context: bool = True,
         control: SearchControl | None = None,
     ) -> dict[str, object]:
         """Run a fixed-template financial search plan with explicit coverage and stop reasons."""
@@ -743,6 +776,12 @@ class IndustrialRagService:
             raise ValueError("rrf_rank_constant must be an integer within 1..200")
         if not isinstance(use_reranker, bool):
             raise ValueError("use_reranker must be a boolean")
+        if not isinstance(query_rewrite_enabled, bool) or not isinstance(multi_hop_enabled, bool):
+            raise ValueError("query rewrite and multi-hop switches must be booleans")
+        if fusion_strategy not in {"rrf", "first_available_channel"}:
+            raise ValueError("fusion_strategy is unsupported")
+        if not isinstance(row_group_chunking, bool) or not isinstance(include_continuation_context, bool):
+            raise ValueError("research retrieval switches must be booleans")
         if plan.time_mode == "retrospective_diagnostic" and not self.allow_retrospective_diagnostic:
             raise PermissionError("retrospective diagnostic queries are disabled by server policy")
         release_id = plan.release_id or self.store.active_release_id()
@@ -750,7 +789,12 @@ class IndustrialRagService:
             raise ReleaseNotReady("no published corpus release is active")
         # Freeze the release at task start; all subqueries and reopen actions use it.
         pinned_plan = replace(plan, release_id=release_id)
-        searches = plan_research(pinned_plan, max_searches=max_searches)
+        searches = plan_research(
+            pinned_plan,
+            max_searches=max_searches,
+            query_rewrite_enabled=query_rewrite_enabled,
+            multi_hop_enabled=multi_hop_enabled,
+        )
         metric_specs = requested_metric_specs(plan.query)
         metrics = tuple(dict.fromkeys(item.metric for item in metric_specs))
         periods = requested_periods(plan.query, plan.report_periods)
@@ -807,6 +851,8 @@ class IndustrialRagService:
                 subplan,
                 rrf_rank_constant=rrf_rank_constant,
                 use_reranker=use_reranker,
+                fusion_strategy=fusion_strategy,
+                row_group_chunking=row_group_chunking,
                 control=control,
             )
             if self.store.permission_revision() != task_permission_revision:
@@ -859,6 +905,7 @@ class IndustrialRagService:
                                     control.check()
                                 item["reopened_table_row"] = self.read_table_row(
                                     subplan, table_id, row_start, row_end,
+                                    include_continuation_context=include_continuation_context,
                                 )
                                 if control is not None:
                                     control.check()
@@ -1164,6 +1211,11 @@ class IndustrialRagService:
                 "evidence_limit": evidence_limit,
                 "rrf_rank_constant": rrf_rank_constant,
                 "reranker_profile": "configured" if use_reranker else "disabled",
+                "query_rewrite_enabled": query_rewrite_enabled,
+                "multi_hop_enabled": multi_hop_enabled,
+                "fusion_strategy": fusion_strategy,
+                "row_group_chunking": row_group_chunking,
+                "include_continuation_context": include_continuation_context,
                 "channels": list(plan.channels),
                 "returned_supporting_count": len(support),
                 "returned_metric_candidate_count": len(metric_candidates),
@@ -1302,7 +1354,15 @@ class IndustrialRagService:
             "permission_revision": self.store.permission_revision(),
         }
 
-    def read_table_row(self, plan: QueryPlan, table_id: str, row_start: int, row_end: int) -> dict[str, object]:
+    def read_table_row(
+        self,
+        plan: QueryPlan,
+        table_id: str,
+        row_start: int,
+        row_end: int,
+        *,
+        include_continuation_context: bool = True,
+    ) -> dict[str, object]:
         """Expand a table row group from stored cells after rechecking access, release, and time scope."""
         if not isinstance(table_id, str) or not table_id or len(table_id) > 256:
             raise ValueError("table_id must be a nonempty bounded string")
@@ -1336,8 +1396,11 @@ class IndustrialRagService:
         candidate = table_payload.get("continuation_candidate")
         if isinstance(candidate, Mapping) and continuation is None:
             raise PermissionError("table rows remain quarantined until continuation review is confirmed")
-        continuation_context = candidate.get("previous_context", {}) if isinstance(candidate, Mapping) else {}
-        parent_header_cells = record.get("parent_header_cells", [])
+        continuation_context = (
+            candidate.get("previous_context", {})
+            if include_continuation_context and isinstance(candidate, Mapping) else {}
+        )
+        parent_header_cells = record.get("parent_header_cells", []) if include_continuation_context else []
         header_rows = int(table["header_rows"])
         headers: dict[int, list[str]] = {}
         data: dict[int, list[dict[str, object]]] = {}
@@ -1424,7 +1487,7 @@ class IndustrialRagService:
                 for cell in used_cells
             ],
         }
-        if isinstance(continuation, Mapping) and isinstance(candidate, Mapping):
+        if include_continuation_context and isinstance(continuation, Mapping) and isinstance(candidate, Mapping):
             citation["continuation"] = {
                 "candidate_id": candidate.get("candidate_id"),
                 "previous_table_id": continuation.get("previous_table_id"),

@@ -955,6 +955,30 @@ def test_rollback_restores_compatible_complete_bundle_and_audit(tmp_path):
         reason="test-only full restoration verification",
         release_id="test-release-rollback",
     )
+    pinned_package = store.pin_active_runtime_package()
+    assert pinned_package == {
+        "package_id": published["package_id"],
+        "package_sha256": published["package_sha256"],
+    }
+    store.rollback("seed", config={}, actor_role="release_manager", reason="move active pointer for pin test")
+    assert store.pin_active_runtime_package() == {"package_id": "seed", "package_sha256": None}
+    pinned_candidate, pinned_version_id, pinned_metadata = store.load_active(
+        config=_package()["config"],
+        training_state=_package()["runtime_context"]["training_state"],
+        training_seed_provenance=_package()["runtime_context"]["training_seed_provenance"],
+        versions=_package()["runtime_context"]["versions"],
+        pinned_package_id=str(pinned_package["package_id"]),
+        pinned_package_sha256=str(pinned_package["package_sha256"]),
+    )
+    assert pinned_candidate == seed_candidate()
+    assert pinned_version_id == "candidate-17"
+    assert pinned_metadata["origin"] == "queued_complete_runtime_package"
+    with pytest.raises(ValueError, match="pinned hash"):
+        store.load_active(
+            config=_package()["config"],
+            pinned_package_id=str(pinned_package["package_id"]),
+            pinned_package_sha256="0" * 64,
+        )
     with pytest.raises(PermissionError, match="release_manager"):
         store.rollback("seed", config={}, actor_role="researcher", reason="unauthorized")
     with pytest.raises(ValueError, match="incompatible with the requested configuration"):
@@ -981,7 +1005,7 @@ def test_rollback_restores_compatible_complete_bundle_and_audit(tmp_path):
     assert version_id == "candidate-17"
     assert active == seed_candidate()
     assert metadata["restored_package"] == published["complete_runtime_package"]
-    assert [row["action"] for row in store.audit_history()] == ["publish", "rollback"]
+    assert [row["action"] for row in store.audit_history()] == ["publish", "rollback", "rollback"]
 
 
 def test_package_and_bundle_tampering_fails_closed(tmp_path):

@@ -233,26 +233,37 @@ def _period_query_terms(period: str) -> str:
     return f"{year_match.group(0)} {period}" if year_match else period
 
 
-def plan_research(plan: QueryPlan, *, max_searches: int = MAX_RESEARCH_SEARCHES) -> tuple[PlannedSearch, ...]:
+def plan_research(
+    plan: QueryPlan,
+    *,
+    max_searches: int = MAX_RESEARCH_SEARCHES,
+    query_rewrite_enabled: bool = True,
+    multi_hop_enabled: bool = True,
+) -> tuple[PlannedSearch, ...]:
     """Build at most eight fixed-template searches, reserving one for counter evidence."""
     if isinstance(max_searches, bool) or not 2 <= max_searches <= MAX_RESEARCH_SEARCHES:
         raise ValueError(f"max_searches must be between 2 and {MAX_RESEARCH_SEARCHES}")
+    if not isinstance(query_rewrite_enabled, bool) or not isinstance(multi_hop_enabled, bool):
+        raise ValueError("query rewrite and multi-hop switches must be booleans")
 
     metric_specs = requested_metric_specs(plan.query)
     periods = requested_periods(plan.query, plan.report_periods)
     dimensions = [(metric, period) for metric in metric_specs for period in (periods or (None,))]
     if not dimensions:
         dimensions = [(None, period) for period in (periods or (None,))]
+    if not multi_hop_enabled:
+        dimensions = dimensions[:1]
     positive_limit = max_searches - 1
     searches: list[PlannedSearch] = []
     for metric, period in dimensions[:positive_limit]:
         metric_key = metric.metric if metric is not None else None
         terms = metric_terms(metric_key) if metric_key else ()
         query_parts = [plan.query]
-        if terms:
-            query_parts.append(" ".join(terms))
-        if period:
-            query_parts.append(_period_query_terms(period))
+        if query_rewrite_enabled:
+            if terms:
+                query_parts.append(" ".join(terms))
+            if period:
+                query_parts.append(_period_query_terms(period))
         searches.append(PlannedSearch(
             step_id=f"search-{len(searches) + 1}",
             kind="supporting_evidence",

@@ -22,11 +22,15 @@ from adaptive_mas.agents.harness import (
     QwenClient,
 )
 from adaptive_mas.data import load_oos_research_data
+from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore
+from adaptive_mas.industrial_rag.repository import IndustrialRagStore
+from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
 from adaptive_mas.harness_evolution import (
     GEPA_METRIC_CALL_LIMIT,
     GEPA_PROPOSAL_LIMIT,
     GEPA_REFLECTION_REQUESTS_PER_PROPOSAL,
     HarnessVersionStore,
+    _pin_industrial_rag_runtime,
     build_retrospective_cases,
     run_gepa_evolution,
     split_retrospective_cases,
@@ -104,7 +108,12 @@ def _preview_feedback(as_of: str, required_facts: list[dict[str, object]]) -> di
     }
 
 
-def _build_review(candidate: dict[str, str], cases: dict[str, list], model: str) -> dict[str, object]:
+def _build_review(
+    candidate: dict[str, str],
+    cases: dict[str, list],
+    model: str,
+    industrial_rag_runtime: dict[str, object] | None = None,
+) -> dict[str, object]:
     from gepa.optimize_anything import _build_reflection_prompt_template
     from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
@@ -155,6 +164,7 @@ def _build_review(candidate: dict[str, str], cases: dict[str, list], model: str)
         "public_evidence_mode": "retrospective_source_publication_proxy",
         "strict_historical_pit_verified": False,
         "model": model,
+        "industrial_rag_runtime": industrial_rag_runtime or {"status": "disabled"},
         "outgoing_request_fields": {
             "research_agents": ["model", "messages", "tools", "tool_choice", "temperature", "max_tokens", "enable_thinking"],
             "gepa_reflection": ["model", "messages", "temperature", "max_tokens", "enable_thinking"],
@@ -246,7 +256,26 @@ def main() -> None:
     )
     parser.add_argument("--execute-gepa", action="store_true", help="Run the reviewed retrospective GEPA experiment.")
     parser.add_argument("--approved-review-sha256", help="Optional review hash recorded for this run.")
+    parser.add_argument("--industrial-rag-database", type=Path)
+    parser.add_argument("--industrial-rag-object-root", type=Path)
+    parser.add_argument("--industrial-rag-release-id")
+    parser.add_argument("--industrial-rag-principal-id", default="local-public")
     args = parser.parse_args()
+
+    if bool(args.industrial_rag_database) != bool(args.industrial_rag_object_root):
+        parser.error("--industrial-rag-database and --industrial-rag-object-root must be provided together")
+    industrial_rag_service = None
+    rag_runtime_identity: dict[str, object] = {"status": "disabled"}
+    if args.industrial_rag_database is not None and args.industrial_rag_object_root is not None:
+        industrial_rag_service = IndustrialRagService(IndustrialRagStore(
+            args.industrial_rag_database,
+            LocalContentAddressedStore(args.industrial_rag_object_root),
+        ))
+        rag_runtime_identity = _pin_industrial_rag_runtime(
+            industrial_rag_service,
+            principal_id=args.industrial_rag_principal_id,
+            release_id=args.industrial_rag_release_id,
+        )
 
     config = tomllib.loads(args.config.read_text(encoding="utf-8"))
     research = load_oos_research_data(args.baostock_run_dir)
@@ -259,7 +288,7 @@ def main() -> None:
     version_store = HarnessVersionStore(args.version_dir)
     candidate, active_version_id, _ = version_store.load_active()
     model = os.environ.get("POPAGENT_LLM_MODEL", DEFAULT_MODEL)
-    review = _build_review(candidate, cases, model)
+    review = _build_review(candidate, cases, model, rag_runtime_identity)
     _write_json(args.artifact_dir / "outgoing_review.json", review)
 
     case_summary = review["retrospective_case_summary"]
@@ -305,6 +334,12 @@ def main() -> None:
         version_store=version_store,
         run_id=run_id,
         config=config,
+        industrial_rag_service=industrial_rag_service,
+        industrial_rag_principal_id=args.industrial_rag_principal_id,
+        industrial_rag_release_id=(
+            str(rag_runtime_identity["release_id"])
+            if rag_runtime_identity.get("status") == "pinned" else None
+        ),
     )
     result["outgoing_review_sha256"] = review["review_content_sha256"]
     result["outgoing_review_file"] = str(args.artifact_dir / "outgoing_review.json")

@@ -247,6 +247,44 @@ def test_sqlite_ingest_release_query_and_citation_are_source_bound(tmp_path) -> 
     assert store._get_document_bytes("document-1", "version-1", "analyst") == bundle.payload
 
 
+def test_local_search_ablation_switches_change_row_group_and_fusion_behavior(tmp_path) -> None:
+    base = _bundle()
+    row_group = Block(
+        "version-1-semantic-row",
+        "version-1",
+        "列头：2024年度营业收入\n数据行：营业收入 | 337,488",
+        block_type="table_row_group",
+        page_number=3,
+        table_id="version-1-semantic-table",
+        row_start=1,
+        row_end=1,
+    )
+    bundle = replace(base, blocks=(*base.blocks, row_group))
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, ["version-1"], "release-1")
+    service = IndustrialRagService(store)
+    plan = replace(
+        _plan(release_id="release-1", channels=("bm25", "structured_facts")),
+        query="2024年度营业收入是多少",
+        top_k=10,
+    )
+
+    baseline = service.search(plan, use_cache=False, use_reranker=False)
+    without_row_groups = service.search(
+        plan, use_cache=False, use_reranker=False, row_group_chunking=False,
+    )
+    first_channel = service.search(
+        plan, use_cache=False, use_reranker=False, fusion_strategy="first_available_channel",
+    )
+
+    assert any(item["citation"].get("table_id") == row_group.table_id for item in baseline["retrieved"])
+    assert all(item["citation"].get("table_id") != row_group.table_id for item in without_row_groups["retrieved"])
+    assert first_channel["fusion"]["method"] == "fusion_disabled_first_available_channel"
+    assert first_channel["fusion"]["selected_channel"] == "bm25"
+
+
 @pytest.mark.parametrize(
     ("query", "source_metric", "payload"),
     [

@@ -369,8 +369,8 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
     assert result["module_ablation_plan_file"] == "module_ablation_plan.json"
     assert ablation_payload["status"] == "plan_only_no_ablation_results"
     assert len(ablation_payload["rows"]) == 20
-    assert ablation_payload["planned_policy_variant_count"] == 8
-    assert ablation_payload["execution_status"].startswith("No module ablation was executed")
+    assert ablation_payload["planned_runtime_intervention_count"] == 11
+    assert ablation_payload["execution_status"].startswith("No module intervention was executed")
     assert ablation_payload["rows"][16]["mode"] == "immutable_safety_policy"
     assert {entry["phase"] for entry in trace_payload["evaluations"]} == {
         "exploration", "selection", "frozen_evaluation", "reuse_demo",
@@ -426,15 +426,20 @@ def test_paired_case_deltas_name_metric_and_cost_regressions_without_claiming_ca
         _paired_case_deltas(baseline, [{**comparison[0], "as_of": "2026-04-21"}])
 
 
-def test_module_ablation_plan_has_twenty_fixed_rows_and_only_bounded_policy_variants() -> None:
+def test_module_ablation_plan_separates_runtime_interventions_from_fixed_modules() -> None:
     rows = build_module_ablation_plan(seed_candidate())
     variants = [row for row in rows if row["status"] == "planned_not_executed"]
 
     assert [row["module_id"] for row in rows] == list(range(1, 21))
-    assert len(variants) == 8
+    assert len(variants) == 11
     assert all(row["candidate"]["procedural_experience"] == seed_candidate()["procedural_experience"] for row in variants)
-    assert all(row["changed_policy_fields"] for row in variants)
-    assert rows[16]["reason"] == "immutable_safety_policy"
+    assert all(row["changed_policy_fields"] == [] for row in variants)
+    assert {row["runtime_intervention"]["research_ablation_id"] for row in variants} == {
+        2, 3, 7, 8, 9, 11, 12, 13, 14, 15, 16,
+    }
+    assert rows[9]["status"] == "not_runnable"
+    assert "dense is already absent" in rows[9]["reason"]
+    assert "production hard guard remains immutable" in rows[16]["reason"]
 
 
 def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp_path, monkeypatch) -> None:
@@ -447,9 +452,25 @@ def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp
             required_observations=[],
         ))
     candidate = seed_candidate()
+    class VersionedReranker:
+        cache_identity = {"implementation": "fixture-reranker", "version": "v1"}
 
-    def fake_evaluate(task_candidate, case, *, candidate_version_id, trace_sink, **_kwargs):
+        def __call__(self, plan, evidence):
+            return evidence
+
+    rag_service = SimpleNamespace(
+        store=SimpleNamespace(
+            active_release_id=lambda: "release-fixture",
+            release_spec=lambda release_id: ({"source_manifest_sha256": "a" * 64}, "b" * 64),
+        ),
+        channel_adapters={},
+        reranker=VersionedReranker(),
+    )
+    evaluation_calls = []
+
+    def fake_evaluate(task_candidate, case, *, candidate_version_id, trace_sink, **kwargs):
         is_ablated = candidate_version_id.endswith("ablated")
+        evaluation_calls.append((candidate_version_id, kwargs.get("research_ablation_id"), kwargs.get("industrial_rag_release_id")))
         score = 0.7 if is_ablated else 0.8
         usage = {
             "logical_estimated_cost_cny": 0.02 if is_ablated else 0.01,
@@ -470,6 +491,7 @@ def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp
         config={"fixture": True},
         output_root=tmp_path,
         run_id="module-12-pair",
+        industrial_rag_service=rag_service,
     )
 
     run_dir = tmp_path / "module_ablations" / "module-12-pair"
@@ -477,6 +499,10 @@ def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp
     assert result["status"] == "complete"
     assert trace["checkpoint_status"] == "complete"
     assert trace["evaluation_count"] == 8
+    assert [row[1] for row in evaluation_calls] == [None, 12] * 4
+    assert all(row[2] == "release-fixture" for row in evaluation_calls)
+    assert result["runtime_intervention"]["research_ablation_id"] == 12
+    assert result["industrial_rag_runtime"]["release_id"] == "release-fixture"
     assert result["paired_evaluation"]["selection"]["case_count"] == 2
     assert result["paired_evaluation"]["frozen_evaluation"]["case_count"] == 2
     assert result["paired_evaluation"]["selection"]["pairs"][0]["quality_regressions"] == [
@@ -495,6 +521,7 @@ def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp
             config={"fixture": True},
             output_root=tmp_path / "insufficient-budget",
             run_id="must-not-start",
+            industrial_rag_service=rag_service,
         )
 
 
@@ -1793,6 +1820,7 @@ def test_bounded_gepa_policy_controls_indexed_research_without_changing_hard_sea
         industrial_rag_service=service,
         industrial_rag_release_id="release-fixture",
         research_policy_json=json.dumps(policy),
+        research_ablation_id=11,
     )
     result = handlers["search_indexed_financial_documents"]({
         "question": "2024年营业收入",
@@ -1808,9 +1836,79 @@ def test_bounded_gepa_policy_controls_indexed_research_without_changing_hard_sea
         "table_expansion_limit": 0,
         "rrf_rank_constant": 35,
         "use_reranker": False,
+        "query_rewrite_enabled": True,
+        "multi_hop_enabled": True,
+        "fusion_strategy": "first_available_channel",
+        "row_group_chunking": True,
+        "include_continuation_context": True,
     }
+    assert result["research_policy"]["evaluation_ablation_id"] == 11
     assert result["research_policy"]["challenge_policy"] == "mandatory_correction_search"
     assert result["research_policy"]["stop_policy"] == "coverage_then_bounded_search"
+
+
+def test_research_ablation_ids_reach_the_local_rag_runtime_as_distinct_switches() -> None:
+    expected = {
+        2: {"include_continuation_context": False},
+        3: {"row_group_chunking": False},
+        7: {"query_rewrite_enabled": False},
+        8: {"multi_hop_enabled": False},
+        9: {"channels": ("structured_facts",)},
+        10: {"channels": ("structured_facts", "bm25")},
+        11: {"fusion_strategy": "first_available_channel"},
+        12: {"use_reranker": False},
+        13: {"table_expansion_limit": 0},
+        14: {"channels": ("bm25",)},
+        15: {"context_char_limit": 16000},
+        16: {"evidence_limit": 64},
+    }
+
+    class CapturingRagService:
+        def __init__(self) -> None:
+            self.plan = None
+            self.options = None
+
+        def research(self, plan, **kwargs):
+            self.plan = plan
+            self.options = kwargs
+            return {
+                "status": "no_evidence",
+                "channel_status": {},
+                "stop_policy": {},
+                "planner": {},
+                "coverage": [],
+                "warnings": [],
+                "supporting_evidence": [],
+                "candidate_evidence": [],
+                "counter_evidence": {"candidates": []},
+            }
+
+    for ablation_id, assertions in expected.items():
+        policy = default_research_policy()
+        if ablation_id == 10:
+            policy["channels"] = ["structured_facts", "bm25", "dense"]
+        service = CapturingRagService()
+        _, handlers, _ = _fundamental_handlers(
+            {},
+            datetime.fromisoformat("2026-09-01T16:00:00+08:00"),
+            industrial_rag_service=service,
+            industrial_rag_release_id="release-fixture",
+            research_policy_json=json.dumps(policy),
+            research_ablation_id=ablation_id,
+        )
+        result = handlers["search_indexed_financial_documents"]({
+            "question": "2024年营业收入",
+            "symbols": ["600000"],
+        })
+        assert result["research_policy"]["evaluation_ablation_id"] == ablation_id
+        for key, value in assertions.items():
+            actual = (
+                service.plan.channels if key == "channels"
+                else result["research_policy"].get(key)
+                if key == "context_char_limit"
+                else service.options.get(key)
+            )
+            assert actual == value, (ablation_id, key)
 
 
 def test_indexed_search_enforces_policy_symbol_limit_and_rejects_duplicate_symbols() -> None:

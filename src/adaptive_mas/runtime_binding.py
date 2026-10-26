@@ -20,19 +20,31 @@ _INPUT_KEYS = (
 )
 
 
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _path_digest(path: Path) -> tuple[str, str]:
+    if path.name.lower() == "test.csv":
+        raise ValueError("test.csv cannot be bound as a workflow input")
     if path.is_file():
-        return "file", hashlib.sha256(path.read_bytes()).hexdigest()
+        return "file", _file_digest(path)
     if not path.is_dir():
         raise ValueError(f"workflow input is not a readable file or directory: {path.name}")
     entries = []
     for child in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
-        if child.name.lower() == "test.csv" or child.is_symlink():
+        if child.name.lower() == "test.csv":
             continue
+        if child.is_symlink():
+            raise ValueError(f"workflow input directory contains an unbound symbolic link: {child.relative_to(path)}")
         if child.is_file():
             entries.append({
                 "path": child.relative_to(path).as_posix(),
-                "sha256": hashlib.sha256(child.read_bytes()).hexdigest(),
+                "sha256": _file_digest(child),
             })
     return "directory", stable_hash(entries)
 

@@ -40,6 +40,20 @@ def test_planner_keeps_a_counter_search_inside_the_fixed_eight_search_budget() -
     assert sum(search.kind == "supporting_evidence" for search in searches) == 7
 
 
+def test_evaluation_planner_switches_remove_rewrite_and_multi_hop_but_keep_counter_search() -> None:
+    plan = _plan("对比2023年和2024年营业收入、归母净利润")
+    baseline = plan_research(plan)
+    no_rewrite = plan_research(plan, query_rewrite_enabled=False)
+    no_multi_hop = plan_research(plan, multi_hop_enabled=False)
+
+    assert len([item for item in baseline if item.kind == "supporting_evidence"]) == 4
+    assert len([item for item in no_rewrite if item.kind == "supporting_evidence"]) == 4
+    assert all(item.query == plan.query for item in no_rewrite if item.kind == "supporting_evidence")
+    assert len([item for item in no_multi_hop if item.kind == "supporting_evidence"]) == 1
+    assert all(items[-1].kind == "counter_evidence_candidate" for items in (baseline, no_rewrite, no_multi_hop))
+    assert "更正" in no_multi_hop[-1].query
+
+
 def test_metric_alias_overlap_and_period_variants_are_normalized() -> None:
     assert requested_metrics("归属于上市公司股东的净利润") == ("parent_net_profit",)
     assert normalize_period("2024年第一季度") == "2024Q1"

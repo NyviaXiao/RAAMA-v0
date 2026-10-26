@@ -1218,9 +1218,16 @@ def _fundamental_handlers(
     industrial_rag_principal_id: str = "local-public",
     industrial_rag_release_id: str | None = None,
     research_policy_json: str | None = None,
+    research_ablation_id: int | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object], dict[str, dict[str, object]]]:
     snapshot = public_snapshot or {}
     research_policy = parse_research_policy(research_policy_json)
+    if research_ablation_id not in {None, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+        raise ValueError("research_ablation_id is unsupported by the local RAG evaluator")
+    if research_ablation_id == 15:
+        research_policy["context_char_limit"] = 16000
+    if research_ablation_id == 16:
+        research_policy["evidence_limit"] = 64
     source_records: dict[str, dict[str, object]] = {}
     source_ids: dict[str, str] = {}
     public_sources: list[dict[str, object]] = []
@@ -1623,6 +1630,16 @@ def _fundamental_handlers(
             if industrial_rag_release_id is None:
                 return {"status": "unavailable", "reason": "no published industrial RAG snapshot was active at task start", "retrieved": []}
 
+            channels = [str(channel) for channel in research_policy["channels"]]
+            if research_ablation_id == 9:
+                channels = [channel for channel in channels if channel != "bm25"]
+            elif research_ablation_id == 10:
+                channels = [channel for channel in channels if channel != "dense"]
+            elif research_ablation_id == 14:
+                channels = [channel for channel in channels if channel != "structured_facts"]
+            if not channels:
+                raise InvalidToolInput("the selected RAG ablation removed every supporting retrieval channel")
+
             retrieved: list[dict[str, object]] = []
             reused_evidence_ids: list[str] = []
             channel_status: list[dict[str, object]] = []
@@ -1640,7 +1657,7 @@ def _fundamental_handlers(
                     accounting_basis=basis,
                     report_periods=tuple(periods),
                     release_id=industrial_rag_release_id,
-                    channels=tuple(str(channel) for channel in research_policy["channels"]),
+                    channels=tuple(channels),
                     top_k=limit,
                     time_mode="strict_forward",
                 )
@@ -1651,10 +1668,21 @@ def _fundamental_handlers(
                     table_expansion_limit=(
                         int(research_policy["table_expansion_limit"])
                         if research_policy["parent_context_mode"] == "reviewed_parent_and_child"
+                        and research_ablation_id != 13
                         else 0
                     ),
                     rrf_rank_constant=int(research_policy["rrf_rank_constant"]),
-                    use_reranker=research_policy["reranker_profile"] == "configured",
+                    use_reranker=(
+                        research_policy["reranker_profile"] == "configured"
+                        and research_ablation_id != 12
+                    ),
+                    query_rewrite_enabled=research_ablation_id != 7,
+                    multi_hop_enabled=research_ablation_id != 8,
+                    fusion_strategy=(
+                        "first_available_channel" if research_ablation_id == 11 else "rrf"
+                    ),
+                    row_group_chunking=research_ablation_id != 3,
+                    include_continuation_context=research_ablation_id != 2,
                 )
                 channel_status.append({
                     "symbol": symbol,
@@ -1793,7 +1821,10 @@ def _fundamental_handlers(
                     else "no_evidence"
                 ),
                 "release_id": industrial_rag_release_id,
-                "research_policy": research_policy,
+                "research_policy": {
+                    **research_policy,
+                    "evaluation_ablation_id": research_ablation_id,
+                },
                 "retrieved": retrieved,
                 "reused_evidence_ids": reused_evidence_ids,
                 "channels": channel_status,
@@ -3525,6 +3556,7 @@ def run_research_harness(
     industrial_rag_service: IndustrialRagService | None = None,
     industrial_rag_principal_id: str = "local-public",
     industrial_rag_release_id: str | None = None,
+    research_ablation_id: int | None = None,
 ) -> dict[str, object]:
     """Run market and fundamental specialists, then a planning/query/finalize manager."""
     decision_time = datetime.combine(as_of, datetime.min.time()).replace(hour=16, tzinfo=SHANGHAI)
@@ -3590,6 +3622,7 @@ def run_research_harness(
         industrial_rag_principal_id=industrial_rag_principal_id,
         industrial_rag_release_id=pinned_release_id,
         research_policy_json=candidate["research_policy_json"],
+        research_ablation_id=research_ablation_id,
     )
     fundamental_finalized: dict[str, object] = {}
     fundamental_visible_evidence_ids: set[str] = set()
@@ -4203,6 +4236,7 @@ def run_research_harness(
         },
         "optional_experts": optional_expert_runs,
         "industrial_rag_snapshot": industrial_rag_snapshot,
+        "research_ablation_id": research_ablation_id,
         "research_loop": {
             "goal": (manager_state.get("plan") or {}).get("goal"),
             "action_count": int(manager_state["query_count"]),

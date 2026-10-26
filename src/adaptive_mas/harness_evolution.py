@@ -29,6 +29,7 @@ from adaptive_mas.agents.harness import (
 from adaptive_mas.agents.harness_prompts import parse_research_policy, seed_candidate, validate_candidate
 from adaptive_mas.agents.public_experts import build_public_expert_snapshot
 from adaptive_mas.data.research import ResearchData
+from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
 from adaptive_mas.package_identity import source_package_identity
 from adaptive_mas.research_provenance import (
     build_research_package_provenance,
@@ -80,6 +81,46 @@ def _stable_hash(value: object) -> str:
     return hashlib.sha256(json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
     ).encode("utf-8")).hexdigest()
+
+
+def _pin_industrial_rag_runtime(
+    service: IndustrialRagService | None,
+    *,
+    principal_id: str,
+    release_id: str | None,
+) -> dict[str, object]:
+    if service is None:
+        return {"status": "disabled"}
+    if not principal_id.strip():
+        raise ValueError("industrial RAG evaluation requires a nonempty principal ID")
+    pinned_release_id = release_id or service.store.active_release_id()
+    if pinned_release_id is None:
+        raise ValueError("industrial RAG evaluation requires a published local corpus release")
+    spec, spec_sha256 = service.store.release_spec(pinned_release_id)
+    components: dict[str, object] = {}
+    for name, component in sorted(service.channel_adapters.items()):
+        identity = getattr(component, "cache_identity", None)
+        identity = identity() if callable(identity) else identity
+        if not isinstance(identity, Mapping):
+            raise ValueError(f"industrial RAG channel {name} needs a versioned cache_identity")
+        components[name] = dict(identity)
+    reranker = service.reranker
+    if reranker is not None:
+        identity = getattr(reranker, "cache_identity", None)
+        identity = identity() if callable(identity) else identity
+        if not isinstance(identity, Mapping):
+            raise ValueError("industrial RAG reranker needs a versioned cache_identity")
+        components["reranker"] = dict(identity)
+    return {
+        "status": "pinned",
+        "release_id": pinned_release_id,
+        "release_spec_sha256": spec_sha256,
+        "release_spec": spec,
+        "source_manifest_sha256": spec.get("source_manifest_sha256"),
+        "principal_id": principal_id,
+        "time_mode": "strict_forward",
+        "runtime_components": components,
+    }
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -1148,7 +1189,20 @@ def evaluate_candidate(
     candidate_version_id: str = "seed",
     procedural_memory: dict[str, object] | None = None,
     trace_sink: list[dict[str, object]] | None = None,
+    industrial_rag_service: IndustrialRagService | None = None,
+    industrial_rag_principal_id: str = "local-public",
+    industrial_rag_release_id: str | None = None,
+    research_ablation_id: int | None = None,
+    industrial_rag_runtime_identity: Mapping[str, object] | None = None,
 ) -> tuple[float, dict[str, object]]:
+    if industrial_rag_runtime_identity is not None:
+        current_rag_identity = _pin_industrial_rag_runtime(
+            industrial_rag_service,
+            principal_id=industrial_rag_principal_id,
+            release_id=industrial_rag_release_id,
+        )
+        if _stable_hash(current_rag_identity) != _stable_hash(dict(industrial_rag_runtime_identity)):
+            raise RuntimeError("industrial RAG runtime changed after the evaluation package was pinned")
     call_start = len(budget.calls)
     provider_call_start = budget.provider_call_count
     logical_start = len(budget.logical_calls)
@@ -1166,6 +1220,10 @@ def evaluate_candidate(
             candidate_version_id=candidate_version_id,
             required_observations=case.required_observations,
             procedural_memory=procedural_memory,
+            industrial_rag_service=industrial_rag_service,
+            industrial_rag_principal_id=industrial_rag_principal_id,
+            industrial_rag_release_id=industrial_rag_release_id,
+            research_ablation_id=research_ablation_id,
         )
     except InvalidResearchOutput as exc:
         trace = None
@@ -1437,7 +1495,7 @@ _ABLATION_MODULES = (
 
 
 def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, object]]:
-    """Prepare one-factor policy variants and explicit non-runnable module rows."""
+    """Describe fixed runtime interventions separately from offline and immutable modules."""
     baseline = validate_candidate(candidate)
     baseline_policy = parse_research_policy(baseline["research_policy_json"])
     rows = []
@@ -1450,71 +1508,54 @@ def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, obje
             "reason": mode,
             "evaluation_splits": ["selection", "frozen_evaluation"],
         }
-        policy = dict(baseline_policy)
-        changed_policy_fields: list[str] = []
-        if module_id == 7:
-            policy["max_searches"] = max(2, int(policy["max_searches"]) - 2)
-            changed_policy_fields = ["max_searches"]
-        elif module_id == 8:
-            policy["candidate_limit"] = 1
-            changed_policy_fields = ["candidate_limit"]
-        elif module_id == 9:
-            policy["channels"] = [channel for channel in policy["channels"] if channel != "bm25"]
-            if not policy["channels"] or not set(policy["channels"]).intersection({"structured_facts", "bm25"}):
-                row["reason"] = "cannot_remove_supporting_bm25_without_a_primary_channel"
+        descriptions = {
+            2: "disable reviewed cross-page context while retaining exact child-row evidence",
+            3: "remove semantic table-row chunks from the BM25 candidate set",
+            7: "disable constrained query rewriting while retaining the mandatory correction search",
+            8: "disable metric-period multi-hop decomposition while retaining one supporting query",
+            9: "disable BM25 for support searches while retaining the mandatory BM25 correction search",
+            10: "disable the dense channel",
+            11: "disable reciprocal-rank fusion and use the first available channel",
+            12: "disable the configured reranker",
+            13: "disable reviewed table-row expansion",
+            14: "disable normalized structured-fact retrieval while retaining report validation",
+            15: "remove the candidate context cap under a fixed 16,000-character tool ceiling",
+            16: "remove the candidate evidence cap under the service 64-item ceiling",
+        }
+        if module_id in descriptions:
+            reason = None
+            if module_id == 9 and "bm25" not in baseline_policy["channels"]:
+                reason = "BM25 is already absent from the active supporting-channel set"
+            elif module_id == 10 and "dense" not in baseline_policy["channels"]:
+                reason = "dense is already absent from the active channel set"
+            elif module_id == 12 and baseline_policy["reranker_profile"] == "disabled":
+                reason = "reranking is already disabled in the active candidate"
+            elif module_id == 13 and (
+                baseline_policy["parent_context_mode"] == "source_row_only"
+                or int(baseline_policy["table_expansion_limit"]) == 0
+            ):
+                reason = "reviewed parent expansion is already disabled in the active candidate"
+            if reason is not None:
+                row["reason"] = reason
                 rows.append(row)
                 continue
-            changed_policy_fields = ["channels"]
-        elif module_id == 10:
-            if "dense" not in policy["channels"]:
-                row["reason"] = "dense_channel_not_in_the_active_baseline"
-                rows.append(row)
-                continue
-            policy["channels"] = [channel for channel in policy["channels"] if channel != "dense"]
-            changed_policy_fields = ["channels"]
-        elif module_id == 11:
-            policy["rrf_rank_constant"] = 20 if int(policy["rrf_rank_constant"]) == 100 else 100
-            changed_policy_fields = ["rrf_rank_constant"]
-        elif module_id == 12:
-            if policy["reranker_profile"] == "disabled":
-                row["reason"] = "reranker_already_disabled_in_the_active_baseline"
-                rows.append(row)
-                continue
-            policy["reranker_profile"] = "disabled"
-            changed_policy_fields = ["reranker_profile"]
-        elif module_id == 13:
-            if policy["parent_context_mode"] == "source_row_only":
-                row["reason"] = "parent_context_already_disabled_in_the_active_baseline"
-                rows.append(row)
-                continue
-            policy["parent_context_mode"] = "source_row_only"
-            policy["table_expansion_limit"] = 0
-            changed_policy_fields = ["parent_context_mode", "table_expansion_limit"]
-        elif module_id == 15:
-            policy["context_char_limit"] = 400
-            changed_policy_fields = ["context_char_limit"]
-        elif module_id == 16:
-            policy["evidence_limit"] = 2
-            changed_policy_fields = ["evidence_limit"]
+            row.update({
+                "status": "planned_not_executed",
+                "reason": "isolated evaluator-only runtime intervention; production hard guards remain active",
+                "candidate": baseline,
+                "candidate_sha256": hashlib.sha256(_json(baseline).encode("utf-8")).hexdigest(),
+                "changed_policy_fields": [],
+                "runtime_intervention": {
+                    "research_ablation_id": module_id,
+                    "description": descriptions[module_id],
+                },
+            })
         else:
-            rows.append(row)
-            continue
-
-        if all(policy[key] == baseline_policy[key] for key in changed_policy_fields):
-            row["reason"] = "active_baseline_already_uses_the_ablation_value"
-            rows.append(row)
-            continue
-        ablated_candidate = validate_candidate({
-            **baseline,
-            "research_policy_json": _json(policy),
-        })
-        row.update({
-            "status": "planned_not_executed",
-            "reason": "single_bounded_policy_factor; paired model evaluation is a separate budgeted run",
-            "changed_policy_fields": changed_policy_fields,
-            "candidate_sha256": hashlib.sha256(_json(ablated_candidate).encode("utf-8")).hexdigest(),
-            "candidate": ablated_candidate,
-        })
+            row["reason"] = (
+                "offline parser/index rebuild required for an isolated source-bound copy"
+                if module_id in {1}
+                else "review or production hard guard remains immutable in the research evaluator"
+            )
         rows.append(row)
     if [row["module_id"] for row in rows] != list(range(1, 21)):
         raise RuntimeError("the fixed GEPA ablation catalog must contain modules 1 through 20 exactly once")
@@ -1611,6 +1652,9 @@ def run_gepa_evolution(
     run_id: str,
     config: dict[str, object],
     reuse_demo: bool = True,
+    industrial_rag_service: IndustrialRagService | None = None,
+    industrial_rag_principal_id: str = "local-public",
+    industrial_rag_release_id: str | None = None,
 ) -> dict[str, object]:
     run_call_start = len(budget.calls)
     run_provider_call_start = sum(
@@ -1619,6 +1663,12 @@ def run_gepa_evolution(
     run_logical_start = len(budget.logical_calls)
     active_candidate, active_version_id, active_version = version_store.load_active()
     active_candidate = validate_candidate(active_candidate)
+    rag_runtime_identity = _pin_industrial_rag_runtime(
+        industrial_rag_service,
+        principal_id=industrial_rag_principal_id,
+        release_id=industrial_rag_release_id,
+    )
+    pinned_rag_release_id = rag_runtime_identity.get("release_id")
     if len(active_candidate) != GEPA_REFLECTION_COMPONENTS:
         raise ValueError("the GEPA call budget is fixed for exactly seven bounded strategy components")
     exploration_case_count = len(cases["exploration"])
@@ -1702,6 +1752,7 @@ def run_gepa_evolution(
         "model": client.model,
         "endpoint_sha256": hashlib.sha256(client.endpoint.rstrip("/").encode("utf-8")).hexdigest(),
         "config_sha256": _stable_hash(config),
+        "industrial_rag_runtime": rag_runtime_identity,
         "case_inputs_sha256": case_inputs_sha256,
         "case_rows": case_rows,
         "evaluator_version": EVALUATOR_VERSION,
@@ -1752,8 +1803,8 @@ def run_gepa_evolution(
             row for row in case_rows if row["split"] == "frozen_evaluation"
         ]),
         "rows": ablation_rows,
-        "planned_policy_variant_count": sum(row["status"] == "planned_not_executed" for row in ablation_rows),
-        "execution_status": "No module ablation was executed; each variant requires a separate paired run and provider-call budget.",
+        "planned_runtime_intervention_count": sum(row["status"] == "planned_not_executed" for row in ablation_rows),
+        "execution_status": "No module intervention was executed; each row requires a separate paired run and provider-call budget.",
         "non_causal_scope": "This schedule defines one-factor variants only; measured deltas will not prove causal module effects.",
     }
     module_ablation_plan_file = "module_ablation_plan.json"
@@ -1856,6 +1907,10 @@ def run_gepa_evolution(
             candidate_version_id=active_version_id if candidate_memory is not None else "gepa-proposal",
             procedural_memory=candidate_memory if isinstance(candidate_memory, dict) else None,
             trace_sink=trace_sink,
+            industrial_rag_service=industrial_rag_service,
+            industrial_rag_principal_id=industrial_rag_principal_id,
+            industrial_rag_release_id=(str(pinned_rag_release_id) if pinned_rag_release_id else None),
+            industrial_rag_runtime_identity=rag_runtime_identity,
         )
         evaluation_action_traces.append({
             "phase": "exploration",
@@ -2011,6 +2066,10 @@ def run_gepa_evolution(
                     candidate_version_id=candidate_version,
                     procedural_memory=memory if isinstance(memory, dict) else None,
                     trace_sink=trace_sink,
+                    industrial_rag_service=industrial_rag_service,
+                    industrial_rag_principal_id=industrial_rag_principal_id,
+                    industrial_rag_release_id=(str(pinned_rag_release_id) if pinned_rag_release_id else None),
+                    industrial_rag_runtime_identity=rag_runtime_identity,
                 )
                 evaluation_action_traces.append({
                     "phase": "selection",
@@ -2083,6 +2142,10 @@ def run_gepa_evolution(
                 candidate_version_id=candidate_version,
                 procedural_memory=memory if isinstance(memory, dict) else None,
                 trace_sink=trace_sink,
+                industrial_rag_service=industrial_rag_service,
+                industrial_rag_principal_id=industrial_rag_principal_id,
+                industrial_rag_release_id=(str(pinned_rag_release_id) if pinned_rag_release_id else None),
+                industrial_rag_runtime_identity=rag_runtime_identity,
             )
             evaluation_action_traces.append({
                 "phase": "frozen_evaluation",
@@ -2159,6 +2222,10 @@ def run_gepa_evolution(
             candidate_version_id=reloaded_version_id,
             procedural_memory=reloaded_memory if isinstance(reloaded_memory, dict) else None,
             trace_sink=reuse_trace,
+            industrial_rag_service=industrial_rag_service,
+            industrial_rag_principal_id=industrial_rag_principal_id,
+            industrial_rag_release_id=(str(pinned_rag_release_id) if pinned_rag_release_id else None),
+            industrial_rag_runtime_identity=rag_runtime_identity,
         )
         evaluation_action_traces.append({
             "phase": "reuse_demo",
@@ -2272,7 +2339,7 @@ def run_gepa_evolution(
         "candidate_audit_file": "candidate_audit.json",
         "module_ablation_plan_file": module_ablation_plan_file,
         "module_ablation_plan_status": module_ablation_plan["status"],
-        "planned_policy_ablation_count": module_ablation_plan["planned_policy_variant_count"],
+        "planned_runtime_intervention_count": module_ablation_plan["planned_runtime_intervention_count"],
         "procedural_memory": {
             "active_version_before": active_version.get("procedural_memory"),
             "active_version_after": selected_version.get("procedural_memory"),
@@ -2322,8 +2389,11 @@ def run_paired_module_ablation(
     output_root: str | Path,
     run_id: str,
     procedural_memory: dict[str, object] | None = None,
+    industrial_rag_service: IndustrialRagService | None = None,
+    industrial_rag_principal_id: str = "local-public",
+    industrial_rag_release_id: str | None = None,
 ) -> dict[str, object]:
-    """Run one declared policy ablation against a baseline on fixed cases."""
+    """Run one declared evaluator intervention against a baseline on fixed cases."""
     if isinstance(module_id, bool) or not isinstance(module_id, int) or not 1 <= module_id <= 20:
         raise ValueError("module_id must identify one of the fixed 20 modules")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", run_id):
@@ -2336,13 +2406,6 @@ def run_paired_module_ablation(
         raise ValueError("module ablation requires the fixed 2-case selection and 2-case frozen splits")
     if budget.unresolved_call:
         raise RuntimeError("the shared call ledger has an unknown outbound outcome; resolve it before evaluating")
-
-    baseline_candidate = validate_candidate(candidate)
-    matrix = build_module_ablation_plan(baseline_candidate)
-    module_row = next(row for row in matrix if row["module_id"] == module_id)
-    if module_row["status"] != "planned_not_executed":
-        raise ValueError(f"module {module_id} has no safe ablation for this active candidate: {module_row['reason']}")
-    ablated_candidate = validate_candidate(module_row["candidate"])
     paired_cases = [*cases["selection"], *cases["frozen_evaluation"]]
     planned_provider_call_upper_bound = 2 * len(paired_cases) * MAX_RESEARCH_CALLS_PER_CASE
     if budget.remaining_provider_calls < planned_provider_call_upper_bound:
@@ -2350,6 +2413,34 @@ def run_paired_module_ablation(
             f"paired module ablation requires a reserved provider-call ceiling of {planned_provider_call_upper_bound}; "
             f"only {budget.remaining_provider_calls} remain"
         )
+    if industrial_rag_service is None:
+        raise ValueError("paired module ablation requires a pinned local industrial RAG service")
+
+    rag_runtime_identity = _pin_industrial_rag_runtime(
+        industrial_rag_service,
+        principal_id=industrial_rag_principal_id,
+        release_id=industrial_rag_release_id,
+    )
+    pinned_release_id = str(rag_runtime_identity["release_id"])
+    if module_id == 10:
+        candidate_policy = parse_research_policy(validate_candidate(candidate)["research_policy_json"])
+        if "dense" not in candidate_policy["channels"]:
+            raise ValueError("dense retrieval ablation requires dense in the active baseline channel set")
+        if "dense" not in industrial_rag_service.channel_adapters:
+            raise ValueError("dense retrieval ablation requires a configured dense adapter")
+    if module_id == 12:
+        if industrial_rag_service.reranker is None:
+            raise ValueError("reranker ablation requires a configured, versioned reranker")
+        reranker_identity = rag_runtime_identity.get("runtime_components", {}).get("reranker")
+        if not isinstance(reranker_identity, Mapping):
+            raise ValueError("reranker ablation requires a versioned reranker cache_identity")
+
+    baseline_candidate = validate_candidate(candidate)
+    matrix = build_module_ablation_plan(baseline_candidate)
+    module_row = next(row for row in matrix if row["module_id"] == module_id)
+    if module_row["status"] != "planned_not_executed":
+        raise ValueError(f"module {module_id} has no safe ablation for this active candidate: {module_row['reason']}")
+    ablated_candidate = validate_candidate(module_row["candidate"])
 
     run_dir = Path(output_root) / "module_ablations" / run_id
     if run_dir.exists():
@@ -2379,6 +2470,7 @@ def run_paired_module_ablation(
         "baseline_candidate_sha256": baseline_sha256,
         "ablated_candidate_sha256": ablated_sha256,
         "config_sha256": _stable_hash(config),
+        "industrial_rag_runtime": rag_runtime_identity,
         "case_inputs_sha256": case_inputs_sha256,
         "procedural_memory_sha256": _stable_hash(procedural_memory) if procedural_memory is not None else None,
         "model": client.model,
@@ -2399,11 +2491,13 @@ def run_paired_module_ablation(
         "baseline_candidate_sha256": baseline_sha256,
         "ablated_candidate_sha256": ablated_sha256,
         "baseline_role": "held_fixed_for_each_same_case_pair",
+        "industrial_rag_runtime": rag_runtime_identity,
         "splits": {
             name: [case.as_of.isoformat() for case in cases[name]]
             for name in ("selection", "frozen_evaluation")
         },
         "changed_policy_fields": module_row["changed_policy_fields"],
+        "runtime_intervention": module_row.get("runtime_intervention"),
         "planned_provider_call_upper_bound": planned_provider_call_upper_bound,
     }
     case_manifest_sha256 = _stable_hash(case_manifest)
@@ -2452,6 +2546,11 @@ def run_paired_module_ablation(
                     candidate_version_id=f"module-{module_id}-{label}",
                     procedural_memory=procedural_memory,
                     trace_sink=trace_sink,
+                    industrial_rag_service=industrial_rag_service,
+                    industrial_rag_principal_id=industrial_rag_principal_id,
+                    industrial_rag_release_id=pinned_release_id,
+                    research_ablation_id=module_id if label == "ablated" else None,
+                    industrial_rag_runtime_identity=rag_runtime_identity,
                 )
             except Exception as exc:
                 evaluations.append({
@@ -2459,6 +2558,7 @@ def run_paired_module_ablation(
                     "label": label,
                     "as_of": case.as_of.isoformat(),
                     "candidate_sha256": candidate_sha256,
+                    "research_ablation_id": module_id if label == "ablated" else None,
                     "status": "failed",
                     "error_type": type(exc).__name__,
                     "actions": trace_sink,
@@ -2470,6 +2570,7 @@ def run_paired_module_ablation(
                 "label": label,
                 "as_of": case.as_of.isoformat(),
                 "candidate_sha256": candidate_sha256,
+                "research_ablation_id": module_id if label == "ablated" else None,
                 "score": score,
                 "quality_metrics": info["quality_metrics"],
                 "task_model_usage": info["task_model_usage"],
@@ -2499,6 +2600,8 @@ def run_paired_module_ablation(
         "baseline_candidate_sha256": baseline_sha256,
         "ablated_candidate_sha256": ablated_sha256,
         "changed_policy_fields": module_row["changed_policy_fields"],
+        "runtime_intervention": module_row.get("runtime_intervention"),
+        "industrial_rag_runtime": rag_runtime_identity,
         "paired_evaluation": paired,
         "failure_attribution_scope": "observed per-metric and cost deltas on fixed cases; not causal proof of module effect",
         "provider_call_count": sum(row.get("status") in {"started", "completed"} for row in budget.calls[call_start:]),
