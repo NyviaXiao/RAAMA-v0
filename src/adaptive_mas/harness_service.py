@@ -208,14 +208,42 @@ class HarnessServiceStore:
             connection.commit()
 
     def claim_next(self, worker_id: str, *, lease_seconds: float = 900.0) -> dict[str, object] | None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
         now_epoch = time.time()
         now = _now()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM service_jobs WHERE status='queued' OR (status='running' AND lease_until < ?) "
-                "ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, created_at LIMIT 1",
+            expired = connection.execute(
+                "SELECT task_id,attempt_count,worker_id,stage FROM service_jobs "
+                "WHERE status='running' AND lease_until IS NOT NULL AND lease_until < ?",
                 (now_epoch,),
+            ).fetchall()
+            for stale in expired:
+                task_id = str(stale["task_id"])
+                attempt = int(stale["attempt_count"])
+                error = {
+                    "reason": "worker lease expired before a durable completion record",
+                    "previous_worker_id": stale["worker_id"],
+                    "previous_stage": str(stale["stage"]),
+                    "attempt_count": attempt,
+                }
+                connection.execute(
+                    "UPDATE service_jobs SET status='unknown',stage='unknown',error_json=?,worker_id=NULL,lease_until=NULL,updated_at=? "
+                    "WHERE task_id=? AND status='running' AND lease_until < ?",
+                    (_json(error), now, task_id, now_epoch),
+                )
+                self._insert_event(
+                    connection, task_id, f"job_unknown:expired_lease:{attempt}", "unknown",
+                    span_record(
+                        trace_id=task_id,
+                        name="job.unknown",
+                        attributes=error,
+                        status="unknown",
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM service_jobs WHERE status='queued' ORDER BY created_at LIMIT 1",
             ).fetchone()
             if row is None:
                 connection.execute(
@@ -227,7 +255,6 @@ class HarnessServiceStore:
                 return None
             task_id = str(row["task_id"])
             attempt = int(row["attempt_count"]) + 1
-            previous_worker = row["worker_id"]
             lease_until = now_epoch + lease_seconds
             connection.execute(
                 "UPDATE service_jobs SET status='running',stage='preflight',attempt_count=?,worker_id=?,lease_until=?,updated_at=? WHERE task_id=?",
@@ -241,7 +268,7 @@ class HarnessServiceStore:
             span = span_record(
                 trace_id=task_id,
                 name="job.claimed",
-                attributes={"attempt": attempt, "recovered_expired_lease": previous_worker is not None},
+                attributes={"attempt": attempt},
                 status="ok",
             )
             self._insert_event(connection, task_id, f"job_claimed:{attempt}", "preflight", span)
@@ -339,6 +366,63 @@ class HarnessServiceStore:
                 (time.time(), worker_id),
             )
             connection.commit()
+
+    def reconcile_unknown_job(
+        self,
+        task_id: str,
+        *,
+        expected_attempt: int,
+        operator_id: str,
+        reason: str,
+    ) -> dict[str, object]:
+        """Requeue an expired worker job only after an operator confirms no effect was applied."""
+        if isinstance(expected_attempt, bool) or expected_attempt < 1:
+            raise ValueError("expected_attempt must be positive")
+        if not operator_id.strip() or not reason.strip():
+            raise ValueError("operator identity and reconciliation reason are required")
+        now = _now()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status,attempt_count,error_json FROM service_jobs WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] != "unknown":
+                raise ServiceConflict("only an unknown job can be reconciled")
+            if int(row["attempt_count"]) != expected_attempt:
+                raise ServiceConflict("job attempt changed; refresh the task before reconciling")
+            prior_error = json.loads(row["error_json"]) if row["error_json"] else {}
+            connection.execute(
+                "UPDATE service_jobs SET status='queued',stage='reconciled_retry',error_json=NULL,worker_id=NULL,lease_until=NULL,updated_at=? "
+                "WHERE task_id=? AND status='unknown' AND attempt_count=?",
+                (now, task_id, expected_attempt),
+            )
+            event = span_record(
+                trace_id=task_id,
+                name="job.reconciled",
+                attributes={
+                    "action": "retry_after_confirmed_no_external_effect",
+                    "operator_id": operator_id,
+                    "reason": reason.strip()[:1000],
+                    "reconciled_attempt": expected_attempt,
+                    "prior_error": prior_error,
+                },
+                status="ok",
+            )
+            self._insert_event(
+                connection, task_id,
+                f"job_reconciled_no_effect:{expected_attempt}", "reconciled_retry", event,
+            )
+            connection.commit()
+        return {
+            "task_id": task_id,
+            "status": "queued",
+            "stage": "reconciled_retry",
+            "reconciled_attempt": expected_attempt,
+            "operator_id": operator_id,
+        }
 
     def get_job(self, task_id: str) -> dict[str, object] | None:
         with closing(self._connect()) as connection:
@@ -852,6 +936,9 @@ class HarnessRequestHandler(BaseHTTPRequestHandler):
                 "provider_execution": "disabled; cached research replay only",
                 "workers": workers,
                 "worker_online": any(worker["state"] in {"idle", "busy"} for worker in workers),
+                "workflow_reconciliation_enabled": bool(
+                    context.get("workflow_operator_id") and context.get("workflow_operator_token")
+                ),
                 "timestamp": _now(),
             })
             return
@@ -919,6 +1006,29 @@ class HarnessRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("task_id is not a safe identifier")
                 job = context["store"].submit(task_id, idempotency_key, request)  # type: ignore[union-attr]
                 self._send_json(202, self._job_payload(job))
+                return
+            if path.startswith("/api/tasks/") and path.endswith("/reconcile"):
+                task_id = path.removeprefix("/api/tasks/").removesuffix("/reconcile").strip("/")
+                if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", task_id):
+                    raise ValueError("task_id is not a safe identifier")
+                if set(payload) != {"action", "expected_attempt", "reason"}:
+                    raise ValueError("reconciliation requires action, expected_attempt, and reason")
+                if payload["action"] != "retry_after_confirmed_no_external_effect":
+                    raise ValueError("unsupported reconciliation action")
+                expected_attempt = payload["expected_attempt"]
+                if isinstance(expected_attempt, bool) or not isinstance(expected_attempt, int):
+                    raise ValueError("expected_attempt must be an integer")
+                reason = payload["reason"]
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ValueError("reason must be a nonempty string")
+                operator_id = self._require_workflow_operator(context)
+                result = context["store"].reconcile_unknown_job(  # type: ignore[union-attr]
+                    task_id,
+                    expected_attempt=expected_attempt,
+                    operator_id=operator_id,
+                    reason=reason,
+                )
+                self._send_json(200, result)
                 return
             if path == "/api/execution-ledgers":
                 ledger_id = str(payload.get("ledger_id", "")).strip()
@@ -1017,6 +1127,18 @@ class HarnessRequestHandler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(token, expected):
             raise PermissionError("release manager authorization failed")
 
+    def _require_workflow_operator(self, context: Mapping[str, object]) -> str:
+        expected = context.get("workflow_operator_token")
+        operator_id = context.get("workflow_operator_id")
+        if not isinstance(expected, str) or not expected or not isinstance(operator_id, str) or not operator_id:
+            raise PermissionError("workflow reconciliation is not enabled")
+        supplied = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        token = supplied[len(prefix):] if supplied.startswith(prefix) else ""
+        if not hmac.compare_digest(token, expected):
+            raise PermissionError("workflow operator authorization failed")
+        return operator_id
+
     def log_message(self, format: str, *args: object) -> None:
         # Keep the local console useful without reflecting query contents or account data.
         print(f"[raama-api] {self.client_address[0]} {format % args}")
@@ -1040,6 +1162,8 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
     release_manager_token: str | None = None,
+    workflow_operator_id: str | None = None,
+    workflow_operator_token: str | None = None,
 ) -> None:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("the API server must bind to a loopback interface")
@@ -1051,6 +1175,8 @@ def serve(
         "release_store": release_store,
         "project_root": Path(project_root).resolve(),
         "release_manager_token": release_manager_token,
+        "workflow_operator_id": workflow_operator_id,
+        "workflow_operator_token": workflow_operator_token,
     }
     print(f"RAAMA 本地工作台已启动：http://{host}:{port}")
     print("离线研究复用已启用；provider 请求与 broker 执行均关闭。")
@@ -1106,6 +1232,8 @@ def main() -> None:
             host=args.host,
             port=args.port,
             release_manager_token=os.environ.get("RAAMA_RELEASE_MANAGER_TOKEN"),
+            workflow_operator_id=os.environ.get("RAAMA_WORKFLOW_OPERATOR_ID"),
+            workflow_operator_token=os.environ.get("RAAMA_WORKFLOW_OPERATOR_TOKEN"),
         )
     else:
         run_worker(

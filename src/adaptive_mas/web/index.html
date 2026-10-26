@@ -85,6 +85,14 @@
 
       <section class="section" id="tasks">
         <div class="section-head"><div><h2>任务与证据</h2><p>任务进度、来源证据、挑战记录、组合风险与成本都来自本地后端。</p></div><span id="taskCount" class="tag">0 个任务</span></div>
+        <div class="card" style="margin-bottom:12px">
+          <div class="section-head"><div><h3>中断任务核对</h3><p>租约过期的任务会先隔离；确认没有副作用后才可重新排队。</p></div></div>
+          <div class="form-grid">
+            <div class="field"><label for="workflowOperatorToken">工作流操作员令牌</label><input id="workflowOperatorToken" type="password" autocomplete="off" placeholder="仅在本机内存中使用，不会保存"></div>
+            <div class="field"><label for="workflowReconcileReason">核对依据</label><input id="workflowReconcileReason" type="text" maxlength="1000" placeholder="说明如何确认上次尝试未产生副作用"></div>
+          </div>
+          <p class="help">服务器需配置 RAAMA_WORKFLOW_OPERATOR_ID 与 RAAMA_WORKFLOW_OPERATOR_TOKEN。未知任务不会自动重跑；只有在核对上次未生效后，才使用详情中的“确认未生效并重排”。</p>
+        </div>
         <div class="grid two-col">
           <div class="card"><div id="taskList" class="task-list"><div class="empty">还没有任务。提交一项离线复用决策后，这里会显示真实任务状态。</div></div></div>
           <div class="card"><div id="taskDetail"><div class="empty">选择一个任务，查看来源、风险、费用、版本和恢复轨迹。</div></div></div>
@@ -209,7 +217,18 @@
             <div class="detail-block"><h3>质询与改进动作</h3>${Array.isArray(challenges)&&challenges.length?challenges.slice(0,6).map(x=>`<p>${escapeHtml(x.status||'动作')} · ${escapeHtml(x.target_claim||x.target_role||x.action||'')}</p>`).join(''):'<p class="muted">此任务没有新增质询动作。</p>'}</div>
             <div class="detail-block"><h3>版本与运行标识</h3>${Object.entries(versions).slice(0,8).map(([k,v])=>`<p>${escapeHtml(k)}：${escapeHtml(v)}</p>`).join('')||'<p class="muted">版本信息尚未产生。</p>'}</div>
             <div class="detail-block"><h3>恢复与观测事件</h3><div class="line-list">${events.slice(-8).reverse().map(e=>`<div class="line-item">${escapeHtml(e.stage)}<small>${escapeHtml(e.created_at)} · ${escapeHtml(e.source)}</small></div>`).join('')||'<p class="muted">等待 worker 领取任务。</p>'}</div></div>
-          </div><details style="margin-top:10px"><summary>查看完整本地决策工件</summary><pre style="margin-top:9px">${escapeHtml(JSON.stringify(result,null,2))}</pre></details>`;
+           </div><details style="margin-top:10px"><summary>查看完整本地决策工件</summary><pre style="margin-top:9px">${escapeHtml(JSON.stringify(result,null,2))}</pre></details>`;
+        if(d.status==='unknown'){
+          const panel=document.createElement('div');panel.className='notice';panel.style.marginTop='12px';
+          panel.innerHTML=`<div><strong>任务结果待核对</strong><p>尝试 ${escapeHtml(d.attempt_count)} 的 worker 租约已过期，系统没有自动重放。${d.error?.reason?`<br>${escapeHtml(d.error.reason)}`:''}</p><button class="danger small" type="button" id="reconcileUnknownTask">确认未生效并重排</button></div>`;
+          $('taskDetail').append(panel);
+          $('reconcileUnknownTask').addEventListener('click',async()=>{
+            const token=$('workflowOperatorToken').value.trim();const reason=$('workflowReconcileReason').value.trim();
+            if(!token||!reason){showToast('请填写操作员令牌和核对依据。');return;}
+            try{await request(`/api/tasks/${encodeURIComponent(taskId)}/reconcile`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({action:'retry_after_confirmed_no_external_effect',expected_attempt:Number(d.attempt_count),reason})});showToast('任务已记入核对审计并重新排队。');await refreshTasks();}
+            catch(e){showToast(`任务未重排：${e.message}`);}
+          });
+        }
       }catch(e){if(!silent)showToast(`读取任务失败：${e.message}`);}}
     async function refreshRelease(){
       try{const data=await request('/api/releases');const active=data.active||{};$('releaseStat').textContent=active.status==='seed'?'Seed（默认）':active.candidate_version_id||active.status||'—';$('releaseFoot').textContent=active.status==='seed'?'没有完整验收包；生产继续使用 seed':`版本 ${active.release_id||''}`;$('activeRelease').textContent=active.status==='seed'?'生产指针：Seed':`生产指针：${active.candidate_version_id||active.release_id}`;$('activeReleaseMeta').textContent=JSON.stringify(active.evidence_status||{status:active.status||'unknown'});

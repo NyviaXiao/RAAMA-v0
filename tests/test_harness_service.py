@@ -121,6 +121,8 @@ def _server(tmp_path):
         "release_store": release_store,
         "project_root": tmp_path,
         "release_manager_token": "local-test-token",
+        "workflow_operator_id": "local-supervisor",
+        "workflow_operator_token": "workflow-test-token",
     }
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -289,6 +291,87 @@ def test_sqlite_idempotency_concurrent_claims_and_worker_recovery(tmp_path):
         claims = list(pool.map(store.claim_next, ("worker-a", "worker-b")))
     claimed_ids = [job["task_id"] for job in claims if job is not None]
     assert len(claimed_ids) == len(set(claimed_ids)) == 2
+
+
+def test_expired_worker_lease_is_quarantined_until_audited_reconciliation(tmp_path):
+    root = _project(tmp_path)
+    store = HarnessServiceStore(tmp_path / "unknown-worker.sqlite3")
+    request = validate_decision_job(_request(root), root)
+    store.submit("uncertain-job", "uncertain-idempotency", request)
+    claimed = store.claim_next("worker-before-crash", lease_seconds=60)
+    assert claimed is not None and claimed["attempt_count"] == 1
+
+    connection = store._connect()
+    try:
+        connection.execute("UPDATE service_jobs SET lease_until=0 WHERE task_id=?", ("uncertain-job",))
+    finally:
+        connection.close()
+
+    assert store.claim_next("worker-after-crash") is None
+    unknown = store.get_job("uncertain-job")
+    assert unknown["status"] == "unknown"
+    assert unknown["error"]["previous_worker_id"] == "worker-before-crash"
+    assert store.events("uncertain-job")[-1]["stage"] == "unknown"
+
+    with pytest.raises(ServiceConflict, match="attempt changed"):
+        store.reconcile_unknown_job(
+            "uncertain-job", expected_attempt=2, operator_id="local-supervisor", reason="checked"
+        )
+    reconciled = store.reconcile_unknown_job(
+        "uncertain-job",
+        expected_attempt=1,
+        operator_id="local-supervisor",
+        reason="Confirmed the local replay had not started.",
+    )
+    assert reconciled["status"] == "queued"
+    event = store.events("uncertain-job")[-1]
+    assert event["stage"] == "reconciled_retry"
+    assert event["payload"]["attributes"]["operator_id"] == "local-supervisor"
+    assert event["payload"]["attributes"]["action"] == "retry_after_confirmed_no_external_effect"
+    retried = store.claim_next("worker-after-crash")
+    assert retried is not None and retried["attempt_count"] == 2
+
+
+def test_unknown_job_reconciliation_requires_server_operator_and_rejects_caller_identity(tmp_path):
+    server, thread = _server(tmp_path)
+    try:
+        store = server.context["store"]
+        store.submit("api-unknown", "api-unknown-idempotency", {"mode": "decision_reuse"})
+        assert store.claim_next("worker-crashed", lease_seconds=60) is not None
+        connection = store._connect()
+        try:
+            connection.execute("UPDATE service_jobs SET lease_until=0 WHERE task_id=?", ("api-unknown",))
+        finally:
+            connection.close()
+        assert store.claim_next("lease-checker") is None
+
+        body = {
+            "action": "retry_after_confirmed_no_external_effect",
+            "expected_attempt": 1,
+            "reason": "operator checked local task artifacts",
+        }
+        status, error = _http(server, "POST", "/api/tasks/api-unknown/reconcile", body)
+        assert status == 403 and "authorization" in error["error"]
+        status, error = _http(
+            server, "POST", "/api/tasks/api-unknown/reconcile",
+            body | {"operator_id": "forged"}, token="workflow-test-token",
+        )
+        assert status == 400 and "reconciliation requires" in error["error"]
+        status, error = _http(
+            server, "POST", "/api/tasks/api-unknown/reconcile",
+            body | {"reason": None}, token="workflow-test-token",
+        )
+        assert status == 400 and "reason must be" in error["error"]
+        status, result = _http(
+            server, "POST", "/api/tasks/api-unknown/reconcile", body, token="workflow-test-token"
+        )
+        assert status == 200 and result["status"] == "queued"
+        event = store.events("api-unknown")[-1]
+        assert event["payload"]["attributes"]["operator_id"] == "local-supervisor"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_execution_ledger_api_persists_immutable_simulation(tmp_path):
