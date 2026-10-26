@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -1220,6 +1220,7 @@ def _fundamental_handlers(
     industrial_rag_release_id: str | None = None,
     research_policy_json: str | None = None,
     research_ablation_id: int | None = None,
+    retrieval_trace_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object], dict[str, dict[str, object]]]:
     snapshot = public_snapshot or {}
     research_policy = parse_research_policy(research_policy_json)
@@ -1692,6 +1693,7 @@ def _fundamental_handlers(
                     ),
                     row_group_chunking=research_ablation_id != 3,
                     include_continuation_context=research_ablation_id != 2,
+                    trace_callback=retrieval_trace_callback,
                 )
                 channel_status.append({
                     "symbol": symbol,

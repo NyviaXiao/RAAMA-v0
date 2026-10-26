@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
+import numpy as np
 
 torch = pytest.importorskip("torch")
 
 from adaptive_mas.industrial_rag import qwen_models
-from adaptive_mas.industrial_rag.qwen_models import Qwen3EmbeddingRuntime
+from adaptive_mas.industrial_rag.models import QueryPlan
+from adaptive_mas.industrial_rag.qwen_models import LocalQwenDenseAdapter, Qwen3EmbeddingRuntime
 
 
 def test_last_token_pool_handles_mixed_left_padding_and_matches_unpadded_rows() -> None:
@@ -58,3 +61,115 @@ def test_qwen_asset_manifest_rejects_modified_weights(tmp_path) -> None:
     weights.write_bytes(b"replaced weights")
     with pytest.raises(RuntimeError, match="SHA-256 integrity check"):
         runtime._load()
+
+
+class _FakeEmbedding:
+    dimension = 3
+
+    def __init__(self, *, instruction_sha256: str = "instruction-a") -> None:
+        self.cache_identity = {
+            "model": "fake-embedding",
+            "revision": "revision-a",
+            "asset_manifest_sha256": "manifest-a",
+            "instruction_sha256": instruction_sha256,
+            "dimension": self.dimension,
+        }
+        self.calls: list[tuple[tuple[str, ...], bool]] = []
+
+    def embed(self, texts, *, query=False, control=None):
+        self.calls.append((tuple(texts), query))
+        vectors = []
+        for text in texts:
+            vectors.append([1.0, 0.0, 0.0] if query or text == "first block" else [0.0, 1.0, 0.0])
+        return np.asarray(vectors, dtype=np.float32)
+
+
+class _FakeBlockStore:
+    def __init__(self) -> None:
+        self.rows = [
+            {
+                "block_id": "block-1", "version_id": "version-1", "source_id": "source-1",
+                "content_sha256": "a" * 64, "text": "first block", "security_code": "600036",
+                "document_id": "document-1", "page_number": 1, "time_basis": "strict_forward",
+                "payload_json": "{}",
+            },
+            {
+                "block_id": "block-2", "version_id": "version-1", "source_id": "source-1",
+                "content_sha256": "a" * 64, "text": "second block", "security_code": "600036",
+                "document_id": "document-1", "page_number": 2, "time_basis": "strict_forward",
+                "payload_json": "{}",
+            },
+        ]
+
+    def read_blocks(self, _version_ids):
+        return list(self.rows)
+
+
+def _dense_plan() -> QueryPlan:
+    return QueryPlan(
+        plan_id="dense-plan-1",
+        query="revenue 2024",
+        security_code="600036",
+        as_of=datetime(2026, 10, 25, tzinfo=timezone.utc),
+        principal_id="local-public",
+        task_type="fact",
+        report_periods=("2024",),
+        channels=("dense",),
+        top_k=2,
+    )
+
+
+def test_dense_vectors_are_reused_only_for_verified_source_and_model_identity(tmp_path) -> None:
+    store = _FakeBlockStore()
+    cache_path = tmp_path / "dense-vectors.sqlite3"
+    first_embedding = _FakeEmbedding()
+    first_events: list[dict[str, object]] = []
+    first = LocalQwenDenseAdapter(store, first_embedding, cache_path=cache_path)
+    first_results = first.search_with_trace(_dense_plan(), ["version-1"], None, first_events.append)
+    assert len(first_results) == 2
+    assert first_embedding.calls[0][1] is True
+    assert first_embedding.calls[1][1] is False
+    assert first_events[-1]["stage"] == "dense_search_completed"
+    assert len(first_events[-1]["ranked_candidates"]) == 2
+
+    second_embedding = _FakeEmbedding()
+    second_events: list[dict[str, object]] = []
+    second = LocalQwenDenseAdapter(store, second_embedding, cache_path=cache_path)
+    second_results = second.search_with_trace(_dense_plan(), ["version-1"], None, second_events.append)
+    assert [item.evidence_id for item in second_results] == [item.evidence_id for item in first_results]
+    assert second_embedding.calls == [(('revenue 2024',), True)]
+    assert second_events[-1]["cache"]["persistent_hits"] == 2
+
+    changed_model = _FakeEmbedding(instruction_sha256="instruction-b")
+    changed = LocalQwenDenseAdapter(store, changed_model, cache_path=cache_path)
+    changed.search_with_trace(_dense_plan(), ["version-1"], None, lambda _event: None)
+    assert changed_model.calls[1][1] is False
+
+    store.rows[0]["content_sha256"] = "b" * 64
+    changed_source_embedding = _FakeEmbedding()
+    changed_source_events: list[dict[str, object]] = []
+    LocalQwenDenseAdapter(store, changed_source_embedding, cache_path=cache_path).search_with_trace(
+        _dense_plan(), ["version-1"], None, changed_source_events.append,
+    )
+    assert any(not query for _texts, query in changed_source_embedding.calls)
+    assert changed_source_events[-1]["cache"]["persistent_hits"] == 1
+
+
+def test_dense_vector_cache_detects_blob_tampering_and_recomputes(tmp_path) -> None:
+    store = _FakeBlockStore()
+    cache_path = tmp_path / "dense-vectors.sqlite3"
+    first = LocalQwenDenseAdapter(store, _FakeEmbedding(), cache_path=cache_path)
+    first.search_with_trace(_dense_plan(), ["version-1"], None, lambda _event: None)
+
+    connection = qwen_models.sqlite3.connect(cache_path)
+    connection.execute("UPDATE dense_vectors SET vector_blob=? WHERE block_id='block-1'", (b"tampered",))
+    connection.commit()
+    connection.close()
+
+    embedding = _FakeEmbedding()
+    events: list[dict[str, object]] = []
+    LocalQwenDenseAdapter(store, embedding, cache_path=cache_path).search_with_trace(
+        _dense_plan(), ["version-1"], None, events.append,
+    )
+    assert any(not query for _texts, query in embedding.calls)
+    assert events[-1]["cache"]["persistent_hits"] == 1

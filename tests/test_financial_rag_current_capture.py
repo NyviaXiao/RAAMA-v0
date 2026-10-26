@@ -221,6 +221,51 @@ def test_per_case_progress_requires_matching_identity_and_an_intact_tool_trace(t
         capture._existing_progress_record(path, {**identity_fields, "runtime_model_identity_sha256": "other-runtime"})
 
 
+def test_retrieval_trace_journal_is_append_only_identity_bound_and_integrity_checked(tmp_path) -> None:
+    path = tmp_path / "retrieval_trace.jsonl"
+    journal = capture.RetrievalTraceJournal(
+        path,
+        run_identity_sha256="run-hash",
+        runtime_model_identity_sha256="runtime-hash",
+    )
+    first = journal.append(
+        {"case_id": "case-1", "tool_event_index": 0},
+        {"stage": "channel_completed", "candidates": [{"block_id": "block-1", "rank": 1}]},
+    )
+    second = journal.append(
+        {"case_id": "case-1", "tool_event_index": 0},
+        {"stage": "search_failed", "error": {"type": "TimeoutError", "message": "stopped"}},
+    )
+    assert first["sequence"] == 1
+    assert second["sequence"] == 2
+
+    resumed = capture.RetrievalTraceJournal(
+        path,
+        run_identity_sha256="run-hash",
+        runtime_model_identity_sha256="runtime-hash",
+    )
+    assert resumed.sequence == 2
+    assert resumed.previous_event_sha256 == second["event_sha256"]
+    with pytest.raises(capture.RunIdentityError, match="model identity"):
+        capture.RetrievalTraceJournal(
+            path,
+            run_identity_sha256="run-hash",
+            runtime_model_identity_sha256="other-runtime",
+        )
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    tampered = json.loads(lines[1])
+    tampered["event"]["candidates"][0]["rank"] = 3
+    lines[1] = json.dumps(tampered, ensure_ascii=False)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(capture.RunIdentityError, match="event chain"):
+        capture.RetrievalTraceJournal(
+            path,
+            run_identity_sha256="run-hash",
+            runtime_model_identity_sha256="runtime-hash",
+        )
+
+
 def test_progress_header_rejects_legacy_and_cross_mode_progress_before_runtime_setup() -> None:
     with pytest.raises(ValueError, match="legacy schema"):
         capture._validate_query_progress_header(

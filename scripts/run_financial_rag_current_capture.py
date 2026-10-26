@@ -141,6 +141,82 @@ def _canonical_hash(value: object) -> str:
     return _sha256(serialized.encode("utf-8"))
 
 
+class RetrievalTraceJournal:
+    schema_version = "raama.financial-rag.retrieval-trace.v1"
+
+    def __init__(self, path: Path, *, run_identity_sha256: str, runtime_model_identity_sha256: str) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.run_identity_sha256 = run_identity_sha256
+        self.runtime_model_identity_sha256 = runtime_model_identity_sha256
+        self.sequence = 0
+        self.previous_event_sha256 = "0" * 64
+        if self.path.exists():
+            self._read_and_validate()
+        else:
+            header: dict[str, object] = {
+                "record_type": "header",
+                "schema_version": self.schema_version,
+                "run_identity_sha256": run_identity_sha256,
+                "runtime_model_identity_sha256": runtime_model_identity_sha256,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            header["header_sha256"] = _canonical_hash(header)
+            self._append_line(header)
+
+    def _append_line(self, record: Mapping[str, object]) -> None:
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8") + b"\n"
+        with self.path.open("ab") as output:
+            output.write(line)
+            output.flush()
+            os.fsync(output.fileno())
+
+    def _read_and_validate(self) -> None:
+        payload = self.path.read_bytes()
+        lines = payload.splitlines(keepends=True)
+        if not lines or any(not line.endswith(b"\n") for line in lines):
+            raise RunIdentityError("retrieval trace has an incomplete trailing record")
+        header = json.loads(lines[0])
+        header_body = {key: value for key, value in header.items() if key != "header_sha256"}
+        if (
+            header.get("record_type") != "header"
+            or header.get("schema_version") != self.schema_version
+            or header.get("run_identity_sha256") != self.run_identity_sha256
+            or header.get("runtime_model_identity_sha256") != self.runtime_model_identity_sha256
+            or header.get("header_sha256") != _canonical_hash(header_body)
+        ):
+            raise RunIdentityError("retrieval trace header differs from the current run or model identity")
+        previous = "0" * 64
+        for expected_sequence, raw_line in enumerate(lines[1:], start=1):
+            record = json.loads(raw_line)
+            body = {key: value for key, value in record.items() if key != "event_sha256"}
+            if (
+                record.get("record_type") != "event"
+                or record.get("sequence") != expected_sequence
+                or record.get("previous_event_sha256") != previous
+                or record.get("event_sha256") != _canonical_hash(body)
+            ):
+                raise RunIdentityError("retrieval trace event chain failed integrity validation")
+            previous = str(record["event_sha256"])
+        self.sequence = len(lines) - 1
+        self.previous_event_sha256 = previous
+
+    def append(self, context: Mapping[str, object], event: Mapping[str, object]) -> dict[str, object]:
+        body: dict[str, object] = {
+            "record_type": "event",
+            "sequence": self.sequence + 1,
+            "previous_event_sha256": self.previous_event_sha256,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "context": dict(context),
+            "event": dict(event),
+        }
+        record = {**body, "event_sha256": _canonical_hash(body)}
+        self._append_line(record)
+        self.sequence = int(record["sequence"])
+        self.previous_event_sha256 = str(record["event_sha256"])
+        return record
+
+
 def _case_calculation_reasons(spec: Mapping[str, Any]) -> list[str]:
     reasons = []
     if spec.get("currency") != "CNY":
@@ -1110,26 +1186,11 @@ def _run_agent_chain(
     identity_fields: Mapping[str, object],
     runtime_model_identity: Mapping[str, object],
     identity_check: Callable[[], None],
+    retrieval_trace_journal: RetrievalTraceJournal,
 ) -> dict[str, Any]:
     query = QUERY_TEXT
     symbol = str(case["security_code"])
     visible_ids: set[str] = set()
-    tools, handlers, catalog = _fundamental_handlers(
-        None,
-        decision_time,
-        industrial_rag_service=service,
-        industrial_rag_principal_id=CAPTURE_PRINCIPAL_ID,
-        industrial_rag_release_id=release_id,
-        research_policy_json=_policy_json(use_qwen=use_qwen),
-        research_ablation_id=research_ablation_id,
-    )
-    handlers["submit_report"] = lambda arguments: _accept_report(
-        arguments,
-        catalog,
-        "fundamental",
-        visible_evidence_ids=visible_ids,
-        decision_time=decision_time,
-    )
     saved_progress = _existing_progress_record(progress_path, identity_fields)
     if saved_progress is not None:
         saved_attempts = saved_progress.get("attempts")
@@ -1150,6 +1211,7 @@ def _run_agent_chain(
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "tool_events": [],
+        "retrieval_trace_records": [],
     }
     attempts.append(attempt)
     progress_record = {
@@ -1168,6 +1230,45 @@ def _run_agent_chain(
 
     started = time.perf_counter()
     persist_progress()
+
+    def retrieval_trace_callback(trace_event: dict[str, object]) -> None:
+        tool_events = attempt["tool_events"]
+        active_index = len(tool_events) - 1
+        active_tool = tool_events[active_index] if active_index >= 0 else None
+        if not isinstance(active_tool, dict):
+            raise RuntimeError("retrieval trace event has no active scripted tool call")
+        record = retrieval_trace_journal.append(
+            {
+                **identity_fields,
+                "attempt_number": attempt["attempt_number"],
+                "tool_event_index": active_index,
+                "tool": active_tool.get("tool"),
+            },
+            trace_event,
+        )
+        attempt["retrieval_trace_records"].append({
+            "sequence": record["sequence"],
+            "event_sha256": record["event_sha256"],
+        })
+        persist_progress()
+
+    tools, handlers, catalog = _fundamental_handlers(
+        None,
+        decision_time,
+        industrial_rag_service=service,
+        industrial_rag_principal_id=CAPTURE_PRINCIPAL_ID,
+        industrial_rag_release_id=release_id,
+        research_policy_json=_policy_json(use_qwen=use_qwen),
+        research_ablation_id=research_ablation_id,
+        retrieval_trace_callback=retrieval_trace_callback,
+    )
+    handlers["submit_report"] = lambda arguments: _accept_report(
+        arguments,
+        catalog,
+        "fundamental",
+        visible_evidence_ids=visible_ids,
+        decision_time=decision_time,
+    )
     for name, handler in tuple(handlers.items()):
         def traced_handler(arguments: dict[str, object], *, tool_name=name, tool_handler=handler):
             identity_check()
@@ -1327,6 +1428,7 @@ def _run_rag_intervention(
     research_ablation_id: int,
     report_period: str,
     use_qwen: bool,
+    retrieval_trace_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, Any]:
     _tools, handlers, _catalog = _fundamental_handlers(
         None,
@@ -1336,6 +1438,7 @@ def _run_rag_intervention(
         industrial_rag_release_id=release_id,
         research_policy_json=_policy_json(use_qwen=use_qwen),
         research_ablation_id=research_ablation_id,
+        retrieval_trace_callback=retrieval_trace_callback,
     )
     return handlers["search_indexed_financial_documents"]({
         "question": QUERY_TEXT,
@@ -1359,6 +1462,7 @@ def _module_matrix(
     identity_fields: Mapping[str, object],
     runtime_model_identity: Mapping[str, object],
     identity_check: Callable[[], None],
+    retrieval_trace_journal: RetrievalTraceJournal,
 ) -> list[dict[str, Any]]:
     baseline_items = list(baseline.get("retrieval_order", []))
     baseline_ids = [str(item.get("evidence_id")) for item in baseline_items]
@@ -1427,6 +1531,18 @@ def _module_matrix(
                     continue
                 identity_check()
                 search_started = time.perf_counter()
+
+                def trace_intervention(event: dict[str, object]) -> None:
+                    retrieval_trace_journal.append(
+                        {
+                            **identity_fields,
+                            "progress_kind": "module_matrix",
+                            "module_id": module_id,
+                            "report_period": period,
+                        },
+                        event,
+                    )
+
                 result = _run_rag_intervention(
                     service=service,
                     release_id=release_id,
@@ -1435,6 +1551,7 @@ def _module_matrix(
                     research_ablation_id=module_id,
                     report_period=period,
                     use_qwen=use_qwen,
+                    retrieval_trace_callback=trace_intervention,
                 )
                 period_results.append({
                     "report_period": period,
@@ -1707,7 +1824,11 @@ def main() -> None:
     if use_qwen:
         embedding = Qwen3EmbeddingRuntime(args.qwen_assets)
         reranker_runtime = Qwen3RerankerRuntime(args.qwen_assets)
-        dense_adapter = LocalQwenDenseAdapter(store, embedding)
+        dense_adapter = LocalQwenDenseAdapter(
+            store,
+            embedding,
+            cache_path=ROOT / ".tmp" / "industrial_rag_dense_vector_cache.sqlite3",
+        )
         reranker = LocalQwenReranker(reranker_runtime)
     runtime_model_identity = _runtime_model_identity(
         use_qwen=use_qwen,
@@ -1761,6 +1882,11 @@ def main() -> None:
         query_progress["cases"] = validated_rows
     query_runs = list(query_progress["cases"])
     _write_json(query_progress_path, query_progress)
+    retrieval_trace_journal = RetrievalTraceJournal(
+        output_dir / "retrieval_trace.jsonl",
+        run_identity_sha256=run_identity_sha256,
+        runtime_model_identity_sha256=runtime_model_identity_sha256,
+    )
 
     service = IndustrialRagService(
         store,
@@ -1812,6 +1938,7 @@ def main() -> None:
             identity_fields={**case_progress_identity, "progress_kind": "agent", "research_ablation_id": None},
             runtime_model_identity=runtime_model_identity,
             identity_check=identity_check,
+            retrieval_trace_journal=retrieval_trace_journal,
         )
         no_reranker = (
             _run_agent_chain(
@@ -1825,6 +1952,7 @@ def main() -> None:
                 identity_fields={**case_progress_identity, "progress_kind": "agent", "research_ablation_id": 12},
                 runtime_model_identity=runtime_model_identity,
                 identity_check=identity_check,
+                retrieval_trace_journal=retrieval_trace_journal,
             )
             if use_qwen
             else {"status": "not_run_qwen_disabled_in_supplemental_baseline"}
@@ -1843,6 +1971,7 @@ def main() -> None:
             identity_fields={**case_progress_identity, "progress_kind": "module_matrix"},
             runtime_model_identity=runtime_model_identity,
             identity_check=identity_check,
+            retrieval_trace_journal=retrieval_trace_journal,
         )
         identity_check()
         query_record = {
@@ -1894,6 +2023,18 @@ def main() -> None:
         "run_identity_sha256": run_identity_sha256,
         "runtime_model_identity_sha256": runtime_model_identity_sha256,
         "model_identity": model_identity,
+        "retrieval_trace_journal": {
+            "path": "retrieval_trace.jsonl",
+            "schema_version": RetrievalTraceJournal.schema_version,
+            "event_count": retrieval_trace_journal.sequence,
+            "terminal_event_sha256": retrieval_trace_journal.previous_event_sha256,
+        },
+        "dense_vector_cache": {
+            "path": str((ROOT / ".tmp" / "industrial_rag_dense_vector_cache.sqlite3").relative_to(ROOT))
+            if use_qwen else None,
+            "reuse_identity": "source_id+original_sha256+block_id+block_text_sha256+model_revision+asset_manifest+instruction+dimension"
+            if use_qwen else None,
+        },
         "docling_asset_manifest_sha256": _sha256(docling_manifest_path.read_bytes()) if docling_manifest_path.is_file() else None,
         "local_inference_device": "CPU" if use_qwen else None,
         "retrieval_channel_scope": ["structured_facts", "bm25", "dense"] if use_qwen else ["structured_facts", "bm25"],

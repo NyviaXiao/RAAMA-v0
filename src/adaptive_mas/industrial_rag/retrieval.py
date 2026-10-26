@@ -10,6 +10,7 @@ import json
 import math
 import re
 import secrets
+import time
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import replace
@@ -452,7 +453,30 @@ class IndustrialRagService:
         fusion_strategy: str = "rrf",
         row_group_chunking: bool = True,
         control: SearchControl | None = None,
+        trace_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, object]:
+        search_started = time.perf_counter()
+
+        def emit_trace(stage: str, **fields: object) -> None:
+            if trace_callback is None:
+                return
+            trace_callback({
+                "stage": stage,
+                "plan_id": plan.plan_id,
+                "security_code": plan.security_code,
+                "query_sha256": hashlib.sha256(plan.query.encode("utf-8")).hexdigest(),
+                "report_periods": list(plan.report_periods),
+                "release_id": plan.release_id,
+                "elapsed_seconds": round(time.perf_counter() - search_started, 3),
+                **fields,
+            })
+
+        def forward_adapter_trace(event: dict[str, object]) -> None:
+            fields = dict(event)
+            stage = str(fields.pop("stage"))
+            emit_trace(stage, **fields)
+
+        emit_trace("search_started", channels=list(plan.channels), top_k=plan.top_k)
         if control is not None:
             control.check()
         if isinstance(rrf_rank_constant, bool) or not isinstance(rrf_rank_constant, int) or not 1 <= rrf_rank_constant <= 200:
@@ -529,13 +553,15 @@ class IndustrialRagService:
                 raise PermissionError("query state changed while resolving the cached result")
             if control is not None:
                 control.check()
-            return {
+            cached_result = {
                 **cached,
                 "plan_id": plan.plan_id,
                 "cache": {"hit": True, "stored": True, "key_sha256": cache_key},
                 "current_permission_revision": permission_revision,
                 "current_continuation_revision": continuation_revision,
             }
+            emit_trace("search_cache_hit", result=cached_result)
+            return cached_result
 
         channel_results: dict[str, list[EvidenceResult]] = {}
         channel_status: dict[str, dict[str, object]] = {}
@@ -556,34 +582,51 @@ class IndustrialRagService:
         for channel in plan.channels:
             if control is not None:
                 control.check()
-            if channel == "structured_facts":
-                channel_results[channel] = self._fact_results(plan, facts, version_by_id, control=control)
-                channel_status[channel] = {"status": "available", "implementation": "typed_fact_records", "candidate_count": len(channel_results[channel])}
-            elif channel == "bm25":
-                channel_results[channel] = self._block_results(plan, blocks, version_by_id, control=control)
-                channel_status[channel] = {"status": "available", "implementation": "local_bm25_reference_chinese_bigram_analyzer", "candidate_count": len(channel_results[channel]), "production_opensearch": "unavailable unless explicitly configured"}
-            elif channel == "toc_page":
-                channel_results[channel] = self._toc_results(plan, blocks, version_by_id)
-                channel_status[channel] = {"status": "available", "implementation": "section_and_page_block_reference", "candidate_count": len(channel_results[channel])}
-            elif channel in self.channel_adapters:
-                adapter = self.channel_adapters[channel]
-                controlled_search = getattr(adapter, "search_with_control", None)
-                adapted = list(
-                    controlled_search(plan, version_ids, control)
-                    if control is not None and callable(controlled_search)
-                    else adapter(plan, version_ids)
+            channel_started = time.perf_counter()
+            try:
+                if channel == "structured_facts":
+                    channel_results[channel] = self._fact_results(plan, facts, version_by_id, control=control)
+                    channel_status[channel] = {"status": "available", "implementation": "typed_fact_records", "candidate_count": len(channel_results[channel])}
+                elif channel == "bm25":
+                    channel_results[channel] = self._block_results(plan, blocks, version_by_id, control=control)
+                    channel_status[channel] = {"status": "available", "implementation": "local_bm25_reference_chinese_bigram_analyzer", "candidate_count": len(channel_results[channel]), "production_opensearch": "unavailable unless explicitly configured"}
+                elif channel == "toc_page":
+                    channel_results[channel] = self._toc_results(plan, blocks, version_by_id)
+                    channel_status[channel] = {"status": "available", "implementation": "section_and_page_block_reference", "candidate_count": len(channel_results[channel])}
+                elif channel in self.channel_adapters:
+                    adapter = self.channel_adapters[channel]
+                    traced_search = getattr(adapter, "search_with_trace", None)
+                    controlled_search = getattr(adapter, "search_with_control", None)
+                    if trace_callback is not None and callable(traced_search):
+                        adapted = list(traced_search(plan, version_ids, control, forward_adapter_trace))
+                    elif control is not None and callable(controlled_search):
+                        adapted = list(controlled_search(plan, version_ids, control))
+                    else:
+                        adapted = list(adapter(plan, version_ids))
+                    if control is not None:
+                        control.check()
+                    channel_results[channel] = adapted[: plan.top_k * 5]
+                    channel_status[channel] = {
+                        "status": "available",
+                        "implementation": getattr(adapter, "implementation", "configured_external_adapter"),
+                        "candidate_count": len(adapted),
+                    }
+                else:
+                    channel_results[channel] = []
+                    channel_status[channel] = {"status": "unavailable", "reason": self._unavailable_reason(channel)}
+            except Exception as error:
+                emit_trace(
+                    "channel_failed", channel=channel,
+                    error={"type": type(error).__name__, "message": str(error)},
+                    channel_elapsed_seconds=round(time.perf_counter() - channel_started, 3),
                 )
-                if control is not None:
-                    control.check()
-                channel_results[channel] = adapted[: plan.top_k * 5]
-                channel_status[channel] = {
-                    "status": "available",
-                    "implementation": getattr(adapter, "implementation", "configured_external_adapter"),
-                    "candidate_count": len(adapted),
-                }
-            else:
-                channel_results[channel] = []
-                channel_status[channel] = {"status": "unavailable", "reason": self._unavailable_reason(channel)}
+                raise
+            emit_trace(
+                "channel_completed", channel=channel,
+                channel_status=channel_status[channel],
+                channel_elapsed_seconds=round(time.perf_counter() - channel_started, 3),
+                candidates=[self._serialize(item) for item in channel_results[channel]],
+            )
 
         if fusion_strategy == "rrf":
             fused, fusion_trace = reciprocal_rank_fusion(
@@ -608,16 +651,32 @@ class IndustrialRagService:
                 ],
                 "score_is_probability": False,
             }
+        emit_trace(
+            "fusion_completed", fusion=fusion_trace,
+            candidates=[self._serialize(item) for item in fused],
+        )
         rerank_status: dict[str, object]
         if reranker_enabled and fused:
             if control is not None:
                 control.check()
+            traced_rerank = getattr(self.reranker, "rerank_with_trace", None)
             controlled_rerank = getattr(self.reranker, "rerank_with_control", None)
-            reranked = list(
-                controlled_rerank(plan, fused, control)
-                if control is not None and callable(controlled_rerank)
-                else self.reranker(plan, fused)
-            )
+            rerank_started = time.perf_counter()
+            try:
+                if trace_callback is not None and callable(traced_rerank):
+                    reranked = list(traced_rerank(plan, fused, control, forward_adapter_trace))
+                elif control is not None and callable(controlled_rerank):
+                    reranked = list(controlled_rerank(plan, fused, control))
+                else:
+                    reranked = list(self.reranker(plan, fused))
+            except Exception as error:
+                emit_trace(
+                    "reranking_failed",
+                    error={"type": type(error).__name__, "message": str(error)},
+                    input_candidates=[self._serialize(item) for item in fused],
+                    reranking_elapsed_seconds=round(time.perf_counter() - rerank_started, 3),
+                )
+                raise
             if control is not None:
                 control.check()
             allowed_ids = {item.evidence_id for item in fused}
@@ -629,6 +688,11 @@ class IndustrialRagService:
                 "implementation": getattr(self.reranker, "implementation", "configured_cross_encoder_adapter"),
                 "scores_are_probabilities": False,
             }
+            emit_trace(
+                "reranking_completed", reranking=rerank_status,
+                reranked_candidates=[self._serialize(item) for item in fused],
+                reranking_elapsed_seconds=round(time.perf_counter() - rerank_started, 3),
+            )
         else:
             fused = fused[: plan.top_k]
             rerank_status = (
@@ -666,6 +730,7 @@ class IndustrialRagService:
             self.store.cache_put(cache_key, response)
         if self.store.permission_revision() != permission_revision or self.store.continuation_revision() != continuation_revision:
             raise PermissionError("query state changed before retrieval could return")
+        emit_trace("search_completed", result=response)
         return response
 
     def search_page(
@@ -776,6 +841,7 @@ class IndustrialRagService:
         row_group_chunking: bool = True,
         include_continuation_context: bool = True,
         control: SearchControl | None = None,
+        trace_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, object]:
         """Run a fixed-template financial search plan with explicit coverage and stop reasons."""
         if control is not None:
@@ -859,14 +925,27 @@ class IndustrialRagService:
                 channels=channels,
                 top_k=min(pinned_plan.top_k, 10),
             )
-            result = self.search(
-                subplan,
-                rrf_rank_constant=rrf_rank_constant,
-                use_reranker=use_reranker,
-                fusion_strategy=fusion_strategy,
-                row_group_chunking=row_group_chunking,
-                control=control,
-            )
+            try:
+                result = self.search(
+                    subplan,
+                    rrf_rank_constant=rrf_rank_constant,
+                    use_reranker=use_reranker,
+                    fusion_strategy=fusion_strategy,
+                    row_group_chunking=row_group_chunking,
+                    control=control,
+                    trace_callback=trace_callback,
+                )
+            except Exception as error:
+                if trace_callback is not None:
+                    trace_callback({
+                        "stage": "research_step_failed",
+                        "step_id": step.step_id,
+                        "step_kind": step.kind,
+                        "plan_id": subplan.plan_id,
+                        "query_sha256": hashlib.sha256(subplan.query.encode("utf-8")).hexdigest(),
+                        "error": {"type": type(error).__name__, "message": str(error)},
+                    })
+                raise
             if self.store.permission_revision() != task_permission_revision:
                 raise PermissionError("permissions changed during financial research")
             for name, status in result.get("channels", {}).items():

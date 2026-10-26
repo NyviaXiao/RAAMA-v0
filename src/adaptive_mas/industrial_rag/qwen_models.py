@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from adaptive_mas.industrial_rag.models import EvidenceResult, QueryPlan, SearchControl
 from adaptive_mas.runtime_limits import apply_thread_limits, process_thread_limit
@@ -100,6 +102,26 @@ class Qwen3EmbeddingRuntime:
         self._model: Any = None
         self._tokenizer: Any = None
         self._torch: Any = None
+
+    @property
+    def dimension(self) -> int:
+        if self._model is not None:
+            return int(self._model.config.hidden_size)
+        config = json.loads((_model_dir(self.asset_dir, EMBEDDING_REPO) / "config.json").read_text(encoding="utf-8"))
+        return int(config["hidden_size"])
+
+    @property
+    def cache_identity(self) -> dict[str, object]:
+        manifest = self.asset_dir / MODEL_MANIFEST
+        return {
+            "model": EMBEDDING_REPO,
+            "revision": EMBEDDING_REVISION,
+            "asset_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "instruction_sha256": hashlib.sha256(RETRIEVAL_INSTRUCTION.encode("utf-8")).hexdigest(),
+            "pooling": "masked_last_token_l2_v1",
+            "max_length": EMBED_MAX_LENGTH,
+            "dimension": self.dimension,
+        }
 
     def _load(self) -> None:
         if self._model is not None:
@@ -203,6 +225,8 @@ class Qwen3RerankerRuntime:
         documents: Sequence[str],
         *,
         control: SearchControl | None = None,
+        on_batch: Callable[[int, list[float], float], None] | None = None,
+        on_batch_start: Callable[[int, int], None] | None = None,
     ) -> list[float]:
         if control is not None:
             control.check()
@@ -226,6 +250,8 @@ class Qwen3RerankerRuntime:
         for start in range(0, len(pair_texts), RERANK_BATCH_SIZE):
             if control is not None:
                 control.check()
+            if on_batch_start is not None:
+                on_batch_start(start, min(start + RERANK_BATCH_SIZE, len(pair_texts)))
             encoded = self._tokenizer(
                 pair_texts[start:start + RERANK_BATCH_SIZE],
                 padding=False,
@@ -236,38 +262,145 @@ class Qwen3RerankerRuntime:
             for index, input_ids in enumerate(encoded["input_ids"]):
                 encoded["input_ids"][index] = prefix_ids + input_ids + suffix_ids
             tokens = self._tokenizer.pad(encoded, padding=True, return_tensors="pt")
+            batch_started = time.perf_counter()
             with torch.inference_mode():
                 logits = self._model(**tokens).logits[:, -1, :]
                 batch_scores = logits[:, self._yes_id] - logits[:, self._no_id]
-            scores.extend(float(value) for value in batch_scores.detach().cpu().tolist())
+            values = [float(value) for value in batch_scores.detach().cpu().tolist()]
+            scores.extend(values)
+            if on_batch is not None:
+                on_batch(start, values, time.perf_counter() - batch_started)
             if control is not None:
                 control.check()
         return scores
 
 
 class LocalQwenDenseAdapter:
-    """In-memory dense reference adapter over the already permission-filtered blocks."""
+    """Dense retrieval over permission-filtered blocks with an identity-bound local vector cache."""
 
-    implementation = "local_in_memory_qwen3_embedding_0.6b"
+    implementation = "local_cached_qwen3_embedding_0.6b"
+    cache_schema = "raama.qwen-dense-vectors.v1"
 
-    def __init__(self, store: Any, embedding: Qwen3EmbeddingRuntime, *, cache_capacity: int = 2048) -> None:
+    def __init__(
+        self,
+        store: Any,
+        embedding: Qwen3EmbeddingRuntime,
+        *,
+        cache_capacity: int = 2048,
+        cache_path: str | Path | None = None,
+    ) -> None:
         self.store = store
         self.embedding = embedding
         self.cache_capacity = max(1, cache_capacity)
         self._vectors: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._cache_path = Path(cache_path).resolve() if cache_path is not None else None
+        self._cache_identity = self._build_cache_identity()
+        self._cache_identity_sha256 = hashlib.sha256(
+            json.dumps(self._cache_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self._cache_connection: sqlite3.Connection | None = None
+        if self._cache_path is not None:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cache_connection = sqlite3.connect(self._cache_path, timeout=30)
+            self._cache_connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dense_vectors (
+                    cache_key TEXT PRIMARY KEY,
+                    cache_schema TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    source_content_sha256 TEXT NOT NULL,
+                    block_id TEXT NOT NULL,
+                    block_text_sha256 TEXT NOT NULL,
+                    model_identity_sha256 TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    vector_dtype TEXT NOT NULL,
+                    vector_blob BLOB NOT NULL,
+                    vector_sha256 TEXT NOT NULL
+                )
+                """
+            )
+            self._cache_connection.commit()
 
     @property
     def cache_identity(self) -> dict[str, object]:
         return {
             "implementation": self.implementation,
-            "revision": EMBEDDING_REVISION,
-            "configuration": {
-                "model": EMBEDDING_REPO,
-                "instruction_sha256": hashlib.sha256(RETRIEVAL_INSTRUCTION.encode("utf-8")).hexdigest(),
-                "pooling": "masked_last_token_l2_v1",
-                "max_length": EMBED_MAX_LENGTH,
-            },
+            "cache_schema": self.cache_schema,
+            "model_identity": self._cache_identity,
         }
+
+    def _build_cache_identity(self) -> dict[str, object]:
+        identity = getattr(self.embedding, "cache_identity", None)
+        if not isinstance(identity, dict):
+            raise ValueError("Qwen embedding runtime must expose a versioned cache identity")
+        if identity.get("dimension") != self.embedding.dimension:
+            raise ValueError("Qwen embedding cache identity dimension differs from the runtime")
+        return dict(identity)
+
+    def _vector_key(self, row: Any, text: str) -> tuple[str, dict[str, object]]:
+        metadata: dict[str, object] = {
+            "cache_schema": self.cache_schema,
+            "source_id": str(row["source_id"]),
+            "source_content_sha256": str(row["content_sha256"]),
+            "block_id": str(row["block_id"]),
+            "block_text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "model_identity_sha256": self._cache_identity_sha256,
+            "dimension": int(self.embedding.dimension),
+        }
+        key = hashlib.sha256(
+            json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return key, metadata
+
+    def _read_persistent_vector(self, key: str, metadata: dict[str, object]) -> np.ndarray | None:
+        if self._cache_connection is None:
+            return None
+        row = self._cache_connection.execute(
+            """
+            SELECT cache_schema, source_id, source_content_sha256, block_id, block_text_sha256,
+                   model_identity_sha256, dimension, vector_dtype, vector_blob, vector_sha256
+            FROM dense_vectors WHERE cache_key=?
+            """,
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        expected = (
+            metadata["cache_schema"], metadata["source_id"], metadata["source_content_sha256"],
+            metadata["block_id"], metadata["block_text_sha256"], metadata["model_identity_sha256"],
+            metadata["dimension"],
+        )
+        if tuple(row[:7]) != expected or row[7] != "float32-le":
+            return None
+        payload = bytes(row[8])
+        dimension = int(metadata["dimension"])
+        if len(payload) != dimension * np.dtype("<f4").itemsize:
+            return None
+        if hashlib.sha256(payload).hexdigest() != row[9]:
+            return None
+        vector = np.frombuffer(payload, dtype="<f4").copy()
+        if not np.isfinite(vector).all() or not np.isclose(float(np.linalg.norm(vector)), 1.0, atol=1e-3):
+            return None
+        return vector
+
+    def _write_persistent_vector(self, key: str, metadata: dict[str, object], vector: np.ndarray) -> None:
+        if self._cache_connection is None:
+            return
+        payload = np.asarray(vector, dtype="<f4").tobytes(order="C")
+        self._cache_connection.execute(
+            """
+            INSERT OR REPLACE INTO dense_vectors (
+                cache_key, cache_schema, source_id, source_content_sha256, block_id,
+                block_text_sha256, model_identity_sha256, dimension, vector_dtype,
+                vector_blob, vector_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                key, metadata["cache_schema"], metadata["source_id"], metadata["source_content_sha256"],
+                metadata["block_id"], metadata["block_text_sha256"], metadata["model_identity_sha256"],
+                metadata["dimension"], "float32-le", payload, hashlib.sha256(payload).hexdigest(),
+            ),
+        )
 
     def __call__(self, plan: QueryPlan, version_ids: Sequence[str]) -> Sequence[EvidenceResult]:
         return self._search(plan, version_ids, None)
@@ -280,12 +413,24 @@ class LocalQwenDenseAdapter:
     ) -> Sequence[EvidenceResult]:
         return self._search(plan, version_ids, control)
 
+    def search_with_trace(
+        self,
+        plan: QueryPlan,
+        version_ids: Sequence[str],
+        control: SearchControl | None,
+        trace_callback: Callable[[dict[str, object]], None],
+    ) -> Sequence[EvidenceResult]:
+        return self._search(plan, version_ids, control, trace_callback=trace_callback)
+
     def _search(
         self,
         plan: QueryPlan,
         version_ids: Sequence[str],
         control: SearchControl | None,
+        *,
+        trace_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> Sequence[EvidenceResult]:
+        search_started = time.perf_counter()
         if control is not None:
             control.check()
         rows = [
@@ -295,32 +440,100 @@ class LocalQwenDenseAdapter:
         if control is not None:
             control.check()
         if not rows:
+            if trace_callback is not None:
+                trace_callback({"stage": "dense_search_completed", "candidate_count": 0, "elapsed_seconds": round(time.perf_counter() - search_started, 3)})
             return []
         query_text = plan.query + (" " + " ".join(plan.aliases) if plan.aliases else "")
+        query_embedding_started = time.perf_counter()
+        if trace_callback is not None:
+            trace_callback({
+                "stage": "dense_query_embedding_started",
+                "query_sha256": hashlib.sha256(query_text.encode("utf-8")).hexdigest(),
+                "dimension": int(self.embedding.dimension),
+            })
+        query_model_started = time.perf_counter()
         query_vector = self.embedding.embed([query_text], query=True, control=control)[0]
+        query_model_elapsed = time.perf_counter() - query_model_started
+        if trace_callback is not None:
+            trace_callback({
+                "stage": "dense_query_embedding_completed",
+                "query_sha256": hashlib.sha256(query_text.encode("utf-8")).hexdigest(),
+                "dimension": int(query_vector.shape[0]),
+                "model_elapsed_seconds": round(query_model_elapsed, 3),
+                "elapsed_seconds": round(time.perf_counter() - query_embedding_started, 3),
+            })
         from adaptive_mas.industrial_rag.retrieval import _citation
 
         ranked = []
-        batch_rows: list[Any] = []
-        batch_keys: list[str] = []
+        missing_rows: list[Any] = []
+        missing_keys: list[str] = []
+        missing_metadata: list[dict[str, object]] = []
+        persistent_cache_hits = 0
+        memory_cache_hits = 0
+        new_embeddings = 0
         for row in rows:
             if control is not None:
                 control.check()
             text = str(row["text"])
-            key = f"{row['version_id']}:{row['block_id']}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+            key, metadata = self._vector_key(row, text)
             vector = self._vectors.get(key)
             if vector is not None:
                 self._vectors.move_to_end(key)
+                memory_cache_hits += 1
                 ranked.append((float(np.dot(query_vector, vector)), row))
                 continue
-            batch_rows.append(row)
-            batch_keys.append(key)
-            if len(batch_rows) == EMBED_BATCH_SIZE:
-                self._score_missing_batch(batch_rows, batch_keys, query_vector, ranked, control=control)
-                batch_rows, batch_keys = [], []
-        if batch_rows:
-            self._score_missing_batch(batch_rows, batch_keys, query_vector, ranked, control=control)
+            vector = self._read_persistent_vector(key, metadata)
+            if vector is not None:
+                persistent_cache_hits += 1
+                self._vectors[key] = vector
+                self._vectors.move_to_end(key)
+                ranked.append((float(np.dot(query_vector, vector)), row))
+                continue
+            missing_rows.append(row)
+            missing_keys.append(key)
+            missing_metadata.append(metadata)
+        if trace_callback is not None and ranked:
+            ranked_cached = sorted(ranked, key=lambda item: (-item[0], str(item[1]["block_id"])))
+            trace_callback({
+                "stage": "dense_cached_candidates_scored",
+                "rank_scope": "all_verified_cached_candidates",
+                "candidate_count": len(ranked_cached),
+                "cache": {"persistent_hits": persistent_cache_hits, "memory_hits": memory_cache_hits},
+                "ranked_candidates": [
+                    self._ranked_candidate(index, score, row)
+                    for index, (score, row) in enumerate(ranked_cached, start=1)
+                ],
+                "elapsed_seconds": round(time.perf_counter() - search_started, 3),
+            })
+        for start in range(0, len(missing_rows), EMBED_BATCH_SIZE):
+            batch_rows = missing_rows[start:start + EMBED_BATCH_SIZE]
+            batch_keys = missing_keys[start:start + EMBED_BATCH_SIZE]
+            batch_metadata = missing_metadata[start:start + EMBED_BATCH_SIZE]
+            if trace_callback is not None:
+                trace_callback(self._batch_started_trace(batch_rows, search_started, len(rows)))
+            before_count = len(ranked)
+            batch_model_started = time.perf_counter()
+            self._score_missing_batch(batch_rows, batch_keys, batch_metadata, query_vector, ranked, control=control)
+            batch_model_elapsed = time.perf_counter() - batch_model_started
+            new_embeddings += len(ranked) - before_count
+            if trace_callback is not None:
+                event = self._batch_trace("dense_embedding_batch_completed", ranked, batch_rows, batch_keys, search_started, len(rows))
+                event["embedding_batch_elapsed_seconds"] = round(batch_model_elapsed, 3)
+                trace_callback(event)
         ranked.sort(key=lambda item: (-item[0], str(item[1]["block_id"])))
+        if trace_callback is not None:
+            trace_callback({
+                "stage": "dense_search_completed",
+                "candidate_count": len(ranked),
+                "ranked_candidates": [self._ranked_candidate(index, score, row) for index, (score, row) in enumerate(ranked, start=1)],
+                "cache": {
+                    "persistent_hits": persistent_cache_hits,
+                    "memory_hits": memory_cache_hits,
+                    "new_embeddings": new_embeddings,
+                    "persistent_cache_enabled": self._cache_connection is not None,
+                },
+                "elapsed_seconds": round(time.perf_counter() - search_started, 3),
+            })
         return [
             EvidenceResult(
                 evidence_id=f"ev-dense-{row['block_id']}", channel="dense",
@@ -340,6 +553,7 @@ class LocalQwenDenseAdapter:
         self,
         rows: list[Any],
         keys: list[str],
+        metadata: list[dict[str, object]],
         query_vector: np.ndarray,
         ranked: list[Any],
         *,
@@ -348,14 +562,93 @@ class LocalQwenDenseAdapter:
         if control is not None:
             control.check()
         vectors = self.embedding.embed([str(row["text"]) for row in rows], control=control)
+        if control is not None:
+            control.check()
+        if vectors.ndim != 2 or vectors.shape != (len(rows), int(self.embedding.dimension)):
+            raise ValueError("Qwen embedding output shape differs from the identity-bound vector dimension")
+        if not np.isfinite(vectors).all():
+            raise ValueError("Qwen embedding output contains non-finite values")
+        if not np.allclose(np.linalg.norm(vectors, axis=1), 1.0, atol=1e-3):
+            raise ValueError("Qwen dense retrieval requires normalized document vectors")
+        try:
+            for row, key, identity, vector in zip(rows, keys, metadata, vectors):
+                self._write_persistent_vector(key, identity, vector)
+            if self._cache_connection is not None:
+                self._cache_connection.commit()
+        except Exception:
+            if self._cache_connection is not None:
+                self._cache_connection.rollback()
+            raise
         for row, key, vector in zip(rows, keys, vectors):
-            if control is not None:
-                control.check()
             self._vectors[key] = vector
             self._vectors.move_to_end(key)
             ranked.append((float(np.dot(query_vector, vector)), row))
         while len(self._vectors) > self.cache_capacity:
             self._vectors.popitem(last=False)
+
+    @staticmethod
+    def _ranked_candidate(rank: int, score: float, row: Any) -> dict[str, object]:
+        return {
+            "rank": rank,
+            "evidence_id": f"ev-dense-{row['block_id']}",
+            "block_id": str(row["block_id"]),
+            "version_id": str(row["version_id"]),
+            "source_id": str(row["source_id"]),
+            "source_content_sha256": str(row["content_sha256"]),
+            "block_text_sha256": hashlib.sha256(str(row["text"]).encode("utf-8")).hexdigest(),
+            "page_number": int(row["page_number"]) if row["page_number"] is not None else None,
+            "score": float(score),
+        }
+
+    def _batch_trace(
+        self,
+        stage: str,
+        ranked: list[Any],
+        batch_rows: list[Any],
+        batch_keys: list[str],
+        search_started: float,
+        total_candidates: int,
+    ) -> dict[str, object]:
+        rank_by_key = {
+            self._vector_key(row, str(row["text"]))[0]: rank
+            for rank, (_score, row) in enumerate(
+                sorted(ranked, key=lambda item: (-item[0], str(item[1]["block_id"]))), start=1
+            )
+        }
+        score_by_key = {
+            self._vector_key(row, str(row["text"]))[0]: score
+            for score, row in ranked
+        }
+        return {
+            "stage": stage,
+            "rank_scope": "all_candidates_scored_by_event_time",
+            "completed_candidate_count": len(ranked),
+            "total_candidate_count": total_candidates,
+            "batch_candidates": [
+                self._ranked_candidate(rank_by_key[key], score_by_key[key], row)
+                for row, key in zip(batch_rows, batch_keys)
+            ],
+            "elapsed_seconds": round(time.perf_counter() - search_started, 3),
+        }
+
+    @staticmethod
+    def _batch_started_trace(rows: list[Any], search_started: float, total_candidates: int) -> dict[str, object]:
+        return {
+            "stage": "dense_embedding_batch_started",
+            "total_candidate_count": total_candidates,
+            "batch_candidates": [
+                {
+                    "block_id": str(row["block_id"]),
+                    "version_id": str(row["version_id"]),
+                    "source_id": str(row["source_id"]),
+                    "source_content_sha256": str(row["content_sha256"]),
+                    "block_text_sha256": hashlib.sha256(str(row["text"]).encode("utf-8")).hexdigest(),
+                    "page_number": int(row["page_number"]) if row["page_number"] is not None else None,
+                }
+                for row in rows
+            ],
+            "elapsed_seconds": round(time.perf_counter() - search_started, 3),
+        }
 
 
 class LocalQwenReranker:
@@ -388,13 +681,56 @@ class LocalQwenReranker:
     ) -> Sequence[EvidenceResult]:
         return self._rerank(plan, evidence, control)
 
+    def rerank_with_trace(
+        self,
+        plan: QueryPlan,
+        evidence: Sequence[EvidenceResult],
+        control: SearchControl | None,
+        trace_callback: Callable[[dict[str, object]], None],
+    ) -> Sequence[EvidenceResult]:
+        return self._rerank(plan, evidence, control, trace_callback=trace_callback)
+
     def _rerank(
         self,
         plan: QueryPlan,
         evidence: Sequence[EvidenceResult],
         control: SearchControl | None,
+        *,
+        trace_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> Sequence[EvidenceResult]:
-        scores = self.runtime.score(plan.query, [item.text for item in evidence], control=control)
+        def on_batch(start: int, scores: list[float], elapsed: float) -> None:
+            if trace_callback is not None:
+                trace_callback({
+                    "stage": "reranker_batch_completed",
+                    "score_kind": "yes_no_logit_difference",
+                    "batch_offset": start,
+                    "batch_candidates": [
+                        {"rank_before_reranking": start + offset + 1, "evidence_id": evidence[start + offset].evidence_id, "score": score}
+                        for offset, score in enumerate(scores)
+                    ],
+                    "elapsed_seconds": round(elapsed, 3),
+                })
+
+        def on_batch_start(start: int, end: int) -> None:
+            if trace_callback is not None:
+                trace_callback({
+                    "stage": "reranker_batch_started",
+                    "batch_offset": start,
+                    "candidate_ids": [evidence[index].evidence_id for index in range(start, end)],
+                    "candidate_text_sha256": [
+                        hashlib.sha256(evidence[index].text.encode("utf-8")).hexdigest()
+                        for index in range(start, end)
+                    ],
+                    "score_kind": "yes_no_logit_difference",
+                })
+
+        scores = self.runtime.score(
+            plan.query,
+            [item.text for item in evidence],
+            control=control,
+            on_batch=on_batch if trace_callback is not None else None,
+            on_batch_start=on_batch_start if trace_callback is not None else None,
+        )
         paired = []
         for item, score in zip(evidence, scores):
             if control is not None:

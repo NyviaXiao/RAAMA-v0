@@ -143,13 +143,36 @@ def _publish(store: IndustrialRagStore, version_ids: list[str], release_id: str)
     store.publish_release(release_id, actor_id="test-operator", reason="isolated contract test")
 
 
-def _research_one_bundle(tmp_path, bundle: DocumentBundle, query: str, *, periods: tuple[str, ...] = ("2024",)) -> dict[str, object]:
+def test_research_trace_emits_ranked_channel_candidates_before_result_validation(tmp_path) -> None:
+    events: list[dict[str, object]] = []
+    bundle = _bundle()
+    result = _research_one_bundle(
+        tmp_path,
+        bundle,
+        "2024年度营业收入是多少",
+        trace_callback=events.append,
+    )
+    assert result["status"] == "available"
+    completed_channels = [event for event in events if event.get("stage") == "channel_completed"]
+    assert completed_channels
+    assert all("candidates" in event for event in completed_channels)
+    assert any(event.get("stage") == "search_completed" for event in events)
+
+
+def _research_one_bundle(
+    tmp_path,
+    bundle: DocumentBundle,
+    query: str,
+    *,
+    periods: tuple[str, ...] = ("2024",),
+    trace_callback=None,
+) -> dict[str, object]:
     store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
     store.ingest_bundle(bundle)
     _consume_all(store)
     _publish(store, [bundle.version.version_id], "release-1")
     plan = replace(_plan(), query=query, report_periods=periods)
-    return IndustrialRagService(store).research(plan)
+    return IndustrialRagService(store).research(plan, trace_callback=trace_callback)
 
 
 def _plan(*, as_of: datetime | None = None, principal: str = "analyst", time_mode: str = "strict_forward", release_id: str | None = None, channels: tuple[str, ...] = ("structured_facts", "bm25")) -> QueryPlan:
