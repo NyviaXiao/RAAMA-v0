@@ -18,6 +18,8 @@ from typing import Any, Mapping
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -40,9 +42,46 @@ from adaptive_mas.industrial_rag.opensearch_adapter import (  # noqa: E402
     OpenSearchTextIndexAdapter,
 )
 from adaptive_mas.industrial_rag.postgres import PostgresIndustrialRagStore  # noqa: E402
+from adaptive_mas.industrial_rag.qdrant_adapter import (  # noqa: E402
+    QdrantBackendError,
+    QdrantRestClient,
+    QdrantVectorIndexAdapter,
+)
 from adaptive_mas.industrial_rag.repository import ReleaseNotReady  # noqa: E402
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService  # noqa: E402
 from adaptive_mas.research_provenance import stable_hash  # noqa: E402
+
+
+class _SyntheticSmokeEmbedding:
+    dimension = 2
+    cache_identity = {
+        "model": "synthetic-backend-smoke-embedding",
+        "revision": "fixture-v1",
+        "dimension": 2,
+    }
+
+    def embed(self, texts: list[str], *, query: bool = False, control: Any = None) -> np.ndarray:
+        if control is not None:
+            control.check()
+        return np.tile(np.asarray([[1.0, 0.0]], dtype=np.float32), (len(texts), 1))
+
+
+class _SyntheticSmokeDenseAdapter:
+    def __init__(self, store: Any) -> None:
+        self.store = store
+        self.embedding = _SyntheticSmokeEmbedding()
+        self.cache_identity = {"model_identity": self.embedding.cache_identity}
+
+    def cached_vectors(
+        self, version_ids: list[str], *, block_keys: list[tuple[str, str]] | None = None,
+    ) -> list[tuple[dict[str, object], np.ndarray]]:
+        selected = set(block_keys) if block_keys is not None else None
+        return [
+            (dict(row), np.asarray([1.0, 0.0], dtype=np.float32))
+            for row in self.store.read_blocks(version_ids)
+            if str(row["text"]).strip()
+            and (selected is None or (str(row["version_id"]), str(row["block_id"])) in selected)
+        ]
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -344,14 +383,28 @@ def main() -> None:
 
     source_manifest = store.source_manifest([version_id])
     text_index = store.preview_reference_index_manifest(release_id, [version_id])
-    vector_index_sha256 = stable_hash({
-        "release_id": release_id, "backend": "qdrant", "status": "unavailable_not_configured",
-        "embedding_model": "none", "embedding_dimension": None, "points": [],
-    })
+    _wait_for_http(f"http://127.0.0.1:{ports['qdrant']}/")
+    qdrant_client = QdrantRestClient(f"http://127.0.0.1:{ports['qdrant']}")
+    qdrant_query_requests = 0
+    original_qdrant_request = qdrant_client.request
+
+    def tracked_qdrant_request(method: str, path: str, body: object | None = None) -> dict[str, Any]:
+        nonlocal qdrant_query_requests
+        if path.endswith("/points/query"):
+            qdrant_query_requests += 1
+        return original_qdrant_request(method, path, body)
+
+    qdrant_client.request = tracked_qdrant_request  # type: ignore[method-assign]
+    qdrant_adapter = QdrantVectorIndexAdapter(store, qdrant_client, _SyntheticSmokeDenseAdapter(store))
+    vector_index = qdrant_adapter.preview_vector_index_manifest(release_id, [version_id])
+    vector_index_sha256 = str(vector_index["index_manifest_sha256"])
+    embedding_model = str(vector_index["embedding_model"])
+    embedding_dimension = int(vector_index["embedding_dimension"])
     release_spec = CorpusReleaseSpec(
         release_id=release_id, source_manifest_sha256=stable_hash(source_manifest),
         parser_version="synthetic@1", chunker_version="raama-financial-chunker-v1",
-        embedding_model="none", embedding_dimension=None, required_backends=("opensearch", "sqlite_reference"),
+        embedding_model=embedding_model, embedding_dimension=embedding_dimension,
+        required_backends=("opensearch", "qdrant", "sqlite_reference"),
         text_index_manifest_sha256=str(text_index["index_manifest_sha256"]),
         vector_index_manifest_sha256=vector_index_sha256,
     )
@@ -370,21 +423,28 @@ def main() -> None:
     opensearch_client.request = tracked_opensearch_request  # type: ignore[method-assign]
     opensearch_adapter = OpenSearchTextIndexAdapter(store, opensearch_client)
     opensearch_ready = opensearch_adapter.mark_release_ready(release_id)
+    qdrant_ready = qdrant_adapter.mark_release_ready(release_id)
     reference_receipt = store.build_reference_index_receipt(release_id)
     reference_ready = store.mark_backend_ready(reference_receipt, store.verify_reference_index)
     query_plan = QueryPlan(
         plan_id=f"smoke-query-{suffix}", query=text, security_code=str(fixture["security_code"]),
         as_of=datetime.now(timezone.utc), principal_id="local-public", task_type="narrative",
         report_periods=(str(fixture["report_period"]),), release_id=release_id,
-        channels=("bm25",), top_k=5,
+        channels=("bm25", "dense"), top_k=5,
     )
     publication = store.publish_release(release_id, actor_id="integration-smoke", reason="Verify isolated PostgreSQL-backed application contract.")
     app_search = IndustrialRagService(
-        store, channel_adapters={"bm25": opensearch_adapter}, allow_retrospective_diagnostic=False,
+        store, channel_adapters={"bm25": opensearch_adapter, "dense": qdrant_adapter},
+        allow_retrospective_diagnostic=False,
     ).search(query_plan, use_cache=False)
-    if not app_search["retrieved"] or app_search["channels"]["bm25"]["implementation"] != opensearch_adapter.implementation:
-        raise AssertionError("release-bound OpenSearch BM25 application search returned no source evidence")
+    if (
+        not app_search["retrieved"]
+        or app_search["channels"]["bm25"]["implementation"] != opensearch_adapter.implementation
+        or app_search["channels"]["dense"]["implementation"] != qdrant_adapter.implementation
+    ):
+        raise AssertionError("release-bound OpenSearch/Qdrant application search returned no source evidence")
     successful_search_requests = opensearch_search_requests
+    successful_qdrant_query_requests = qdrant_query_requests
     try:
         opensearch_adapter.search_with_control(
             replace(query_plan, release_id=f"{release_id}-not-active"), [version_id], None,
@@ -395,6 +455,16 @@ def main() -> None:
         raise AssertionError("OpenSearch adapter accepted a release other than the active publication")
     if opensearch_search_requests != successful_search_requests:
         raise AssertionError("nonactive release rejection issued an OpenSearch query")
+    try:
+        qdrant_adapter.search_with_control(
+            replace(query_plan, release_id=f"{release_id}-not-active"), [version_id], None,
+        )
+    except QdrantBackendError:
+        pass
+    else:
+        raise AssertionError("Qdrant adapter accepted a release other than the active publication")
+    if qdrant_query_requests != successful_qdrant_query_requests:
+        raise AssertionError("nonactive release rejection issued a Qdrant query")
     store.set_access("local-public", document_id, can_read=False)
     try:
         try:
@@ -407,6 +477,8 @@ def main() -> None:
         store.set_access("local-public", document_id, can_read=True)
     if opensearch_search_requests != successful_search_requests:
         raise AssertionError("revoked-principal rejection issued an OpenSearch query")
+    if qdrant_query_requests != successful_qdrant_query_requests:
+        raise AssertionError("revoked-principal rejection issued a Qdrant query")
     before_available_plan = replace(query_plan, as_of=published - timedelta(seconds=1))
     try:
         opensearch_adapter.search_with_control(before_available_plan, [version_id], None)
@@ -416,10 +488,13 @@ def main() -> None:
         raise AssertionError("OpenSearch adapter returned a source before its recorded availability time")
     if opensearch_search_requests != successful_search_requests:
         raise AssertionError("pre-availability rejection issued an OpenSearch query")
+    if qdrant_query_requests != successful_qdrant_query_requests:
+        raise AssertionError("pre-availability rejection issued a Qdrant query")
     if (
-        not opensearch_ready["ready"] or not reference_ready["ready"]
+        not opensearch_ready["ready"] or not qdrant_ready["ready"] or not reference_ready["ready"]
         or not app_search["retrieved"]
         or app_search["channels"]["bm25"]["implementation"] != opensearch_adapter.implementation
+        or app_search["channels"]["dense"]["implementation"] != qdrant_adapter.implementation
         or publication["status"] != "published"
         or store.release_summaries()["active_release_id"] != release_id
     ):
@@ -454,8 +529,9 @@ def main() -> None:
         "ingested": True, "object_reopened": True, "outbox_receipt_committed": True,
         "outbox_handler_failure_retried_once": True, "duplicate_ack_returned_false_without_mutating_receipt": True,
         "completed_event_not_claimable_again": True,
-        "reference_receipt_ready": True, "opensearch_receipt_ready": True,
+        "reference_receipt_ready": True, "opensearch_receipt_ready": True, "qdrant_receipt_ready": True,
         "release_bound_bm25_search": True, "nonactive_release_rejected_before_search": True,
+        "release_bound_dense_search": True,
         "revoked_principal_rejected_before_search": True,
         "pre_availability_query_rejected_before_search": True, "release_published": True,
     }

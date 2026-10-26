@@ -187,6 +187,20 @@ def test_required_dense_cache_fails_closed_before_document_embedding_on_miss(tmp
     assert embedding.calls == [(('revenue 2024',), True)]
 
 
+def test_cached_vectors_can_scope_verification_to_release_indexed_blocks(tmp_path) -> None:
+    store = _FakeBlockStore()
+    cache_path = tmp_path / "dense-vectors.sqlite3"
+    LocalQwenDenseAdapter(store, _FakeEmbedding(), cache_path=cache_path).search_with_trace(
+        _dense_plan(), ["version-1"], None, lambda _event: None,
+    )
+    adapter = LocalQwenDenseAdapter(store, _FakeEmbedding(), cache_path=cache_path, require_cached_vectors=True)
+
+    vectors = adapter.cached_vectors(["version-1"], block_keys=[("version-1", "block-2")])
+    assert [str(row["block_id"]) for row, _vector in vectors] == ["block-2"]
+    with pytest.raises(RuntimeError, match="missing or invalid for 1 source block"):
+        adapter.cached_vectors(["version-1"], block_keys=[("version-1", "missing-block")])
+
+
 def test_dense_vector_cache_detects_blob_tampering_and_recomputes(tmp_path) -> None:
     store = _FakeBlockStore()
     cache_path = tmp_path / "dense-vectors.sqlite3"

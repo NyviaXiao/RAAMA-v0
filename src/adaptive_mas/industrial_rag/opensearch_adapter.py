@@ -118,7 +118,9 @@ class OpenSearchTextIndexAdapter:
     def _record_id(version_id: str, block_id: str) -> str:
         return hashlib.sha256(f"{version_id}\0{block_id}".encode("utf-8")).hexdigest()
 
-    def _release_inputs(self, release_id: str) -> tuple[dict[str, object], list[dict[str, object]], dict[str, object], str]:
+    def _release_inputs(
+        self, release_id: str,
+    ) -> tuple[dict[str, object], list[dict[str, object]], dict[str, object], str, int | None]:
         spec, _spec_hash = self.store.release_spec(release_id)
         if "opensearch" not in set(spec.get("required_backends", [])):
             raise OpenSearchBackendError("corpus release does not require the OpenSearch backend")
@@ -145,7 +147,11 @@ class OpenSearchTextIndexAdapter:
             record["record_sha256"] = stable_hash(record)
             records.append(record)
         records.sort(key=lambda item: (str(item["version_id"]), int(item["page_number"] or 0), str(item["block_id"])))
-        return expected_index, records, {"source_manifest_sha256": source_hash}, str(spec["embedding_model"])
+        return (
+            expected_index, records, {"source_manifest_sha256": source_hash},
+            str(spec["embedding_model"]),
+            int(spec["embedding_dimension"]) if spec["embedding_dimension"] is not None else None,
+        )
 
     def _metadata(self, handle: str) -> dict[str, object]:
         if not re.fullmatch(r"raama-financial-rag-[0-9a-f]{32}", handle):
@@ -244,7 +250,7 @@ class OpenSearchTextIndexAdapter:
         release = next((row for row in summaries["releases"] if row["release_id"] == release_id), None)
         if release is None:
             raise FileNotFoundError("corpus release not found")
-        expected_index, records, source_manifest, embedding_model = self._release_inputs(release_id)
+        expected_index, records, source_manifest, embedding_model, embedding_dimension = self._release_inputs(release_id)
         handle = self._index_handle(release_id)
         expected_meta = self._expected_meta(release_id, expected_index, source_manifest)
         if release["status"] != "building":
@@ -265,7 +271,7 @@ class OpenSearchTextIndexAdapter:
             document_count=int(expected_index["document_count"]),
             record_count=int(expected_index["record_count"]),
             embedding_model=embedding_model,
-            embedding_dimension=None,
+            embedding_dimension=embedding_dimension,
             built_at=datetime.now(timezone.utc),
         )
 
@@ -274,12 +280,11 @@ class OpenSearchTextIndexAdapter:
         release_id = metadata.get("release_id")
         if not isinstance(release_id, str):
             raise OpenSearchBackendError("OpenSearch index is not bound to a corpus release")
-        expected_index, records, source_manifest, embedding_model = self._release_inputs(release_id)
+        expected_index, records, source_manifest, embedding_model, embedding_dimension = self._release_inputs(release_id)
         expected_meta = self._expected_meta(release_id, expected_index, source_manifest)
         if metadata != expected_meta:
             raise OpenSearchBackendError("OpenSearch index metadata differs from the current immutable release")
         self._verify_documents(physical_index_handle, records)
-        spec, _ = self.store.release_spec(release_id)
         return {
             "backend": "opensearch",
             "physical_index_handle": physical_index_handle,
@@ -289,7 +294,7 @@ class OpenSearchTextIndexAdapter:
             "document_count": expected_index["document_count"],
             "record_count": expected_index["record_count"],
             "embedding_model": embedding_model,
-            "embedding_dimension": spec["embedding_dimension"],
+            "embedding_dimension": embedding_dimension,
         }
 
     def mark_release_ready(self, release_id: str) -> dict[str, object]:
@@ -325,7 +330,7 @@ class OpenSearchTextIndexAdapter:
         permitted_ids = {str(row["version_id"]) for row in permitted}
         if not set(version_ids).issubset(permitted_ids):
             raise PermissionError("OpenSearch version scope exceeds the current principal/time/release permissions")
-        expected_index, records, source_manifest, _ = self._release_inputs(release_id)
+        expected_index, records, source_manifest, _, _ = self._release_inputs(release_id)
         handle = self._index_handle(release_id)
         if self._metadata(handle) != self._expected_meta(release_id, expected_index, source_manifest):
             raise OpenSearchBackendError("OpenSearch index metadata differs from the active release")

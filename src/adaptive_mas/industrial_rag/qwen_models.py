@@ -617,20 +617,40 @@ class LocalQwenDenseAdapter:
             self._remember_vector(key, vector)
             ranked.append((float(np.dot(query_vector, vector)), row))
 
-    def verify_persistent_cache(self, version_ids: Sequence[str]) -> int:
-        """Validate source-block vectors without invoking document embedding inference."""
+    def cached_vectors(
+        self,
+        version_ids: Sequence[str],
+        *,
+        block_keys: Sequence[tuple[str, str]] | None = None,
+    ) -> list[tuple[Any, np.ndarray]]:
+        """Return verified persistent source vectors without invoking document embedding inference."""
         if self._cache_connection is None:
             raise RuntimeError("a persistent Qwen vector cache is required for this source run")
         rows = [row for row in self.store.read_blocks(version_ids) if str(row["text"]).strip()]
+        required_keys = set(block_keys) if block_keys is not None else None
+        if required_keys is not None:
+            rows = [row for row in rows if (str(row["version_id"]), str(row["block_id"])) in required_keys]
+        verified: list[tuple[Any, np.ndarray]] = []
         missing = 0
+        found_keys: set[tuple[str, str]] = set()
         for row in rows:
             text = str(row["text"])
             key, metadata = self._vector_key(row, text)
-            if self._read_persistent_vector(key, metadata) is None:
+            vector = self._read_persistent_vector(key, metadata)
+            if vector is None:
                 missing += 1
+            else:
+                verified.append((row, vector))
+                found_keys.add((str(row["version_id"]), str(row["block_id"])))
+        if required_keys is not None:
+            missing = len(required_keys - found_keys)
         if missing:
             raise RuntimeError(f"persistent Qwen vector cache is missing or invalid for {missing} source block(s)")
-        return len(rows)
+        return verified
+
+    def verify_persistent_cache(self, version_ids: Sequence[str]) -> int:
+        """Validate source-block vectors without invoking document embedding inference."""
+        return len(self.cached_vectors(version_ids))
 
     @staticmethod
     def _ranked_candidate(rank: int, score: float, row: Any) -> dict[str, object]:
