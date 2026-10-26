@@ -108,6 +108,7 @@ def test_cli_ingest_release_status_and_live_local_api_flow(tmp_path) -> None:
         "store": store,
         "service": IndustrialRagService(store),
         "principal_id": "local-public",
+        "continuation_review_principal_id": "local-public",
         "time_mode": "strict_forward",
     }
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -117,6 +118,24 @@ def test_cli_ingest_release_status_and_live_local_api_flow(tmp_path) -> None:
         health = _request_json(base_url + "/api/health")
         assert health["ok"] is True
         assert health["release"]["active_release_id"] == "synthetic-release-1"
+        assert health["continuation_review_enabled"] is True
+        continuation_query = urlencode({
+            "security_code": "600036", "as_of": datetime.now(timezone.utc).isoformat(),
+        })
+        assert _request_json(base_url + "/api/continuations?" + continuation_query)["candidates"] == []
+        try:
+            _request_json(base_url + "/api/continuations/review", {
+                "security_code": "600036",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "child_table_id": "caller-selected-table",
+                "action": "confirm",
+                "content_sha256": "0" * 64,
+                "reviewer_id": "attacker-controlled",
+            })
+        except HTTPError as error:
+            assert error.code == 400
+        else:
+            raise AssertionError("reviewer identity must be fixed by server configuration")
 
         query_scope = {
             "security_code": "600036",

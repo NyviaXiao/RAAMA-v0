@@ -61,9 +61,11 @@ def test_recall_terms_do_not_conflate_financial_metric_labels() -> None:
     assert requested_metrics("营业总收入") == ("total_operating_revenue",)
     assert requested_metrics("基本每股收益") == ("basic_eps",)
     assert requested_metrics("稀释每股收益") == ("diluted_eps",)
+    assert requested_metrics("资产总计") == ("total_assets",)
     assert requested_metric_specs("收入")[0].match_status == "ambiguous_request"
     assert metric_for_source_label("利润总额") == "total_profit"
     assert metric_for_source_label("归属于本行股东的净利润") == "parent_net_profit"
+    assert metric_for_source_label("资产总计") == "total_assets"
     assert requested_metrics("归属于本行股东的净利润") == ("parent_net_profit",)
     assert "利润总额" in METRIC_RECALL_TERMS["net_profit"]
 

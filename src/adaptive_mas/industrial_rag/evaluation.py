@@ -39,6 +39,11 @@ def _supporting_cells(candidate: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [cell for cell in value if isinstance(cell, Mapping)] if isinstance(value, list) else []
 
 
+def _supporting_spans(candidate: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    value = _candidate_citation(candidate).get("supporting_spans", [])
+    return [span for span in value if isinstance(span, Mapping)] if isinstance(value, list) else []
+
+
 def _decimal_value(value: Any, *, allow_percent: bool = False) -> tuple[Decimal, str] | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -166,6 +171,15 @@ def _located_cells(required: Mapping[str, Any], candidate: Mapping[str, Any]) ->
 
 def _required_match(required: Mapping[str, Any], candidate: Mapping[str, Any]) -> bool:
     citation = _candidate_citation(candidate)
+    supporting_span_match = False
+    if required.get("evidence_type") in {"span", "paragraph", "refutation"}:
+        for span in _supporting_spans(candidate):
+            if all(
+                required.get(key) is None or span.get(key) == required.get(key)
+                for key in ("source_id", "content_sha256", "page_number", "span_id", "char_start", "char_end")
+            ) and (required.get("span_id") or (required.get("char_start") is not None and required.get("char_end") is not None)):
+                supporting_span_match = True
+                break
     fields = (
         ("source_id", "source_id"),
         ("content_sha256", "content_sha256"),
@@ -173,7 +187,9 @@ def _required_match(required: Mapping[str, Any], candidate: Mapping[str, Any]) -
     )
     for expected_key, citation_key in fields:
         expected = required.get(expected_key)
-        if expected is not None and citation.get(citation_key) != expected:
+        if expected is not None and citation.get(citation_key) != expected and not (
+            citation_key == "page_number" and supporting_span_match
+        ):
             return False
     evidence_type = required.get("evidence_type")
     if evidence_type in {"permission", "time"}:
@@ -209,10 +225,13 @@ def _required_match(required: Mapping[str, Any], candidate: Mapping[str, Any]) -
         if not citation.get("table_id"):
             return False
     elif evidence_type in {"span", "paragraph", "refutation"}:
-        for key in ("span_id", "char_start", "char_end"):
-            if required.get(key) is not None and citation.get(key) != required.get(key):
-                return False
         if not (required.get("span_id") or (required.get("char_start") is not None and required.get("char_end") is not None)):
+            return False
+        direct_match = all(
+            required.get(key) is None or citation.get(key) == required.get(key)
+            for key in ("span_id", "char_start", "char_end")
+        )
+        if not direct_match and not supporting_span_match:
             return False
     else:
         return False

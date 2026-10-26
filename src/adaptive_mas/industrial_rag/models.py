@@ -244,6 +244,7 @@ class Table:
     report_period: str | None = None
     page_start: int | None = None
     page_end: int | None = None
+    continuation_candidate: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         validate_identifier(self.table_id, "table_id")

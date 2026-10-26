@@ -57,6 +57,14 @@ uv run raama-rag ingest --source .\scanned-report.pdf --metadata .\scanned-repor
 
 The Docling asset contract pins Docling 2.129.0, RapidOCR 3.9.2, Heron layout commit `8f39ad3c0b4c58e9c2d2c84a38465abf757272d8`, and TableFormer commit `fc0f2d45e2218ea24bce5045f58a389aed16dc23` (tag `v2.3.0`). Inference requires the local asset manifest and checks file paths, sizes, and SHA-256 values; external services and plugins are disabled and Hugging Face is placed in offline mode. A synthetic scanned financial-table PDF has passed the local CPU smoke path. This does not establish OCR accuracy on real filings or cross-page table quality.
 
+Tables whose next page omits its column headings remain quarantined until a reviewer confirms the adjacent-page candidate. To expose review controls in the workbench, configure a server-side principal that already has read access to the source, including it in that source's `read_principals` metadata before ingest:
+
+```powershell
+uv run raama-rag serve --host 127.0.0.1 --port 8877 --principal-id local-public --continuation-review-principal-id local-reviewer
+```
+
+The review identity comes from server configuration; request bodies cannot choose it. Confirm, reject, and revoke decisions are kept in an audit table. Confirming or revoking changes the continuation revision and invalidates cached searches and pagination cursors.
+
 ## Build and publish a local corpus snapshot
 
 Use the `version_id` from the ingest response:

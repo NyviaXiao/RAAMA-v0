@@ -200,6 +200,7 @@ def main() -> None:
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8877)
     serve_parser.add_argument("--principal-id", default="local-public")
+    serve_parser.add_argument("--continuation-review-principal-id", help="server-side principal allowed to review continuation candidates")
     serve_parser.add_argument("--time-mode", choices=["strict_forward", "retrospective_diagnostic"], default="strict_forward")
     serve_parser.add_argument("--qwen-models", type=Path)
 
@@ -245,7 +246,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "serve":
         serve(database_path=args.database, object_root=args.objects, host=args.host, port=args.port,
-              principal_id=args.principal_id, time_mode=args.time_mode,
+              principal_id=args.principal_id, continuation_review_principal_id=args.continuation_review_principal_id,
+              time_mode=args.time_mode,
               qwen_model_dir=args.qwen_models)
         return
     if args.command == "fetch-docling-models":

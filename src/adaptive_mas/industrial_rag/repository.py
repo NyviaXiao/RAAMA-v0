@@ -89,6 +89,20 @@ CREATE TABLE IF NOT EXISTS rag_access_grants (
 );
 CREATE TABLE IF NOT EXISTS rag_access_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL);
 INSERT OR IGNORE INTO rag_access_state(singleton, revision) VALUES(1,0);
+CREATE TABLE IF NOT EXISTS rag_continuation_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL);
+INSERT OR IGNORE INTO rag_continuation_state(singleton, revision) VALUES(1,0);
+CREATE TABLE IF NOT EXISTS rag_table_continuation_reviews (
+  child_table_id TEXT PRIMARY KEY REFERENCES rag_tables(table_id),
+  previous_table_id TEXT NOT NULL REFERENCES rag_tables(table_id),
+  version_id TEXT NOT NULL REFERENCES rag_document_versions(version_id),
+  content_sha256 TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('confirmed','rejected','revoked')),
+  reviewer_id TEXT NOT NULL, reviewed_at TEXT NOT NULL, note TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rag_table_continuation_events (
+  event_id INTEGER PRIMARY KEY AUTOINCREMENT, child_table_id TEXT NOT NULL, previous_table_id TEXT NOT NULL,
+  version_id TEXT NOT NULL, content_sha256 TEXT NOT NULL, action TEXT NOT NULL,
+  reviewer_id TEXT NOT NULL, reviewed_at TEXT NOT NULL, note TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS rag_outbox (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT NOT NULL UNIQUE, event_type TEXT NOT NULL,
   payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
@@ -361,6 +375,168 @@ class IndustrialRagStore:
             row = connection.execute("SELECT revision FROM rag_access_state WHERE singleton=1").fetchone()
         return int(row["revision"])
 
+    def continuation_revision(self) -> int:
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT revision FROM rag_continuation_state WHERE singleton=1").fetchone()
+        return int(row["revision"])
+
+    def list_table_continuation_candidates(self, version_ids: Sequence[str]) -> list[dict[str, object]]:
+        if not version_ids:
+            return []
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT t.table_id,t.version_id,t.payload_json AS table_payload_json,v.content_sha256,d.title,d.security_code,"
+                "cr.status AS review_status,cr.reviewer_id,cr.reviewed_at,cr.note "
+                "FROM rag_tables t JOIN rag_document_versions v USING(version_id) "
+                "JOIN rag_documents d USING(document_id) "
+                "LEFT JOIN rag_table_continuation_reviews cr ON cr.child_table_id=t.table_id "
+                "AND cr.version_id=t.version_id AND cr.content_sha256=v.content_sha256 "
+                "WHERE t.version_id IN (" + ",".join("?" for _ in version_ids) + ") ORDER BY t.page_start,t.table_id",
+                list(version_ids),
+            ).fetchall()
+        candidates: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(str(row["table_payload_json"]))
+            candidate = payload.get("continuation_candidate")
+            if not isinstance(candidate, dict):
+                continue
+            with closing(self._connect()) as connection:
+                same_source_parent = connection.execute(
+                    "SELECT 1 FROM rag_tables p JOIN rag_document_versions pv USING(version_id) "
+                    "JOIN rag_document_versions cv ON cv.version_id=? "
+                    "WHERE p.table_id=? AND p.version_id=cv.version_id "
+                    "AND pv.document_id=cv.document_id AND pv.content_sha256=cv.content_sha256",
+                    (str(row["version_id"]), str(candidate.get("previous_table_id", ""))),
+                ).fetchone()
+            checks = dict(candidate.get("checks", {}))
+            checks["same_source_version"] = same_source_parent is not None
+            eligible = bool(candidate.get("eligible_for_review")) and all(checks.values())
+            review_status = str(row["review_status"] or candidate.get("review_status", "proposed"))
+            if same_source_parent is None and row["review_status"] is None:
+                review_status = "quarantined"
+            candidates.append({
+                **candidate,
+                "checks": checks,
+                "eligible_for_review": eligible,
+                "review_status": review_status,
+                "reviewer_id": row["reviewer_id"],
+                "reviewed_at": row["reviewed_at"],
+                "review_note": row["note"],
+                "version_id": str(row["version_id"]),
+                "content_sha256": str(row["content_sha256"]),
+                "document_title": str(row["title"]),
+                "security_code": row["security_code"],
+            })
+        return candidates
+
+    def review_table_continuation(
+        self,
+        child_table_id: str,
+        *,
+        action: str,
+        reviewer_id: str,
+        release_id: str,
+        expected_content_sha256: str,
+        note: str = "",
+    ) -> dict[str, object]:
+        if action not in {"confirm", "reject", "revoke"}:
+            raise ValueError("continuation action must be confirm, reject, or revoke")
+        validate_identifier(reviewer_id, "reviewer_id")
+        validate_sha256(expected_content_sha256)
+        if not isinstance(note, str) or len(note) > 1000:
+            raise ValueError("review note must contain at most 1000 characters")
+        status = {"confirm": "confirmed", "reject": "rejected", "revoke": "revoked"}[action]
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT t.table_id,t.version_id,t.page_start,t.payload_json,v.content_sha256,v.document_id,"
+                "p.table_id AS previous_table_id,p.version_id AS previous_version_id,p.page_end AS previous_page_end,"
+                "pv.content_sha256 AS previous_content_sha256,"
+                "cr.status AS prior_status,ar.release_id AS active_release_id "
+                "FROM rag_tables t JOIN rag_document_versions v USING(version_id) "
+                "JOIN rag_documents d USING(document_id) "
+                "JOIN rag_access_grants g ON g.document_id=d.document_id AND g.principal_id=? AND g.can_read=1 "
+                "JOIN rag_release_versions rv ON rv.version_id=t.version_id AND rv.release_id=? "
+                "JOIN rag_active_release ar ON ar.singleton=1 "
+                "LEFT JOIN rag_table_continuation_reviews cr ON cr.child_table_id=t.table_id "
+                "AND cr.version_id=t.version_id AND cr.content_sha256=v.content_sha256 "
+                "LEFT JOIN rag_tables p ON p.table_id=json_extract(t.payload_json,'$.continuation_candidate.previous_table_id') "
+                "AND p.version_id=t.version_id "
+                "LEFT JOIN rag_document_versions pv ON pv.version_id=p.version_id "
+                "AND pv.document_id=v.document_id AND pv.content_sha256=v.content_sha256 "
+                "WHERE t.table_id=? AND ar.release_id=?",
+                (reviewer_id, release_id, child_table_id, release_id),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise PermissionError("continuation candidate is not currently available to this reviewer")
+            if str(row["content_sha256"]) != expected_content_sha256:
+                connection.rollback()
+                raise ValueError("continuation candidate source hash changed")
+            table_payload = json.loads(str(row["payload_json"]))
+            candidate = table_payload.get("continuation_candidate")
+            if not isinstance(candidate, dict):
+                connection.rollback()
+                raise FileNotFoundError("continuation candidate not found")
+            previous_table_id = str(candidate["previous_table_id"])
+            if (
+                row["previous_table_id"] is None
+                or str(row["previous_table_id"]) != previous_table_id
+                or str(row["previous_version_id"]) != str(row["version_id"])
+                or str(row["previous_content_sha256"]) != expected_content_sha256
+            ):
+                connection.rollback()
+                raise ValueError("continuation predecessor is no longer valid")
+            if action == "confirm":
+                if not candidate.get("eligible_for_review") or not all(candidate.get("checks", {}).values()):
+                    connection.rollback()
+                    raise ValueError("continuation candidate failed its source checks and cannot be confirmed")
+                if int(row["previous_page_end"] or 0) + 1 != int(row["page_start"] or 0):
+                    connection.rollback()
+                    raise ValueError("continuation pages are no longer adjacent")
+                child_columns = {
+                    int(value[0]) for value in connection.execute(
+                        "SELECT DISTINCT column_index FROM rag_cells WHERE table_id=? AND version_id=?",
+                        (child_table_id, row["version_id"]),
+                    ).fetchall()
+                }
+                previous_columns = {
+                    int(value[0]) for value in connection.execute(
+                        "SELECT DISTINCT column_index FROM rag_cells WHERE table_id=? AND version_id=?",
+                        (previous_table_id, row["version_id"]),
+                    ).fetchall()
+                }
+                if not child_columns or child_columns != previous_columns:
+                    connection.rollback()
+                    raise ValueError("continuation table columns no longer match")
+            prior_status = row["prior_status"]
+            if action == "revoke" and prior_status != "confirmed":
+                connection.rollback()
+                raise ValueError("only a confirmed continuation can be revoked")
+            if action == "reject" and prior_status == "confirmed":
+                connection.rollback()
+                raise ValueError("a confirmed continuation must be revoked before rejection")
+            if prior_status == status:
+                connection.commit()
+                return {"status": status, "changed": False, "revision": self.continuation_revision()}
+            reviewed_at = _now()
+            connection.execute(
+                "INSERT INTO rag_table_continuation_reviews VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(child_table_id) DO UPDATE SET previous_table_id=excluded.previous_table_id,"
+                "version_id=excluded.version_id,content_sha256=excluded.content_sha256,status=excluded.status,"
+                "reviewer_id=excluded.reviewer_id,reviewed_at=excluded.reviewed_at,note=excluded.note",
+                (child_table_id, previous_table_id, row["version_id"], expected_content_sha256, status, reviewer_id, reviewed_at, note),
+            )
+            connection.execute(
+                "INSERT INTO rag_table_continuation_events(child_table_id,previous_table_id,version_id,content_sha256,action,reviewer_id,reviewed_at,note) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (child_table_id, previous_table_id, row["version_id"], expected_content_sha256, action, reviewer_id, reviewed_at, note),
+            )
+            connection.execute("UPDATE rag_continuation_state SET revision=revision+1 WHERE singleton=1")
+            revision = int(connection.execute("SELECT revision FROM rag_continuation_state WHERE singleton=1").fetchone()["revision"])
+            connection.commit()
+        return {"status": status, "changed": True, "reviewer_id": reviewer_id, "reviewed_at": reviewed_at, "revision": revision}
+
     def set_access(self, principal_id: str, document_id: str, *, can_read: bool) -> int:
         if not principal_id or len(principal_id) > 128:
             raise ValueError("principal_id must contain 1..128 characters")
@@ -423,10 +599,95 @@ class IndustrialRagStore:
             rows = connection.execute(
                 "SELECT b.*,v.source_id,v.source_url,v.published_at,v.first_available_at,v.captured_at,v.ingested_at,v.content_sha256,v.time_basis,d.document_id,d.title,d.security_code "
                 "FROM rag_blocks b JOIN rag_document_versions v USING(version_id) JOIN rag_documents d USING(document_id) "
-                "WHERE b.version_id IN (" + ",".join("?" for _ in version_ids) + ") AND b.quarantine_reason IS NULL",
+                "LEFT JOIN rag_table_continuation_reviews cr ON cr.child_table_id=b.table_id "
+                "AND cr.version_id=b.version_id AND cr.content_sha256=v.content_sha256 "
+                "WHERE b.version_id IN (" + ",".join("?" for _ in version_ids) + ") "
+                "AND (b.quarantine_reason IS NULL OR (b.block_type='table_row_group' AND cr.status='confirmed' "
+                "AND EXISTS (SELECT 1 FROM rag_tables p WHERE p.table_id=cr.previous_table_id AND p.version_id=b.version_id)))",
                 list(version_ids),
             ).fetchall()
-        return list(rows)
+            output: list[dict[str, object]] = []
+            for row in rows:
+                item = dict(row)
+                if row["quarantine_reason"] is None or row["block_type"] != "table_row_group":
+                    output.append(item)
+                    continue
+                table_row = connection.execute(
+                    "SELECT payload_json FROM rag_tables WHERE table_id=?", (row["table_id"],),
+                ).fetchone()
+                candidate = json.loads(str(table_row["payload_json"])).get("continuation_candidate") if table_row else None
+                if not isinstance(candidate, dict):
+                    continue
+                parent_id = str(candidate["previous_table_id"])
+                same_version_parent = connection.execute(
+                    "SELECT 1 FROM rag_tables WHERE table_id=? AND version_id=?",
+                    (parent_id, row["version_id"]),
+                ).fetchone()
+                if same_version_parent is None:
+                    continue
+                parent_cells = connection.execute(
+                    "SELECT * FROM rag_cells WHERE table_id=? AND version_id=? ORDER BY row_index,column_index",
+                    (parent_id, row["version_id"]),
+                ).fetchall()
+                parent_table = connection.execute(
+                        "SELECT payload_json FROM rag_tables WHERE table_id=? AND version_id=?",
+                        (parent_id, row["version_id"]),
+                ).fetchone()
+                parent_payload = json.loads(str(parent_table["payload_json"])) if parent_table else {}
+                header_rows = int(parent_payload.get("header_rows", 1))
+                headers: dict[int, list[str]] = {}
+                supporting_cells = []
+                for cell in parent_cells:
+                    if int(cell["row_index"]) >= header_rows:
+                        continue
+                    column = int(cell["column_index"])
+                    headers.setdefault(column, []).append(str(cell["raw_text"]))
+                    supporting_cells.append({
+                        "cell_id": json.loads(str(cell["payload_json"])).get("cell_id"),
+                        "row_index": int(cell["row_index"]), "column_index": column,
+                        "page_number": cell["page_number"], "raw_text": str(cell["raw_text"]),
+                        "table_id": parent_id,
+                    })
+                header_text = " | ".join(
+                    f"{column}:{' / '.join(values)}" for column, values in sorted(headers.items())
+                )
+                context = candidate.get("previous_context", {})
+                context_bits = [
+                    str(context[key]) for key in ("title", "entity_name", "report_period", "unit", "accounting_basis")
+                    if isinstance(context, dict) and context.get(key)
+                ]
+                if context_bits:
+                    header_text = " | ".join([header_text, *context_bits]) if header_text else " | ".join(context_bits)
+                data = str(row["text"]).partition("\n数据行：")[2]
+                item["text"] = f"列头：{header_text}\n数据行：{data}"
+                payload = json.loads(str(row["payload_json"]))
+                continuation = {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "previous_table_id": parent_id,
+                    "current_table_id": row["table_id"],
+                    "previous_page": candidate.get("previous_page"),
+                    "current_page": candidate.get("current_page"),
+                    "context": context,
+                    "header_labels": candidate.get("header_labels", {}),
+                    "review_status": "confirmed",
+                }
+                payload["continuation"] = continuation
+                payload["supporting_cells"] = supporting_cells
+                span_id = candidate.get("context_span_id")
+                if span_id:
+                    span = connection.execute(
+                        "SELECT span_id,page_number,char_start,char_end,version_id FROM rag_spans WHERE span_id=? AND version_id=?",
+                        (span_id, row["version_id"]),
+                    ).fetchone()
+                    if span:
+                        payload["supporting_spans"] = [{
+                            "span_id": span["span_id"], "page_number": span["page_number"],
+                            "char_start": span["char_start"], "char_end": span["char_end"],
+                            "version_id": span["version_id"], "role": "continuation_context",
+                        }]
+                item["payload_json"] = _json(payload)
+                output.append(item)
+        return output
 
     def read_facts(self, version_ids: Sequence[str]) -> list[sqlite3.Row]:
         if not version_ids:
@@ -477,7 +738,27 @@ class IndustrialRagStore:
                 "SELECT * FROM rag_cells WHERE table_id=? AND (row_index<? OR row_index BETWEEN ? AND ?) ORDER BY row_index,column_index",
                 (table_id, int(table["header_rows"]), row_start, row_end),
             ).fetchall()
-        return {"table": dict(table), "cells": [dict(row) for row in cells]}
+            continuation = connection.execute(
+                "SELECT cr.*,p.payload_json AS parent_payload_json FROM rag_table_continuation_reviews cr "
+                "JOIN rag_tables child ON child.table_id=cr.child_table_id AND child.version_id=cr.version_id "
+                "JOIN rag_document_versions v ON v.version_id=cr.version_id AND v.content_sha256=cr.content_sha256 "
+                "JOIN rag_tables p ON p.table_id=cr.previous_table_id AND p.version_id=cr.version_id "
+                "WHERE cr.child_table_id=? AND cr.version_id=? AND cr.content_sha256=? AND cr.status='confirmed'",
+                (table_id, table["version_id"], table["content_sha256"]),
+            ).fetchone()
+            parent_cells = []
+            if continuation is not None:
+                parent_payload = json.loads(str(continuation["parent_payload_json"]))
+                parent_header_rows = int(parent_payload.get("header_rows", 1))
+                parent_cells = [dict(row) for row in connection.execute(
+                    "SELECT * FROM rag_cells WHERE table_id=? AND version_id=? AND row_index<? ORDER BY row_index,column_index",
+                    (continuation["previous_table_id"], table["version_id"], parent_header_rows),
+                ).fetchall()]
+        return {
+            "table": dict(table), "cells": [dict(row) for row in cells],
+            "continuation": dict(continuation) if continuation is not None else None,
+            "parent_header_cells": parent_cells,
+        }
 
     def _get_document_bytes(self, document_id: str, version_id: str, principal_id: str) -> bytes:
         with closing(self._connect()) as connection:

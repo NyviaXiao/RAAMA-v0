@@ -24,6 +24,8 @@ from adaptive_mas.industrial_rag.models import (
     QueryPlan,
     Section,
     Span,
+    Table,
+    TableCell,
 )
 from adaptive_mas.agents.harness import _fundamental_handlers
 from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore
@@ -31,6 +33,7 @@ from adaptive_mas.industrial_rag.parser import (
     ParseError,
     UnsupportedFormat,
     normalize_financial_cell,
+    annotate_table_continuation_candidates,
     parse_isolated,
     records_from_parse,
     validate_cross_page_table_continuation,
@@ -845,6 +848,253 @@ def test_cross_page_merge_is_not_automatic_without_matching_basis_and_header() -
     next_page["unit"] = "人民币元"
     rejected = validate_cross_page_table_continuation(prior, next_page)
     assert rejected["automatic_merge_allowed"] is False
+
+
+def test_docling_continuation_candidates_require_adjacent_matching_tables_and_compatible_context() -> None:
+    def detect(child_page: int = 115, child_columns: int = 3, child_context: str = "") -> dict[str, object]:
+        tables = [
+            {"table_id": "prior-table", "page_start": 114, "page_end": 114, "header_rows": 1, "title": None},
+            {
+                "table_id": "child-table", "page_start": child_page, "page_end": child_page,
+                "header_rows": 1, "title": None, "row_group_quarantine_reason": "column_headers_not_detected",
+            },
+        ]
+        cells = [
+            {"table_id": "prior-table", "row_index": 0, "column_index": 0, "raw_text": "项目"},
+            {"table_id": "prior-table", "row_index": 0, "column_index": 1, "raw_text": "期末余额"},
+            {"table_id": "prior-table", "row_index": 0, "column_index": 2, "raw_text": "期初余额"},
+        ]
+        cells.extend(
+            {"table_id": "child-table", "row_index": 0, "column_index": column, "raw_text": f"value-{column}"}
+            for column in range(child_columns)
+        )
+        pages = [
+            {"page_number": 114, "text": "1、合并资产负债表\n编制单位：Example Issuer\n2024 年 12 月 31 日\n单位为：千元"},
+            {"page_number": child_page, "text": child_context},
+        ]
+        annotate_table_continuation_candidates(tables, cells, pages)
+        candidate = tables[1].get("continuation_candidate")
+        assert isinstance(candidate, dict)
+        return candidate
+
+    candidate = detect()
+    assert candidate["eligible_for_review"] is True
+    assert candidate["previous_context"]["entity_name"] == "Example Issuer"
+    assert candidate["previous_context"]["unit"] == "千元"
+    assert candidate["previous_context"]["accounting_basis"] == "consolidated"
+    assert candidate["header_labels"] == {0: "项目", 1: "期末余额", 2: "期初余额"}
+
+    nonadjacent = detect(child_page=116)
+    assert nonadjacent["checks"]["adjacent_pages"] is False
+    assert nonadjacent["eligible_for_review"] is False
+
+    mismatched = detect(child_columns=2)
+    assert mismatched["checks"]["matching_column_count"] is False
+    assert mismatched["eligible_for_review"] is False
+
+    conflicting = detect(
+        child_context="编制单位：Different Issuer\n2023 年 12 月 31 日\n单位为：人民币元",
+    )
+    assert set(conflicting["metadata_conflicts"]) == {"entity_name", "report_period", "unit"}
+    assert conflicting["checks"]["metadata_compatible"] is False
+    assert conflicting["eligible_for_review"] is False
+
+
+def test_continuation_review_is_durable_revocable_and_preserves_both_page_citations(tmp_path) -> None:
+    base = _bundle()
+    context_text = "1、合并资产负债表\n编制单位：招商银行股份有限公司\n2024 年 12 月 31 日\n单位为：千元\n项目 | 期末余额 | 期初余额"
+    prior_id, child_id = "version-1-table-prior", "version-1-table-child"
+    candidate = {
+        "candidate_id": f"cont-{prior_id}-{child_id}",
+        "previous_table_id": prior_id,
+        "current_table_id": child_id,
+        "previous_page": 114,
+        "current_page": 115,
+        "column_count": 3,
+        "header_labels": {"0": "项目", "1": "期末余额", "2": "期初余额"},
+        "previous_context": {
+            "title": "合并资产负债表", "entity_name": "招商银行股份有限公司",
+            "report_period": "2024 年 12 月 31 日", "unit": "千元", "accounting_basis": "consolidated",
+        },
+        "current_context": {},
+        "metadata_conflicts": {},
+        "checks": {key: True for key in (
+            "adjacent_pages", "unique_predecessor", "matching_column_count",
+            "child_headers_missing", "predecessor_headers_present", "metadata_compatible",
+        )},
+        "eligible_for_review": True,
+        "review_status": "proposed",
+        "parser_header_rows": 1,
+        "context_span_id": "version-1-span-context",
+    }
+    prior = Table(prior_id, "version-1", None, 1, page_start=114, page_end=114)
+    child = Table(child_id, "version-1", None, 0, page_start=115, page_end=115, continuation_candidate=candidate)
+    cells = (
+        TableCell("prior-r0-c0", prior_id, "version-1", 0, 0, "项目", page_number=114),
+        TableCell("prior-r0-c1", prior_id, "version-1", 0, 1, "期末余额", page_number=114),
+        TableCell("prior-r0-c2", prior_id, "version-1", 0, 2, "期初余额", page_number=114),
+        TableCell("child-r15-c0", child_id, "version-1", 15, 0, "资产总计", page_number=115),
+        TableCell("child-r15-c1", child_id, "version-1", 15, 1, "786,658,123", "786658123", "number", page_number=115),
+        TableCell("child-r15-c2", child_id, "version-1", 15, 2, "717,168,041", "717168041", "number", page_number=115),
+    )
+    context_span = Span("version-1-span-context", "version-1", 114, 0, len(context_text), context_text)
+    blocks = (
+        Block("version-1-context-block", "version-1", context_text, page_number=114,
+              char_start=0, char_end=len(context_text), span_id=context_span.span_id),
+        Block("version-1-child-row", "version-1", "列头：\n数据行：资产总计 | 786,658,123 | 717,168,041",
+              block_type="table_row_group", page_number=115, table_id=child_id,
+              row_start=15, row_end=15, quarantine_reason="column_headers_not_detected"),
+    ) + tuple(
+        Block(f"version-1-noise-{index}", "version-1", "2024年年报资产总计相关说明", page_number=116 + index)
+        for index in range(3)
+    )
+    bundle = replace(
+        base,
+        blocks=blocks,
+        spans=base.spans + (context_span,),
+        tables=(prior, child),
+        cells=cells,
+        facts=(),
+        read_principals=("analyst", "continuation-reviewer"),
+    )
+    store = IndustrialRagStore(tmp_path / "continuation.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, [bundle.version.version_id], "release-1")
+    service = IndustrialRagService(store)
+    query_plan = replace(
+        _plan(release_id="release-1", channels=("bm25",)),
+        query="2024年合并资产负债表资产总计",
+    )
+    review_plan = replace(query_plan, principal_id="continuation-reviewer")
+    before = service.search(query_plan)
+    assert not any(item["citation"].get("table_id") == child_id for item in before["retrieved"])
+    before_page = service.search_page(query_plan, page_size=1)
+    stale_cursor = before_page["pagination"]["next_cursor"]
+    assert stale_cursor
+    with pytest.raises(PermissionError):
+        service.read_table_row(query_plan, child_id, 15, 15)
+    with pytest.raises(PermissionError):
+        service.review_continuation_candidate(
+            replace(query_plan, principal_id="untrusted-reviewer"), child_id,
+            action="confirm", content_sha256=bundle.version.content_sha256,
+        )
+
+    listed = service.list_continuation_candidates(review_plan)["candidates"]
+    reviewed = next(item for item in listed if item["current_table_id"] == child_id)
+    assert reviewed["review_status"] == "proposed"
+    revision_before = store.continuation_revision()
+    service.review_continuation_candidate(
+        review_plan, child_id, action="confirm", content_sha256=bundle.version.content_sha256,
+        note="reviewed source page pair",
+    )
+    assert store.continuation_revision() == revision_before + 1
+    with pytest.raises(ValueError, match="continuation review change"):
+        service.search_page(query_plan, page_size=1, cursor=stale_cursor)
+
+    after = service.search(query_plan)
+    assert after["continuation_revision"] == revision_before + 1
+    assert after["cache"]["key_sha256"] != before["cache"]["key_sha256"]
+    row_hit = next(item for item in after["retrieved"] if item["citation"].get("table_id") == child_id)
+    expanded = service.read_table_row(query_plan, child_id, 15, 15)
+    assert row_hit["page_number"] == 115
+    assert expanded["citation"]["page_number"] == 115
+    assert expanded["citation"]["supporting_spans"][0]["page_number"] == 114
+    assert any(cell["page_number"] == 114 for cell in expanded["citation"]["supporting_cells"])
+    assert any(cell["cell_id"] == "child-r15-c1" and cell["page_number"] == 115 for cell in expanded["citation"]["supporting_cells"])
+
+    service.review_continuation_candidate(
+        review_plan, child_id, action="revoke", content_sha256=bundle.version.content_sha256,
+        note="review revoked",
+    )
+    assert store.continuation_revision() == revision_before + 2
+    after_revoke = service.search(query_plan)
+    assert after_revoke["cache"]["key_sha256"] != after["cache"]["key_sha256"]
+    assert not any(item["citation"].get("table_id") == child_id for item in after_revoke["retrieved"])
+    assert not any(block["block_id"] == "version-1-child-row" for block in store.read_blocks(["version-1"]))
+    with pytest.raises(PermissionError):
+        service.read_table_row(query_plan, child_id, 15, 15)
+    final_candidate = next(
+        item for item in service.list_continuation_candidates(review_plan)["candidates"]
+        if item["current_table_id"] == child_id
+    )
+    assert final_candidate["review_status"] == "revoked"
+
+
+def test_continuation_review_rejects_a_predecessor_from_another_source_version(tmp_path) -> None:
+    child_base = _bundle(
+        version_id="version-1", document_id="document-1", source_id="source-1",
+        payload=b"child source version",
+    )
+    other_base = _bundle(
+        version_id="version-2", document_id="document-2", source_id="source-2",
+        payload=b"different predecessor source version",
+    )
+    prior_id, child_id = "version-2-table-prior", "version-1-table-child"
+    candidate = {
+        "candidate_id": f"cont-{prior_id}-{child_id}",
+        "previous_table_id": prior_id,
+        "current_table_id": child_id,
+        "previous_page": 114,
+        "current_page": 115,
+        "column_count": 3,
+        "header_labels": {"0": "项目", "1": "期末余额", "2": "期初余额"},
+        "previous_context": {"title": "合并资产负债表", "unit": "千元"},
+        "current_context": {},
+        "metadata_conflicts": {},
+        "checks": {key: True for key in (
+            "adjacent_pages", "unique_predecessor", "matching_column_count",
+            "child_headers_missing", "predecessor_headers_present", "metadata_compatible",
+        )},
+        "eligible_for_review": True,
+        "review_status": "proposed",
+        "parser_header_rows": 1,
+    }
+    prior = Table(prior_id, "version-2", None, 1, page_start=114, page_end=114)
+    prior_cells = tuple(
+        TableCell(f"prior-r0-c{column}", prior_id, "version-2", 0, column, label, page_number=114)
+        for column, label in enumerate(("项目", "期末余额", "期初余额"))
+    )
+    child = Table(child_id, "version-1", None, 0, page_start=115, page_end=115, continuation_candidate=candidate)
+    child_cells = (
+        TableCell("child-r15-c0", child_id, "version-1", 15, 0, "资产总计", page_number=115),
+        TableCell("child-r15-c1", child_id, "version-1", 15, 1, "786,658,123", "786658123", "number", page_number=115),
+        TableCell("child-r15-c2", child_id, "version-1", 15, 2, "717,168,041", "717168041", "number", page_number=115),
+    )
+    child_block = Block(
+        "version-1-child-row", "version-1", "列头：\n数据行：资产总计 | 786,658,123 | 717,168,041",
+        block_type="table_row_group", page_number=115, table_id=child_id,
+        row_start=15, row_end=15, quarantine_reason="column_headers_not_detected",
+    )
+    reviewer = "continuation-reviewer"
+    child_bundle = replace(
+        child_base, tables=(child,), cells=child_cells, blocks=child_base.blocks + (child_block,), facts=(),
+        read_principals=("analyst", reviewer),
+    )
+    other_bundle = replace(
+        other_base, tables=(prior,), cells=prior_cells, facts=(),
+        read_principals=("analyst", reviewer),
+    )
+    store = IndustrialRagStore(tmp_path / "cross-source.sqlite3", LocalContentAddressedStore(tmp_path / "cross-source-objects"))
+    store.ingest_bundle(child_bundle)
+    store.ingest_bundle(other_bundle)
+    _consume_all(store)
+    _publish(store, ["version-1", "version-2"], "release-1")
+    service = IndustrialRagService(store)
+    review_plan = replace(_plan(release_id="release-1", principal=reviewer), query="continuation review")
+    found = next(
+        item for item in service.list_continuation_candidates(review_plan)["candidates"]
+        if item["current_table_id"] == child_id
+    )
+    assert found["checks"]["same_source_version"] is False
+    assert found["eligible_for_review"] is False
+    with pytest.raises(ValueError, match="predecessor is no longer valid"):
+        service.review_continuation_candidate(
+            review_plan, child_id, action="confirm", content_sha256=child_bundle.version.content_sha256,
+        )
+    with pytest.raises(PermissionError, match="quarantined"):
+        service.read_table_row(review_plan, child_id, 15, 15)
+    assert not any(block["block_id"] == child_block.block_id for block in store.read_blocks(["version-1"]))
 
 
 def test_old_release_snapshot_is_stable_and_rollback_is_complete(tmp_path) -> None:

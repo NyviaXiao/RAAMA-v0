@@ -20,6 +20,7 @@ from adaptive_mas.industrial_rag.evaluation import evaluate_manifest  # noqa: E4
 from adaptive_mas.industrial_rag.models import Document, DocumentBundle, DocumentVersion, QueryPlan  # noqa: E402
 from adaptive_mas.industrial_rag.parser import (  # noqa: E402
     _table_row_group_blocks,
+    annotate_table_continuation_candidates,
     parse_isolated,
     records_from_parse,
 )
@@ -98,9 +99,19 @@ def _case_eval_artifacts(
         for period in requested_periods(str(case["question"]), tuple(case.get("report_periods", [])))
     }
     requested_period_keys.discard(None)
+
+    def period_matches(observed: object) -> bool:
+        normalized = normalize_period(str(observed)) if observed is not None else None
+        return any(
+            normalized == requested
+            or (isinstance(requested, str) and re.fullmatch(r"20\d{2}", requested) is not None
+                and isinstance(normalized, str) and normalized.startswith(requested + "-"))
+            for requested in requested_period_keys
+        )
+
     answerable_from_retrieval = any(
         observation["metric"] in exact_metrics
-        and (not requested_period_keys or observation["period"] in requested_period_keys)
+        and (not requested_period_keys or period_matches(observation["period"]))
         for item in retrieved
         for observation in _financial_observations(item)
     )
@@ -135,6 +146,9 @@ def main() -> None:
     parser.add_argument("--source", type=Path, help="Override the source record's local_path")
     parser.add_argument("--targeted-page-range", default="1-9", help="Bounded physical source pages for Docling parsing, as N or N-M")
     parser.add_argument("--parser-table-id", default="docling-table-10-p9", help="Manually reviewed raw ID from targeted Docling output")
+    parser.add_argument("--include-all-targeted-tables", action="store_true", help="Include every extracted table in the bounded Docling page range")
+    parser.add_argument("--confirm-selected-continuation", action="store_true", help="Record an explicit local reviewer confirmation for the selected eligible child table")
+    parser.add_argument("--review-note", default="Manually reviewed source page pair for this diagnostic.")
     parser.add_argument(
         "--docling-assets",
         type=Path,
@@ -207,35 +221,45 @@ def main() -> None:
     original_page = target_first_page + parser_page - 1
     if original_page > target_last_page:
         raise ValueError("selected parser table falls outside the explicitly targeted physical page range")
-    selected_table = dict(parser_table)
-    canonical_raw_table_id = re.sub(r"-p\d+$", f"-p{original_page}", args.parser_table_id)
-    selected_table.update({
-        "table_id": canonical_raw_table_id,
-        "page_start": original_page,
-        "page_end": original_page,
-    })
-    selected_cells = [
-        cell for cell in targeted_parse.get("cells", [])
-        if cell.get("table_id") == args.parser_table_id
-        and cell.get("page_number") == parser_page
-    ]
-    if not selected_cells:
-        raise ValueError("selected Docling table has no cells on the requested source page")
-    mapped_cells = []
-    for raw_cell in selected_cells:
-        cell = dict(raw_cell)
-        cell["cell_id"] = str(cell["cell_id"]).replace(args.parser_table_id, canonical_raw_table_id, 1)
-        cell["table_id"] = canonical_raw_table_id
-        cell["page_number"] = original_page
-        mapped_cells.append(cell)
-    selected_cells = mapped_cells
-    selected_tables = [selected_table]
+    chosen_parser_tables = (
+        [table for table in targeted_parse.get("tables", []) if target_first_page <= target_first_page + int(table["page_start"]) - 1 <= target_last_page]
+        if args.include_all_targeted_tables else [parser_table]
+    )
+    selected_tables = []
+    selected_cells = []
+    mapped_table_ids: dict[str, str] = {}
+    for raw_table in chosen_parser_tables:
+        raw_table_id = str(raw_table["table_id"])
+        local_page = int(raw_table["page_start"])
+        physical_page = target_first_page + local_page - 1
+        mapped_id = re.sub(r"-p\d+$", f"-p{physical_page}", raw_table_id)
+        mapped_table_ids[raw_table_id] = mapped_id
+        table = dict(raw_table)
+        table.update({"table_id": mapped_id, "page_start": physical_page, "page_end": physical_page})
+        selected_tables.append(table)
+        table_cells = [
+            cell for cell in targeted_parse.get("cells", [])
+            if cell.get("table_id") == raw_table_id and int(cell.get("page_number") or 0) == local_page
+        ]
+        if not table_cells:
+            raise ValueError(f"selected Docling table {raw_table_id!r} has no cells on its parser page")
+        for raw_cell in table_cells:
+            cell = dict(raw_cell)
+            cell["cell_id"] = str(cell["cell_id"]).replace(raw_table_id, mapped_id, 1)
+            cell["table_id"] = mapped_id
+            cell["page_number"] = physical_page
+            selected_cells.append(cell)
+    if args.parser_table_id not in mapped_table_ids:
+        raise ValueError("manually selected table is outside the included targeted tables")
+    canonical_raw_table_id = mapped_table_ids[args.parser_table_id]
+    selected_table = next(table for table in selected_tables if table["table_id"] == canonical_raw_table_id)
 
     version_id = f"v-{content_sha256[:24]}"
     canonical_table_id = f"tbl-{version_id}-{canonical_raw_table_id}"
     merged_parse = dict(full_parse)
-    merged_parse["tables"] = [selected_table]
+    merged_parse["tables"] = selected_tables
     merged_parse["cells"] = selected_cells
+    annotate_table_continuation_candidates(selected_tables, selected_cells, merged_parse.get("pages", []))
     merged_parse["blocks"] = list(full_parse.get("blocks", [])) + _table_row_group_blocks(selected_tables, selected_cells)
     merged_parse["parser_name"] = "hybrid_pypdf_full_source_docling_targeted_table"
     merged_parse["parser_version"] = (
@@ -302,7 +326,7 @@ def main() -> None:
         tables=records["tables"],
         cells=records["cells"],
         facts=(),
-        read_principals=("local-public",),
+        read_principals=("local-public", "local-supervision"),
     )
     ingest = store.ingest_bundle(bundle)
     release = build_release(
@@ -328,6 +352,35 @@ def main() -> None:
         top_k=10,
         time_mode="retrospective_diagnostic",
     )
+    continuation_review = None
+    if args.confirm_selected_continuation:
+        review_plan = QueryPlan(
+            plan_id="local-continuation-review",
+            query="continuation review",
+            security_code=str(case["security_code"]),
+            as_of=str(case["as_of"]),
+            principal_id="local-supervision",
+            task_type="table",
+            report_periods=tuple(str(value) for value in case.get("report_periods", [])),
+            release_id=run_id,
+            channels=("bm25",),
+            top_k=10,
+            time_mode="retrospective_diagnostic",
+        )
+        candidates = service.list_continuation_candidates(review_plan)["candidates"]
+        candidate = next(
+            (item for item in candidates if item.get("current_table_id") == canonical_table_id),
+            None,
+        )
+        if candidate is None or not candidate.get("eligible_for_review"):
+            raise RuntimeError("selected child table has no eligible continuation candidate to review")
+        continuation_review = service.review_continuation_candidate(
+            review_plan,
+            canonical_table_id,
+            action="confirm",
+            content_sha256=str(candidate["content_sha256"]),
+            note=args.review_note,
+        )
     search = service.search(query_plan, use_cache=False)
     retrieved: list[dict[str, Any]] = []
     reopened_rows: list[dict[str, Any]] = []
@@ -409,6 +462,8 @@ def main() -> None:
         "query_binding": query_binding,
         "retrieved_count": len(retrieved),
         "reopened_rows": reopened_rows,
+        "continuation_review": continuation_review,
+        "continuation_revision": store.continuation_revision(),
         "exact_location_score": evaluation.get("cases", []),
         "diagnostic_scope": "one viewed public development case; no independent acceptance inference",
     }

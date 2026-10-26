@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -151,13 +152,32 @@ class RagRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             store: IndustrialRagStore = context["store"]  # type: ignore[assignment]
-            self._send(200, {"ok": True, "product": "industrial_financial_rag", "backends": store.backend_status(), "release": store.release_summaries(), "time_mode": context["time_mode"], "timestamp": datetime.now().astimezone().isoformat()})
+            self._send(200, {"ok": True, "product": "industrial_financial_rag", "backends": store.backend_status(), "release": store.release_summaries(), "time_mode": context["time_mode"], "continuation_review_enabled": bool(context.get("continuation_review_principal_id")), "continuation_revision": store.continuation_revision(), "timestamp": datetime.now().astimezone().isoformat()})
             return
         if path == "/api/releases":
             self._send(200, context["store"].release_summaries())  # type: ignore[union-attr]
             return
         if path == "/api/quarantine":
             self._send(200, context["store"].quarantine_summary())  # type: ignore[union-attr]
+            return
+        if path == "/api/continuations":
+            reviewer_id = context.get("continuation_review_principal_id")
+            if not reviewer_id:
+                self._send(404, {"error": "continuation review is not enabled"})
+                return
+            values = parse_qs(urlparse(self.path).query)
+            periods = [value for raw in values.get("report_periods", []) for value in raw.split(",") if value]
+            plan = self._plan({
+                "security_code": values.get("security_code", [""])[0],
+                "query": "continuation review",
+                "as_of": values.get("as_of", [""])[0],
+                "report_periods": periods,
+                "accounting_basis": values.get("accounting_basis", [None])[0],
+            })
+            result = context["service"].list_continuation_candidates(
+                replace(plan, principal_id=str(reviewer_id)),
+            )  # type: ignore[union-attr]
+            self._send(200, {**result, "review_enabled": True})
             return
         if path.startswith("/api/original/"):
             pieces = path.removeprefix("/api/original/").split("/")
@@ -206,6 +226,26 @@ class RagRequestHandler(BaseHTTPRequestHandler):
             request_id = payload.pop("request_id", None) if path in {
                 "/api/search/page", "/api/search", "/api/research",
             } else None
+            if path == "/api/continuations/review":
+                reviewer_id = self._context().get("continuation_review_principal_id")
+                if not reviewer_id:
+                    self._send(404, {"error": "continuation review is not enabled"})
+                    return
+                allowed = {
+                    "security_code", "query", "as_of", "report_periods", "accounting_basis",
+                    "child_table_id", "action", "content_sha256", "note",
+                }
+                required = {"security_code", "as_of", "child_table_id", "action", "content_sha256"}
+                if set(payload) - allowed or required - set(payload):
+                    raise ValueError("continuation review requires the candidate, source hash, and original query scope")
+                plan_fields = {key: payload[key] for key in ("security_code", "query", "as_of", "report_periods", "accounting_basis") if key in payload}
+                plan = replace(self._plan(plan_fields), principal_id=str(reviewer_id))
+                result = self._context()["service"].review_continuation_candidate(
+                    plan, str(payload["child_table_id"]), action=str(payload["action"]),
+                    content_sha256=str(payload["content_sha256"]), note=str(payload.get("note", "")),
+                )  # type: ignore[union-attr]
+                self._send(200, result)
+                return
             if path == "/api/search/page":
                 page_size = payload.get("page_size")
                 cursor = payload.get("cursor")
@@ -403,6 +443,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8877,
     principal_id: str = "local-public",
+    continuation_review_principal_id: str | None = None,
     time_mode: str = "strict_forward",
     qwen_model_dir: str | Path | None = None,
 ) -> None:
@@ -430,6 +471,7 @@ def serve(
         "store": store,
         "service": service,
         "principal_id": principal_id,
+        "continuation_review_principal_id": continuation_review_principal_id,
         "time_mode": time_mode,
         "search_timeout_seconds": 30.0,
     }

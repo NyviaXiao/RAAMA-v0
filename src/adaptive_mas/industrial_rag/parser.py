@@ -163,6 +163,125 @@ def _table_from_rows(rows: Sequence[Sequence[str]], *, version_hint: str = "pars
     return tables, cells
 
 
+def _continuation_metadata(table: Mapping[str, Any], page_text: str) -> dict[str, str | None]:
+    def first(pattern: str) -> str | None:
+        match = re.search(pattern, page_text, flags=re.IGNORECASE)
+        return " ".join(match.group(1).split()) if match else None
+
+    title = str(table.get("title") or "").strip() or first(r"(?:^|\n)\s*\d+[、.．]?\s*([^\n]{2,80}(?:资产负债表|利润表|现金流量表))")
+    entity = first(r"(?:编制单位|公司名称|主体名称)\s*[:：]\s*([^\n]{2,120})")
+    period = first(r"((?:20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日|20\d{2}\s*年\s*\d{1,2}\s*月|20\d{2}\s*年度|20\d{2}\s*年?\s*第?\s*[一二三四]\s*季度))")
+    unit = str(table.get("unit_text") or "").strip() or first(r"(?:报表的)?单位\s*为\s*[:：]?\s*([^\n，,；;。]{1,24})")
+    basis = str(table.get("accounting_basis") or "").strip() or None
+    if basis is None:
+        if re.search(r"合并(?:资产负债表|利润表|现金流量表)|合并报表", page_text):
+            basis = "consolidated"
+        elif re.search(r"母公司(?:资产负债表|利润表|现金流量表)|母公司报表", page_text):
+            basis = "parent_company"
+    return {
+        "title": title,
+        "entity_name": entity,
+        "report_period": str(table.get("report_period") or period or "") or None,
+        "unit": unit,
+        "accounting_basis": basis,
+    }
+
+
+def annotate_table_continuation_candidates(
+    tables: Sequence[dict[str, Any]],
+    cells: Sequence[Mapping[str, Any]],
+    pages: Sequence[Mapping[str, Any] | tuple[int, str, str]],
+) -> None:
+    """Annotate reviewable adjacent-table candidates without joining their source records."""
+    page_text: dict[int, str] = {}
+    for page in pages:
+        if isinstance(page, Mapping):
+            page_text[int(page["page_number"])] = str(page["text"])
+        else:
+            page_text[int(page[0])] = str(page[1])
+    cells_by_table: dict[str, list[Mapping[str, Any]]] = {}
+    for cell in cells:
+        cells_by_table.setdefault(str(cell["table_id"]), []).append(cell)
+    ordered_tables = sorted(
+        tables,
+        key=lambda table: (int(table.get("page_start") or 0), str(table["table_id"])),
+    )
+    for child in ordered_tables:
+        if child.get("row_group_quarantine_reason") != "column_headers_not_detected":
+            continue
+        child_page = int(child.get("page_start") or 0)
+        prior_tables = [
+            table for table in ordered_tables
+            if int(table.get("page_end") or table.get("page_start") or 0) < child_page
+        ]
+        if not prior_tables:
+            continue
+        nearest_page = max(int(table.get("page_end") or table.get("page_start") or 0) for table in prior_tables)
+        nearest = [
+            table for table in prior_tables
+            if int(table.get("page_end") or table.get("page_start") or 0) == nearest_page
+        ]
+        child_cells = cells_by_table.get(str(child["table_id"]), [])
+        child_columns = {int(cell["column_index"]) for cell in child_cells}
+        child_context = _continuation_metadata(child, page_text.get(child_page, ""))
+        for parent in nearest:
+            parent_id = str(parent["table_id"])
+            parent_cells = cells_by_table.get(parent_id, [])
+            parent_columns = {int(cell["column_index"]) for cell in parent_cells}
+            header_rows = int(parent.get("header_rows", 1))
+            header_cells = [cell for cell in parent_cells if int(cell["row_index"]) < header_rows]
+            headers_by_column: dict[int, list[str]] = {}
+            for cell in sorted(header_cells, key=lambda value: (int(value["row_index"]), int(value["column_index"]))):
+                label = str(cell["raw_text"]).strip()
+                if label:
+                    headers_by_column.setdefault(int(cell["column_index"]), []).append(label)
+            header_labels = {
+                column: " / ".join(values)
+                for column, values in sorted(headers_by_column.items())
+            }
+            parent_context = _continuation_metadata(parent, page_text.get(nearest_page, ""))
+            conflicts = {
+                key: {
+                    "previous": parent_context[key],
+                    "current": child_context[key],
+                }
+                for key in ("title", "entity_name", "report_period", "unit", "accounting_basis")
+                if parent_context[key] and child_context[key]
+                and " ".join(str(parent_context[key]).split()).casefold()
+                != " ".join(str(child_context[key]).split()).casefold()
+            }
+            checks = {
+                "adjacent_pages": nearest_page + 1 == child_page,
+                "unique_predecessor": len(nearest) == 1,
+                "matching_column_count": bool(parent_columns) and parent_columns == child_columns,
+                "child_headers_missing": child.get("row_group_quarantine_reason") == "column_headers_not_detected",
+                "predecessor_headers_present": bool(header_labels) and set(header_labels) == parent_columns,
+                "metadata_compatible": not conflicts,
+            }
+            eligible = all(checks.values())
+            child["continuation_candidate"] = {
+                "candidate_id": f"cont-{parent_id}-{child['table_id']}",
+                "previous_table_id": parent_id,
+                "current_table_id": str(child["table_id"]),
+                "previous_page": nearest_page,
+                "current_page": child_page,
+                "column_count": len(child_columns),
+                "header_labels": header_labels,
+                "previous_context": parent_context,
+                "current_context": child_context,
+                "metadata_conflicts": conflicts,
+                "checks": checks,
+                "eligible_for_review": eligible,
+                "review_status": "proposed" if eligible else "quarantined",
+                "parser_header_rows": int(child.get("header_rows", 1)),
+                "context_page_block_id": f"page-{nearest_page}",
+            }
+            if eligible:
+                # Docling can label the first continuation row as a header when the
+                # page has no repeated headings. Preserve coordinates and include it.
+                child["header_rows"] = 0
+
+
 def _table_row_group_blocks(tables: Sequence[Mapping[str, Any]], cells: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Build row-aligned retrieval blocks while keeping each canonical cell intact."""
     cells_by_table: dict[str, list[Mapping[str, Any]]] = {}
@@ -175,7 +294,8 @@ def _table_row_group_blocks(tables: Sequence[Mapping[str, Any]], cells: Sequence
         table_cells = cells_by_table.get(table_id, [])
         if not table_cells:
             continue
-        header_rows = max(1, int(table.get("header_rows", 1)))
+        candidate = table.get("continuation_candidate")
+        header_rows = int(table.get("header_rows", 1)) if isinstance(candidate, Mapping) and candidate.get("eligible_for_review") else max(1, int(table.get("header_rows", 1)))
         rows: dict[int, list[Mapping[str, Any]]] = {}
         for cell in table_cells:
             rows.setdefault(int(cell["row_index"]), []).append(cell)
@@ -195,7 +315,7 @@ def _table_row_group_blocks(tables: Sequence[Mapping[str, Any]], cells: Sequence
             row_cells = ordered_rows[row_index]
             page_number = int(row_cells[0]["page_number"] or table.get("page_start") or 1)
             row_text = " | ".join(str(cell["raw_text"]).strip() for cell in row_cells)
-            text = f"列头：{header_text}\n数据行：{row_text}" if header_text else row_text
+            text = f"列头：{header_text}\n数据行：{row_text}" if header_text or (isinstance(candidate, Mapping) and candidate.get("eligible_for_review")) else row_text
             block_id = f"{table_id}-r{row_index}"
             prior = previous_by_page.get(page_number)
             row_group_block = {
@@ -481,6 +601,7 @@ def _parse_bytes(
         return {"status": "quarantined", "error_code": "no_extractable_text", "error": "parser produced no readable text", "pages": [], "blocks": [], "tables": tables, "cells": cells, "parser_name": parser_name, "parser_version": parser_version, "parser_confidence": 0.0, "quality": {"source_page_count": source_page_count, "extracted_page_count": 0, "signal": "structural_text_coverage_heuristic_not_accuracy"}}
     if parser_confidence < 0.6:
         return {"status": "quarantined", "error_code": "low_page_coverage", "error": "fewer than 60 percent of source pages yielded readable text", "pages": [], "blocks": [], "tables": [], "cells": [], "parser_name": parser_name, "parser_version": parser_version, "parser_confidence": parser_confidence, "quality": {"source_page_count": source_page_count, "extracted_page_count": len(pages), "signal": "structural_text_coverage_heuristic_not_accuracy"}}
+    annotate_table_continuation_candidates(tables, cells, pages)
     return {
         "status": status, "error_code": None, "error": None,
         "pages": [{"page_number": number, "text": text, "kind": kind} for number, text, kind in pages],
@@ -690,6 +811,25 @@ def records_from_parse(result: Mapping[str, Any], version_id: str) -> dict[str, 
     for raw in result.get("tables", []):
         old_id = str(raw["table_id"])
         table_id = table_ids[old_id]
+        raw_candidate = raw.get("continuation_candidate")
+        candidate = None
+        if isinstance(raw_candidate, Mapping):
+            candidate = dict(raw_candidate)
+            candidate_checks = dict(candidate.get("checks", {}))
+            for key in ("previous_table_id", "current_table_id"):
+                if candidate.get(key) is not None:
+                    candidate[key] = table_ids[str(candidate[key])]
+            candidate_checks["same_source_version"] = (
+                candidate.get("previous_table_id") in table_ids.values()
+                and candidate.get("current_table_id") in table_ids.values()
+            )
+            candidate["checks"] = candidate_checks
+            candidate["eligible_for_review"] = bool(candidate.get("eligible_for_review")) and all(candidate_checks.values())
+            candidate["candidate_id"] = f"cont-{candidate.get('previous_table_id')}-{candidate.get('current_table_id')}"
+            context_page = int(candidate["previous_page"])
+            page_block = next((block for block in result.get("blocks", []) if block.get("block_id") == f"page-{context_page}"), None)
+            if page_block is not None and page_block.get("citation_text_exact", True):
+                candidate["context_span_id"] = f"span-{safe}-page-{context_page}"
         tables.append(Table(
             table_id=table_id, version_id=version_id, title=raw.get("title"),
             header_rows=int(raw.get("header_rows", 1)),
@@ -697,6 +837,7 @@ def records_from_parse(result: Mapping[str, Any], version_id: str) -> dict[str, 
             continuation_confidence=raw.get("continuation_confidence"),
             unit_text=raw.get("unit_text"), accounting_basis=raw.get("accounting_basis"),
             report_period=raw.get("report_period"), page_start=raw.get("page_start"), page_end=raw.get("page_end"),
+            continuation_candidate=candidate,
         ))
     cells: list[TableCell] = []
     for raw in result.get("cells", []):

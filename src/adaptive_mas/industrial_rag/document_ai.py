@@ -524,7 +524,7 @@ def parse_pdf_with_docling(payload: bytes, *, asset_dir: str | Path, max_pages: 
     block_total = 0
     table_row_total = 0
 
-    from adaptive_mas.industrial_rag.parser import _table_row_group_blocks
+    from adaptive_mas.industrial_rag.parser import _table_row_group_blocks, annotate_table_continuation_candidates
 
     for item, _level in document.iterate_items():
         provenance = getattr(item, "prov", None) or []
@@ -628,6 +628,7 @@ def parse_pdf_with_docling(payload: bytes, *, asset_dir: str | Path, max_pages: 
             "citation_text_exact": False, "bbox": None,
         })
         blocks.extend(content_blocks[number])
+    annotate_table_continuation_candidates(raw_tables, raw_cells, pages)
     blocks.extend(_table_row_group_blocks(raw_tables, raw_cells))
     source_page_count = len(document.pages)
     confidence = len(pages) / source_page_count if source_page_count else 0.0

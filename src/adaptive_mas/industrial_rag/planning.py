@@ -30,7 +30,7 @@ METRIC_ALIASES: dict[str, tuple[str, ...]] = {
     "weighted_average_roe": ("加权平均净资产收益率",),
     "gross_margin": ("毛利率", "销售毛利率"),
     "debt_ratio": ("资产负债率",),
-    "total_assets": ("资产总额", "总资产"),
+    "total_assets": ("资产总额", "资产总计", "总资产"),
     "basic_eps": ("基本每股收益",),
     "diluted_eps": ("稀释每股收益",),
 }
@@ -52,7 +52,7 @@ METRIC_RECALL_TERMS: dict[str, tuple[str, ...]] = {
     "weighted_average_roe": ("加权平均净资产收益率", "净资产收益率", "ROE"),
     "gross_margin": ("毛利率", "销售毛利率"),
     "debt_ratio": ("资产负债率",),
-    "total_assets": ("资产总额", "总资产"),
+    "total_assets": ("资产总额", "资产总计", "总资产"),
     "basic_eps": ("基本每股收益", "稀释每股收益", "每股收益", "EPS"),
     "diluted_eps": ("稀释每股收益", "基本每股收益", "每股收益", "EPS"),
     "ambiguous_revenue": ("收入", "营业收入", "营业总收入", "主营业务收入"),

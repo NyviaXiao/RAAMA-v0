@@ -74,7 +74,7 @@ def _citation(block: Mapping[str, object], *, fact: Mapping[str, object] | None 
         "security_code": block.get("security_code"),
     }
     payload = json.loads(str(block.get("payload_json", "{}")))
-    for key in ("bbox", "char_start", "char_end", "section_id", "table_id", "row_start", "row_end"):
+    for key in ("bbox", "char_start", "char_end", "section_id", "table_id", "row_start", "row_end", "continuation", "supporting_cells", "supporting_spans"):
         if payload.get(key) is not None:
             citation[key] = payload[key]
     if payload.get("span_id") is not None:
@@ -228,11 +228,11 @@ def _decode_search_cursor(value: object, signing_key: bytes) -> dict[str, object
     except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("search cursor is malformed") from None
     if not isinstance(decoded, dict) or set(decoded) != {
-        "schema", "release_id", "cache_key", "permission_revision", "offset", "page_size",
+        "schema", "release_id", "cache_key", "permission_revision", "continuation_revision", "offset", "page_size",
     }:
         raise ValueError("search cursor is malformed")
     if (
-        decoded.get("schema") != "adaptive-mas.financial-rag-search-cursor.v1"
+        decoded.get("schema") != "adaptive-mas.financial-rag-search-cursor.v2"
         or not isinstance(decoded.get("release_id"), str)
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", decoded["release_id"])
         or not isinstance(decoded.get("cache_key"), str)
@@ -240,6 +240,9 @@ def _decode_search_cursor(value: object, signing_key: bytes) -> dict[str, object
         or isinstance(decoded.get("permission_revision"), bool)
         or not isinstance(decoded.get("permission_revision"), int)
         or decoded["permission_revision"] < 0
+        or isinstance(decoded.get("continuation_revision"), bool)
+        or not isinstance(decoded.get("continuation_revision"), int)
+        or decoded["continuation_revision"] < 0
         or isinstance(decoded.get("offset"), bool)
         or not isinstance(decoded.get("offset"), int)
         or decoded["offset"] < 1
@@ -413,6 +416,7 @@ class IndustrialRagService:
         if as_of > datetime.now(timezone.utc):
             raise ValueError("as_of cannot be in the future")
         permission_revision_before = self.store.permission_revision()
+        continuation_revision_before = self.store.continuation_revision()
         permitted = self.store.permitted_versions(
             plan.principal_id, plan.security_code, as_of, time_mode=plan.time_mode,
             report_periods=plan.report_periods, accounting_basis=plan.accounting_basis,
@@ -420,8 +424,9 @@ class IndustrialRagService:
         )
         version_ids = [str(row["version_id"]) for row in permitted]
         permission_revision = self.store.permission_revision()
-        if permission_revision != permission_revision_before:
-            raise PermissionError("permissions changed while resolving the query scope")
+        continuation_revision = self.store.continuation_revision()
+        if permission_revision != permission_revision_before or continuation_revision != continuation_revision_before:
+            raise PermissionError("query state changed while resolving the query scope")
         builtin_channel_identities = {
             "structured_facts": "typed_fact_records_v1",
             "bm25": "local_bm25_chinese_bigrams_v1",
@@ -442,11 +447,12 @@ class IndustrialRagService:
             reranker_identity = _component_cache_identity(self.reranker)
             runtime_cacheable = runtime_cacheable and reranker_identity is not None
         safe_plan = {
-            "cache_schema_version": "adaptive-mas.financial-rag-search-cache.v3",
+            "cache_schema_version": "adaptive-mas.financial-rag-search-cache.v4",
             "query_sha256": hashlib.sha256(plan.query.encode("utf-8")).hexdigest(),
             "aliases": list(plan.aliases),
             "security_code": plan.security_code, "as_of": as_of.isoformat(),
             "principal_id": plan.principal_id, "permission_revision": permission_revision,
+            "continuation_revision": continuation_revision,
             "task_type": plan.task_type, "accounting_basis": plan.accounting_basis,
             "report_periods": list(plan.report_periods), "release_id": release_id,
             "release_spec_sha256": release_hash, "channels": list(plan.channels),
@@ -457,8 +463,8 @@ class IndustrialRagService:
         cache_key = stable_hash(safe_plan)
         cached = self.store.cache_get(cache_key) if use_cache and runtime_cacheable else None
         if cached is not None:
-            if self.store.permission_revision() != permission_revision:
-                raise PermissionError("permissions changed while resolving the cached result")
+            if self.store.permission_revision() != permission_revision or self.store.continuation_revision() != continuation_revision:
+                raise PermissionError("query state changed while resolving the cached result")
             if control is not None:
                 control.check()
             return {
@@ -466,12 +472,13 @@ class IndustrialRagService:
                 "plan_id": plan.plan_id,
                 "cache": {"hit": True, "stored": True, "key_sha256": cache_key},
                 "current_permission_revision": permission_revision,
+                "current_continuation_revision": continuation_revision,
             }
 
         channel_results: dict[str, list[EvidenceResult]] = {}
         channel_status: dict[str, dict[str, object]] = {}
-        if self.store.permission_revision() != permission_revision:
-            raise PermissionError("permissions changed while retrieval was running")
+        if self.store.permission_revision() != permission_revision or self.store.continuation_revision() != continuation_revision:
+            raise PermissionError("query state changed while retrieval was running")
         if control is not None:
             control.check()
         blocks = self.store.read_blocks(version_ids)
@@ -557,6 +564,7 @@ class IndustrialRagService:
             "fusion": fusion_trace,
             "reranking": rerank_status,
             "permission_revision": permission_revision,
+            "continuation_revision": continuation_revision,
             "cache": cache_result,
             "warnings": [
                 str(value["reason"]) for value in channel_status.values() if value.get("status") == "unavailable"
@@ -566,8 +574,8 @@ class IndustrialRagService:
             control.check()
         if runtime_cacheable:
             self.store.cache_put(cache_key, response)
-        if self.store.permission_revision() != permission_revision:
-            raise PermissionError("permissions changed before retrieval could return")
+        if self.store.permission_revision() != permission_revision or self.store.continuation_revision() != continuation_revision:
+            raise PermissionError("query state changed before retrieval could return")
         return response
 
     def search_page(
@@ -589,6 +597,7 @@ class IndustrialRagService:
         if release_id is None:
             raise ReleaseNotReady("no published corpus release is active")
         permission_revision = self.store.permission_revision()
+        continuation_revision = self.store.continuation_revision()
         offset = 0
         token: dict[str, object] | None = None
         if cursor is not None:
@@ -597,6 +606,8 @@ class IndustrialRagService:
                 raise ValueError("search cursor was issued for a different active release")
             if token["permission_revision"] != permission_revision:
                 raise ValueError("search cursor was invalidated by a permission change")
+            if token["continuation_revision"] != continuation_revision:
+                raise ValueError("search cursor was invalidated by a continuation review change")
             if token["page_size"] != page_size:
                 raise ValueError("page_size must match the first search page")
             offset = int(token["offset"])
@@ -606,8 +617,9 @@ class IndustrialRagService:
         result = self.search(replace(plan, release_id=release_id), control=control)
         if plan.release_id is None and self.store.active_release_id() != release_id:
             raise ValueError("active corpus release changed while the search page was running")
-        if self.store.permission_revision() != result.get("permission_revision"):
-            raise PermissionError("permissions changed while the search page was running")
+        if (self.store.permission_revision() != result.get("permission_revision")
+                or self.store.continuation_revision() != result.get("continuation_revision")):
+            raise PermissionError("query state changed while the search page was running")
         result_cache = result.get("cache", {})
         if not isinstance(result_cache, Mapping):
             raise ValueError("search result does not expose a cache snapshot")
@@ -615,6 +627,7 @@ class IndustrialRagService:
             result_cache.get("stored") is not True
             or result_cache.get("key_sha256") != token["cache_key"]
             or result.get("permission_revision") != token["permission_revision"]
+            or result.get("continuation_revision") != token["continuation_revision"]
         ):
             raise ValueError("search cursor no longer matches the query snapshot")
         items = result.get("retrieved")
@@ -631,10 +644,11 @@ class IndustrialRagService:
         next_cursor = None
         if has_more:
             next_cursor = _encode_search_cursor({
-                "schema": "adaptive-mas.financial-rag-search-cursor.v1",
+                "schema": "adaptive-mas.financial-rag-search-cursor.v2",
                 "release_id": release_id,
                 "cache_key": result_cache["key_sha256"],
                 "permission_revision": result["permission_revision"],
+                "continuation_revision": result["continuation_revision"],
                 "offset": end,
                 "page_size": page_size,
             }, self._cursor_signing_key)
@@ -1044,6 +1058,70 @@ class IndustrialRagService:
             "warnings": sorted(set(warnings)),
         }
 
+    def list_continuation_candidates(self, plan: QueryPlan) -> dict[str, object]:
+        """List source-bound review candidates visible to the server-configured reviewer."""
+        release_id = plan.release_id or self.store.active_release_id()
+        if release_id is None:
+            raise PermissionError("continuation candidates are not currently available")
+        as_of = parse_datetime(plan.as_of, "as_of", required=True)
+        if as_of > datetime.now(timezone.utc):
+            raise ValueError("as_of cannot be in the future")
+        permission_before = self.store.permission_revision()
+        continuation_before = self.store.continuation_revision()
+        versions = self.store.permitted_versions(
+            plan.principal_id, plan.security_code, as_of, time_mode=plan.time_mode,
+            report_periods=plan.report_periods, accounting_basis=plan.accounting_basis,
+            release_id=release_id,
+        )
+        candidates = self.store.list_table_continuation_candidates(
+            [str(row["version_id"]) for row in versions],
+        )
+        if permission_before != self.store.permission_revision() or continuation_before != self.store.continuation_revision():
+            raise PermissionError("review scope changed while listing continuation candidates")
+        return {
+            "release_id": release_id,
+            "permission_revision": permission_before,
+            "continuation_revision": continuation_before,
+            "candidates": candidates,
+        }
+
+    def review_continuation_candidate(
+        self,
+        plan: QueryPlan,
+        child_table_id: str,
+        *,
+        action: str,
+        content_sha256: str,
+        note: str = "",
+    ) -> dict[str, object]:
+        """Apply a durable review decision after checking the reviewer’s live source scope."""
+        release_id = plan.release_id or self.store.active_release_id()
+        if release_id is None:
+            raise PermissionError("continuation candidate is not currently available")
+        as_of = parse_datetime(plan.as_of, "as_of", required=True)
+        if as_of > datetime.now(timezone.utc):
+            raise ValueError("as_of cannot be in the future")
+        versions = self.store.permitted_versions(
+            plan.principal_id, plan.security_code, as_of, time_mode=plan.time_mode,
+            report_periods=plan.report_periods, accounting_basis=plan.accounting_basis,
+            release_id=release_id,
+        )
+        allowed_versions = {str(row["version_id"]) for row in versions}
+        candidates = self.store.list_table_continuation_candidates(list(allowed_versions))
+        candidate = next((item for item in candidates if item.get("current_table_id") == child_table_id), None)
+        if candidate is None or candidate.get("content_sha256") != content_sha256:
+            raise PermissionError("continuation candidate is not currently available to this reviewer")
+        if str(candidate.get("version_id")) not in allowed_versions:
+            raise PermissionError("continuation candidate is not currently available to this reviewer")
+        return self.store.review_table_continuation(
+            child_table_id,
+            action=action,
+            reviewer_id=plan.principal_id,
+            release_id=release_id,
+            expected_content_sha256=content_sha256,
+            note=note,
+        )
+
     def read_span(self, plan: QueryPlan, span_id: str) -> dict[str, object]:
         """Expand a cited page span only after rechecking present-day permission and as-of scope."""
         release_id = plan.release_id or self.store.active_release_id()
@@ -1096,6 +1174,7 @@ class IndustrialRagService:
         as_of = parse_datetime(plan.as_of, "as_of", required=True)
         if as_of > datetime.now(timezone.utc):
             raise ValueError("as_of cannot be in the future")
+        continuation_revision_before = self.store.continuation_revision()
         versions = self.store.permitted_versions(
             plan.principal_id, plan.security_code, as_of, time_mode=plan.time_mode,
             report_periods=plan.report_periods, accounting_basis=plan.accounting_basis,
@@ -1106,9 +1185,19 @@ class IndustrialRagService:
             raise PermissionError("table evidence is not currently available to this query")
         table = record["table"]
         cells = record["cells"]
+        continuation = record.get("continuation")
+        table_payload = json.loads(str(table["table_payload_json"]))
+        candidate = table_payload.get("continuation_candidate")
+        if isinstance(candidate, Mapping) and continuation is None:
+            raise PermissionError("table rows remain quarantined until continuation review is confirmed")
+        continuation_context = candidate.get("previous_context", {}) if isinstance(candidate, Mapping) else {}
+        parent_header_cells = record.get("parent_header_cells", [])
         header_rows = int(table["header_rows"])
         headers: dict[int, list[str]] = {}
         data: dict[int, list[dict[str, object]]] = {}
+        for cell in parent_header_cells:
+            column_index = int(cell["column_index"])
+            headers.setdefault(column_index, []).append(str(cell["raw_text"]))
         for cell in cells:
             row_index, column_index = int(cell["row_index"]), int(cell["column_index"])
             raw_text = str(cell["raw_text"])
@@ -1123,10 +1212,12 @@ class IndustrialRagService:
             for column, values in headers.items()
         }
         output_rows = []
-        used_cells = [cell for cell in cells if int(cell["row_index"]) < header_rows]
+        used_cells = list(parent_header_cells) + [cell for cell in cells if int(cell["row_index"]) < header_rows]
+        data_cells: list[dict[str, object]] = []
         for row_index in sorted(data):
             ordered_cells = sorted(data[row_index], key=lambda cell: int(cell["column_index"]))
             used_cells.extend(ordered_cells)
+            data_cells.extend(ordered_cells)
             output_rows.append({
                 "row_index": row_index,
                 "values": [
@@ -1137,7 +1228,7 @@ class IndustrialRagService:
                         "raw_text": str(cell["raw_text"]),
                         "normalized_value": cell["normalized_value"],
                         "value_kind": str(cell["value_kind"]),
-                        "unit": cell["unit"] or table["unit_text"],
+                        "unit": cell["unit"] or table["unit_text"] or (continuation_context.get("unit") if isinstance(continuation_context, Mapping) else None),
                         "multiplier": cell["multiplier"],
                         "currency": cell["currency"],
                     }
@@ -1154,17 +1245,20 @@ class IndustrialRagService:
             )
             for _, row_cells in sorted(data.items())
         ]
-        pages = [int(cell["page_number"]) for cell in used_cells if cell["page_number"] is not None]
+        pages = [int(cell["page_number"]) for cell in data_cells if cell["page_number"] is not None]
+        unit = table["unit_text"] or (continuation_context.get("unit") if isinstance(continuation_context, Mapping) else None)
+        accounting_basis = table["table_accounting_basis"] or (continuation_context.get("accounting_basis") if isinstance(continuation_context, Mapping) else None)
+        report_period = table["table_report_period"] or (continuation_context.get("report_period") if isinstance(continuation_context, Mapping) else None)
         citation = {
             "document_id": table["document_id"], "version_id": table["version_id"],
             "source_id": table["source_id"], "source_url": table["source_url"],
             "published_at": table["published_at"], "first_available_at": table["first_available_at"],
             "captured_at": table["captured_at"], "ingested_at": table["ingested_at"],
             "content_sha256": table["content_sha256"], "time_basis": table["time_basis"],
-            "page_number": min(pages) if pages else table["page_start"],
+            "page_number": pages[0] if pages else table["page_start"],
             "table_id": table_id, "row_start": row_start, "row_end": row_end,
-            "unit": table["unit_text"], "accounting_basis": table["table_accounting_basis"],
-            "report_period": table["table_report_period"], "as_of": as_of.isoformat(),
+            "unit": unit, "accounting_basis": accounting_basis,
+            "report_period": report_period, "as_of": as_of.isoformat(),
             "release_id": release_id,
             "supporting_cells": [
                 {
@@ -1175,21 +1269,45 @@ class IndustrialRagService:
                     "raw_text": str(cell["raw_text"]),
                     "normalized_value": cell["normalized_value"],
                     "value_kind": str(cell["value_kind"]),
-                    "unit": cell["unit"] or table["unit_text"],
+                    "unit": cell["unit"] or table["unit_text"] or (continuation_context.get("unit") if isinstance(continuation_context, Mapping) else None),
                     "multiplier": cell["multiplier"],
                     "currency": cell["currency"],
-                    "accounting_basis": cell["accounting_basis"] or table["table_accounting_basis"],
-                    "report_period": cell["report_period"] or table["table_report_period"],
+                    "accounting_basis": cell["accounting_basis"] or table["table_accounting_basis"] or (continuation_context.get("accounting_basis") if isinstance(continuation_context, Mapping) else None),
+                    "report_period": cell["report_period"] or table["table_report_period"] or (continuation_context.get("report_period") if isinstance(continuation_context, Mapping) else None),
                 }
                 for cell in used_cells
             ],
         }
+        if isinstance(continuation, Mapping) and isinstance(candidate, Mapping):
+            citation["continuation"] = {
+                "candidate_id": candidate.get("candidate_id"),
+                "previous_table_id": continuation.get("previous_table_id"),
+                "current_table_id": table_id,
+                "previous_page": candidate.get("previous_page"),
+                "current_page": candidate.get("current_page"),
+                "review_status": "confirmed",
+                "context": continuation_context,
+                "header_labels": candidate.get("header_labels", {}),
+            }
+            context_span_id = candidate.get("context_span_id")
+            if context_span_id:
+                context_span = self.store._get_span(str(context_span_id))
+                if context_span is not None and str(context_span["version_id"]) == str(table["version_id"]):
+                    citation["supporting_spans"] = [{
+                        "span_id": context_span["span_id"], "page_number": context_span["page_number"],
+                        "char_start": context_span["char_start"], "char_end": context_span["char_end"],
+                        "source_id": context_span["source_id"], "content_sha256": context_span["content_sha256"],
+                        "version_id": context_span["version_id"], "role": "continuation_context",
+                    }]
         text = f"列头：{header_text}\n" + "\n".join(row_texts)
+        if self.store.continuation_revision() != continuation_revision_before:
+            raise PermissionError("continuation review changed while expanding the table row")
         return {
             "table_id": table_id, "row_start": row_start, "row_end": row_end,
-            "title": table["table_title"], "header_rows": header_rows,
+            "title": table["table_title"] or (continuation_context.get("title") if isinstance(continuation_context, Mapping) else None), "header_rows": header_rows,
             "rows": output_rows, "text": text, "citation": citation,
             "permission_revision": self.store.permission_revision(),
+            "continuation_revision": self.store.continuation_revision(),
         }
 
     def download_original(self, plan: QueryPlan, document_id: str, version_id: str) -> bytes:
