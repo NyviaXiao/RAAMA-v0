@@ -1,0 +1,1227 @@
+"""Run a source-scoped, local-only current-capture RAG and tool-chain check."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Mapping
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from adaptive_mas.agents.harness import (  # noqa: E402
+    SHANGHAI,
+    InvalidResearchOutput,
+    _accept_report,
+    _fundamental_handlers,
+    _run_tool_agent,
+)
+from adaptive_mas.industrial_rag.cli import build_release  # noqa: E402
+from adaptive_mas.industrial_rag.document_ai import ASSET_MANIFEST  # noqa: E402
+from adaptive_mas.industrial_rag.models import (  # noqa: E402
+    Document,
+    DocumentBundle,
+    DocumentVersion,
+    FinancialFact,
+)
+from adaptive_mas.harness_evolution import _ABLATION_MODULES  # noqa: E402
+from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore  # noqa: E402
+from adaptive_mas.industrial_rag.parser import (  # noqa: E402
+    _table_row_group_blocks,
+    annotate_table_continuation_candidates,
+    parse_isolated,
+    records_from_parse,
+)
+from adaptive_mas.industrial_rag.qwen_models import (  # noqa: E402
+    EMBEDDING_REPO,
+    EMBEDDING_REVISION,
+    RERANKER_REPO,
+    RERANKER_REVISION,
+    LocalQwenDenseAdapter,
+    LocalQwenReranker,
+    Qwen3EmbeddingRuntime,
+    Qwen3RerankerRuntime,
+)
+from adaptive_mas.industrial_rag.repository import IndustrialRagStore  # noqa: E402
+from adaptive_mas.industrial_rag.retrieval import IndustrialRagService  # noqa: E402
+
+
+SUPERVISION = ROOT / ".tmp" / "industrial_rag_supervision_20261025"
+SOURCE_MANIFEST = ROOT / "benchmarks" / "financial_rag" / "seed_manifest.json"
+DOCLING_ASSETS = SUPERVISION / "docling-models"
+QWEN_ASSETS = SUPERVISION / "qwen-models"
+OUTPUT_ROOT = ROOT / ".tmp" / "industrial_rag_current_capture_20261026"
+QUERY_TEXT = "2024年度营业收入是多少，较2023年度增长多少？"
+CASE_SPECS: tuple[dict[str, object], ...] = (
+    {
+        "case_id": "current_capture_cmb_2024_revenue",
+        "source_id": "cninfo-1222895153",
+        "filename": "cmb2024summary.pdf",
+        "security_code": "600036",
+        "physical_page": 3,
+        "parser_table_id": "docling-table-1-p1",
+        "row_index": 2,
+        "source_metric_label": "营业收入",
+        "expected_raw_values": {"2024": "337,488", "2023": "339,123"},
+        "source_unit": "人民币百万元",
+        "base_unit_conversion_factor": "1000000",
+        "unit": "人民币百万元",
+        "currency": "CNY",
+        "accounting_basis": "本集团",
+        "manual_review_note": "Page image labels the table unit as 人民币百万元 and the section as 本集团; row 营业收入, 2024 column is 337,488.",
+    },
+    {
+        "case_id": "current_capture_pingan_2024_revenue",
+        "source_id": "cninfo-1222806505",
+        "filename": "pingan2024full.pdf",
+        "security_code": "000001",
+        "physical_page": 16,
+        "parser_table_id": "docling-table-1-p1",
+        "row_index": 1,
+        "source_metric_label": "营业收入",
+        "expected_raw_values": {"2024": "146,695", "2023": "164,699"},
+        "source_unit": "人民币百万元",
+        "base_unit_conversion_factor": "1000000",
+        "unit": "人民币百万元",
+        "currency": "CNY",
+        "accounting_basis": "not_stated_in_target_table",
+        "manual_review_note": "Page image labels the table unit as 人民币百万元; row 营业收入, 2024 column is 146,695. The target table does not state its accounting basis.",
+    },
+    {
+        "case_id": "current_capture_catl_2024_revenue",
+        "source_id": "cninfo-1222806982",
+        "filename": "catl2024full.pdf",
+        "security_code": "300750",
+        "physical_page": 9,
+        "parser_table_id": "docling-table-2-p1",
+        "row_index": 2,
+        "source_metric_label": "营业收入（千元）",
+        "expected_raw_values": {"2024": "362,012,554", "2023": "400,917,045"},
+        "source_unit": "千元",
+        "base_unit_conversion_factor": "1000",
+        "unit": "千元",
+        "currency": "",
+        "accounting_basis": "not_stated_in_target_table",
+        "manual_review_note": "Page image labels the row unit as 千元; row 营业收入, 2024 column is 362,012,554. The target table does not state its currency or accounting basis.",
+    },
+)
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_source_records(path: Path = SOURCE_MANIFEST) -> dict[str, dict[str, Any]]:
+    manifest_path = path if path.is_absolute() else ROOT / path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    records = manifest.get("source_records")
+    if not isinstance(records, list):
+        raise ValueError("source manifest has no source record list")
+    return {
+        str(record["source_id"]): dict(record)
+        for record in records
+        if isinstance(record, dict) and isinstance(record.get("source_id"), str)
+    }
+
+
+def _page_subset(payload: bytes, page_number: int) -> bytes:
+    from io import BytesIO
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(BytesIO(payload))
+    if page_number < 1 or page_number > len(reader.pages):
+        raise ValueError("target physical page is outside the source PDF")
+    writer = PdfWriter()
+    writer.add_page(reader.pages[page_number - 1])
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def _map_targeted_page(
+    full_parse: Mapping[str, Any],
+    targeted_parse: Mapping[str, Any],
+    *,
+    physical_page: int,
+    parser_table_id: str,
+    unit: str,
+    accounting_basis: str,
+    currency: str,
+) -> dict[str, Any]:
+    tables = [item for item in targeted_parse.get("tables", []) if item.get("table_id") == parser_table_id]
+    if len(tables) != 1:
+        raise ValueError(f"expected one manually scoped Docling table {parser_table_id!r}")
+    raw_table = dict(tables[0])
+    mapped_table_id = re.sub(r"-p\d+$", f"-p{physical_page}", parser_table_id)
+    raw_table.update({
+        "table_id": mapped_table_id,
+        "page_start": physical_page,
+        "page_end": physical_page,
+        "unit_text": unit,
+        "accounting_basis": accounting_basis,
+    })
+    selected_cells: list[dict[str, Any]] = []
+    for raw_cell in targeted_parse.get("cells", []):
+        if raw_cell.get("table_id") != parser_table_id:
+            continue
+        cell = dict(raw_cell)
+        cell["cell_id"] = str(cell["cell_id"]).replace(parser_table_id, mapped_table_id, 1)
+        cell["table_id"] = mapped_table_id
+        cell["page_number"] = physical_page
+        if cell.get("unit") is None and cell.get("value_kind") in {"number", "zero", "basis_points"}:
+            cell["unit"] = unit
+        if cell.get("currency") is None and currency:
+            cell["currency"] = currency
+        if cell.get("accounting_basis") is None:
+            cell["accounting_basis"] = accounting_basis
+        selected_cells.append(cell)
+    if not selected_cells:
+        raise ValueError(f"selected Docling table {parser_table_id!r} has no cells")
+
+    selected_tables = [raw_table]
+    merged = dict(full_parse)
+    merged["tables"] = selected_tables
+    merged["cells"] = selected_cells
+    annotate_table_continuation_candidates(selected_tables, selected_cells, merged.get("pages", []))
+    merged["blocks"] = list(full_parse.get("blocks", [])) + _table_row_group_blocks(selected_tables, selected_cells)
+    merged["parser_name"] = "hybrid_pypdf_full_source_docling_targeted_table"
+    merged["parser_version"] = (
+        f"pypdf-full:{full_parse.get('parser_version')}+"
+        f"docling-targeted:{targeted_parse.get('parser_version')}"
+    )
+    merged["targeted_parse_scope"] = {
+        "full_source_backend": full_parse.get("parser_name"),
+        "full_source_page_count": len(full_parse.get("pages", [])),
+        "full_docling_parse": False,
+        "targeted_backend": targeted_parse.get("parser_name"),
+        "targeted_source_physical_page": physical_page,
+        "selected_raw_parser_table_id": parser_table_id,
+        "mapped_physical_parser_table_id": mapped_table_id,
+        "table_selection_basis": "explicit local source-review scope; table ID is not passed to retrieval",
+    }
+    return merged
+
+
+def _selected_revenue_cells(
+    merged_parse: Mapping[str, Any],
+    *,
+    row_index: int,
+    source_metric_label: str,
+    expected_raw_values: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    table_id = str(merged_parse["tables"][0]["table_id"])
+    row = [
+        dict(cell)
+        for cell in merged_parse.get("cells", [])
+        if cell.get("table_id") == table_id and int(cell.get("row_index", -1)) == row_index
+    ]
+    row.sort(key=lambda item: int(item["column_index"]))
+    labels = [cell for cell in row if int(cell["column_index"]) == 0]
+    year_cells = {
+        "2024": [cell for cell in row if int(cell["column_index"]) == 1],
+        "2023": [cell for cell in row if int(cell["column_index"]) == 2],
+    }
+    if len(labels) != 1 or any(len(cells) != 1 for cells in year_cells.values()):
+        raise ValueError("manually reviewed revenue row has an unexpected cell layout")
+    if str(labels[0].get("raw_text", "")).strip() != source_metric_label:
+        raise ValueError("Docling revenue row label differs from the local review record")
+    selected: dict[str, dict[str, Any]] = {}
+    for period, cells in year_cells.items():
+        value = cells[0]
+        if str(value.get("raw_text", "")).strip() != expected_raw_values[period]:
+            raise ValueError(f"Docling {period} revenue value differs from the local review record")
+        if value.get("value_kind") not in {"number", "zero"} or value.get("normalized_value") is None:
+            raise ValueError(f"Docling did not produce a finite numeric value for the reviewed {period} cell")
+        selected[period] = value
+    return selected
+
+
+def _page_evidence_span(records: Mapping[str, Any], *, page: int, metric: str, raw_value: str) -> Any:
+    candidates = [span for span in records["spans"] if int(span.page_number) == page]
+    label_normalized = re.sub(r"\s+", "", metric)
+    value_digits = re.sub(r"\D", "", raw_value)
+    for span in candidates:
+        normalized = re.sub(r"\s+", "", span.text)
+        if label_normalized in normalized and value_digits in re.sub(r"\D", "", normalized):
+            return span
+    raise ValueError("full-source pypdf text has no exact page span containing the reviewed metric and value")
+
+
+def _capture_source(
+    *,
+    spec: Mapping[str, object],
+    source_record: Mapping[str, Any],
+    output_dir: Path,
+    store: IndustrialRagStore,
+) -> dict[str, Any]:
+    source_path = (ROOT / str(source_record["local_path"])).resolve()
+    payload = source_path.read_bytes()
+    digest = _sha256(payload)
+    if digest != source_record.get("content_sha256"):
+        raise ValueError(f"local source bytes differ from the recorded capture: {spec['source_id']}")
+
+    source_run_dir = output_dir / "sources" / str(spec["source_id"])
+    source_run_dir.mkdir(parents=True, exist_ok=False)
+    full_parse = parse_isolated(
+        payload,
+        source_path.name,
+        scratch_root=output_dir / "parser_scratch",
+        timeout_seconds=180,
+        pdf_backend="pypdf",
+    )
+    from io import BytesIO
+    from pypdf import PdfReader
+
+    page_count = len(PdfReader(BytesIO(payload)).pages)
+    if full_parse.get("status") != "parsed" or len(full_parse.get("pages", [])) != page_count:
+        raise RuntimeError(f"full-source pypdf parsing did not cover {spec['source_id']}")
+    _write_json(source_run_dir / "full_source_pypdf_parse.json", full_parse)
+
+    physical_page = int(spec["physical_page"])
+    targeted_parse = parse_isolated(
+        _page_subset(payload, physical_page),
+        f"{source_path.stem}-physical-page-{physical_page}.pdf",
+        scratch_root=output_dir / "parser_scratch",
+        timeout_seconds=180,
+        pdf_backend="docling",
+        docling_artifacts_path=DOCLING_ASSETS,
+        parser_timeout_seconds=180,
+    )
+    if targeted_parse.get("status") != "parsed":
+        raise RuntimeError(f"targeted Docling parsing did not complete for {spec['source_id']}")
+    _write_json(source_run_dir / "targeted_docling_parse.json", targeted_parse)
+    merged_parse = _map_targeted_page(
+        full_parse,
+        targeted_parse,
+        physical_page=physical_page,
+        parser_table_id=str(spec["parser_table_id"]),
+        unit=str(spec["unit"]),
+        accounting_basis=str(spec["accounting_basis"]),
+        currency=str(spec.get("currency", "")),
+    )
+    _write_json(source_run_dir / "merged_hybrid_parse.json", merged_parse)
+    version_id = f"v-{digest[:24]}"
+    records = records_from_parse(merged_parse, version_id=version_id)
+    value_cells = _selected_revenue_cells(
+        merged_parse,
+        row_index=int(spec["row_index"]),
+        source_metric_label=str(spec["source_metric_label"]),
+        expected_raw_values=spec["expected_raw_values"],
+    )
+    facts = []
+    page_spans = {}
+    conversion_factor = Decimal(str(spec["base_unit_conversion_factor"]))
+    calculator_currency = str(spec.get("currency", ""))
+    fact_unit = "CNY" if calculator_currency == "CNY" else str(spec["source_unit"])
+    fact_currency = "CNY" if calculator_currency == "CNY" else ""
+    for period, value_cell in value_cells.items():
+        page_span = _page_evidence_span(
+            records,
+            page=physical_page,
+            metric="营业收入",
+            raw_value=str(value_cell["raw_text"]),
+        )
+        page_spans[period] = page_span
+        source_value = Decimal(str(value_cell["normalized_value"]))
+        fact_value = source_value * conversion_factor if calculator_currency == "CNY" else source_value
+        facts.append(FinancialFact(
+            fact_id=f"fact-{version_id}-revenue-{period}",
+            version_id=version_id,
+            security_code=str(spec["security_code"]),
+            entity_name=str(source_record["issuer"]),
+            metric="营业收入",
+            raw_value=f"{value_cell['raw_text']} {spec['source_unit']}",
+            normalized_value=format(fact_value, "f"),
+            unit=fact_unit,
+            multiplier="1",
+            currency=fact_currency,
+            report_period=period,
+            consolidation=str(spec["accounting_basis"]),
+            span_ids=(page_span.span_id,),
+            parser_version=str(targeted_parse["parser_version"]),
+            confidence=0.99,
+            review_status="reviewed",
+        ))
+
+    captured_at = str(source_record["captured_at"])
+    ingest_time = datetime.now(timezone.utc).isoformat()
+    document = Document(
+        document_id=f"doc-{source_record['source_id']}",
+        title=str(source_record["title"]),
+        document_type=str(source_record["document_type"]),
+        security_code=str(spec["security_code"]),
+        entity_name=str(source_record["issuer"]),
+        report_period=None,
+        accounting_basis=str(spec["accounting_basis"]),
+    )
+    version = DocumentVersion(
+        version_id=version_id,
+        source_id=str(source_record["source_id"]),
+        content_sha256=digest,
+        source_url=str(source_record["source_url"]),
+        rights_note=str(source_record["rights_note"]),
+        published_at=source_record.get("published_at"),
+        first_available_at=captured_at,
+        captured_at=captured_at,
+        ingested_at=ingest_time,
+        time_basis="strict_forward",
+        parser_name=str(merged_parse["parser_name"]),
+        parser_version=str(merged_parse["parser_version"]),
+        parser_confidence=min(
+            float(full_parse.get("parser_confidence") or 0.0),
+            float(targeted_parse.get("parser_confidence") or 0.0),
+        ),
+        parser_status="parsed",
+    )
+    bundle = DocumentBundle(
+        document=document,
+        version=version,
+        payload=payload,
+        sections=records["sections"],
+        spans=records["spans"],
+        blocks=records["blocks"],
+        tables=records["tables"],
+        cells=records["cells"],
+        facts=tuple(facts),
+        read_principals=("local-public", "local-supervision"),
+    )
+    ingest = store.ingest_bundle(bundle)
+    review_record = {
+        "review_status": "reviewed_local_development_fact",
+        "reviewer_identity": "codex-local-source-inspection",
+        "review_independent": False,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "source_id": str(source_record["source_id"]),
+        "source_sha256": digest,
+        "physical_page": physical_page,
+        "table_id": str(merged_parse["tables"][0]["table_id"]),
+        "row_index": int(spec["row_index"]),
+        "metric_label": str(spec["source_metric_label"]),
+        "reviewed_period_cells": {
+            period: {
+                "value_cell_id": str(value_cell["cell_id"]),
+                "value_column_index": int(value_cell["column_index"]),
+                "raw_value": str(value_cell["raw_text"]),
+                "source_unit": str(spec["source_unit"]),
+                "source_normalized_value": str(value_cell["normalized_value"]),
+                "base_unit_conversion_factor": str(conversion_factor) if calculator_currency == "CNY" else None,
+                "calculator_value": format(
+                    Decimal(str(value_cell["normalized_value"])) * conversion_factor
+                    if calculator_currency == "CNY" else Decimal(str(value_cell["normalized_value"])),
+                    "f",
+                ),
+                "calculator_unit": fact_unit,
+                "pypdf_source_span_id": page_spans[period].span_id,
+            }
+            for period, value_cell in value_cells.items()
+        },
+        "unit": fact_unit,
+        "calculator_currency": fact_currency or None,
+        "source_unit": str(spec["source_unit"]),
+        "base_unit_conversion_factor": str(conversion_factor) if calculator_currency == "CNY" else None,
+        "calculator_eligibility": (
+            "verified_absolute_currency" if calculator_currency == "CNY"
+            else "source_observation_only_currency_not_stated_in_target_table"
+        ),
+        "accounting_basis": str(spec["accounting_basis"]),
+        "pypdf_span_contains_metric_and_both_period_values": True,
+        "manual_review_note": str(spec["manual_review_note"]),
+    }
+    _write_json(source_run_dir / "local_fact_review.json", review_record)
+    return {
+        "case_id": str(spec["case_id"]),
+        "source_id": str(source_record["source_id"]),
+        "source_path": str(source_path),
+        "source_url": str(source_record["source_url"]),
+        "source_sha256": digest,
+        "source_bytes": len(payload),
+        "source_page_count": page_count,
+        "recorded_local_capture_at": captured_at,
+        "historical_published_at": source_record.get("published_at"),
+        "historical_first_available_proxy_not_used": source_record.get("first_available_at"),
+        "first_available_at_used_for_current_capture": captured_at,
+        "time_basis_used": "strict_forward",
+        "ingested_at": ingest_time,
+        "version_id": version_id,
+        "parser": {
+            "full_source": full_parse.get("parser_name"),
+            "full_source_page_count": len(full_parse.get("pages", [])),
+            "targeted": targeted_parse.get("parser_name"),
+            "targeted_version": targeted_parse.get("parser_version"),
+            "targeted_physical_page": physical_page,
+            "targeted_table_id": str(merged_parse["tables"][0]["table_id"]),
+            "full_docling_parse": False,
+        },
+        "fact_review": review_record,
+        "ingest": ingest,
+    }
+
+
+def _resume_source(
+    *,
+    spec: Mapping[str, object],
+    source_record: Mapping[str, Any],
+    output_dir: Path,
+    store: IndustrialRagStore,
+    release_id: str,
+) -> dict[str, Any]:
+    source_path = (ROOT / str(source_record["local_path"])).resolve()
+    payload = source_path.read_bytes()
+    digest = _sha256(payload)
+    if digest != source_record.get("content_sha256"):
+        raise ValueError(f"local source bytes differ from the recorded capture: {spec['source_id']}")
+    version_id = f"v-{digest[:24]}"
+    if version_id not in store.release_versions(release_id):
+        raise ValueError(f"saved strict-forward release does not contain {spec['source_id']}")
+    source_run_dir = output_dir / "sources" / str(spec["source_id"])
+    review_record = json.loads((source_run_dir / "local_fact_review.json").read_text(encoding="utf-8"))
+    full_parse = json.loads((source_run_dir / "full_source_pypdf_parse.json").read_text(encoding="utf-8"))
+    targeted_parse = json.loads((source_run_dir / "targeted_docling_parse.json").read_text(encoding="utf-8"))
+    merged_parse = json.loads((source_run_dir / "merged_hybrid_parse.json").read_text(encoding="utf-8"))
+    if (
+        review_record.get("source_id") != source_record.get("source_id")
+        or review_record.get("source_sha256") != digest
+        or review_record.get("review_status") != "reviewed_local_development_fact"
+        or full_parse.get("status") != "parsed"
+        or targeted_parse.get("status") != "parsed"
+    ):
+        raise ValueError(f"saved current-capture evidence is incomplete or inconsistent: {spec['source_id']}")
+    return {
+        "case_id": str(spec["case_id"]),
+        "source_id": str(source_record["source_id"]),
+        "source_path": str(source_path),
+        "source_url": str(source_record["source_url"]),
+        "source_sha256": digest,
+        "source_bytes": len(payload),
+        "source_page_count": len(full_parse.get("pages", [])),
+        "recorded_local_capture_at": str(source_record["captured_at"]),
+        "historical_published_at": source_record.get("published_at"),
+        "historical_first_available_proxy_not_used": source_record.get("first_available_at"),
+        "first_available_at_used_for_current_capture": str(source_record["captured_at"]),
+        "time_basis_used": "strict_forward",
+        "version_id": version_id,
+        "parser": {
+            "full_source": full_parse.get("parser_name"),
+            "full_source_page_count": len(full_parse.get("pages", [])),
+            "targeted": targeted_parse.get("parser_name"),
+            "targeted_version": targeted_parse.get("parser_version"),
+            "targeted_physical_page": int(spec["physical_page"]),
+            "targeted_table_id": str(merged_parse["tables"][0]["table_id"]),
+            "full_docling_parse": False,
+        },
+        "fact_review": review_record,
+        "ingest": {
+            "status": "reused_from_published_current_capture_release",
+            "release_id": release_id,
+            "version_id": version_id,
+        },
+    }
+
+
+def _policy_json(*, use_qwen: bool = True) -> str:
+    return json.dumps({
+        "channels": ["structured_facts", "bm25", "dense"] if use_qwen else ["structured_facts", "bm25"],
+        "max_searches": 2,
+        "candidate_limit": 2,
+        "symbol_limit": 1,
+        "evidence_limit": 8,
+        "rrf_rank_constant": 60,
+        "reranker_profile": "configured" if use_qwen else "disabled",
+        "table_expansion_limit": 4,
+        "parent_context_mode": "reviewed_parent_and_child",
+        "context_char_limit": 800,
+        "context_source_limit": 2,
+        "challenge_policy": "mandatory_correction_search",
+        "stop_policy": "coverage_then_bounded_search",
+        "memory_refs": ["procedural_experience"],
+    }, ensure_ascii=False, separators=(",", ":"))
+
+
+class ScriptedToolCallClient:
+    """Drive the real fundamental tool protocol without calling a model provider."""
+
+    model = "offline-scripted-tool-protocol-v1"
+
+    def __init__(self, *, query: str, symbol: str, calculator_eligible: bool) -> None:
+        self.query = query
+        self.symbol = symbol
+        self.calculator_eligible = calculator_eligible
+        self.turn = 0
+        self.selected: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _response(calls: list[tuple[str, dict[str, object]]]) -> dict[str, object]:
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": f"offline-call-{index + 1}",
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+                        }
+                        for index, (name, arguments) in enumerate(calls)
+                    ],
+                },
+            }],
+        }
+
+    def complete(self, messages, _tools, *, budget=None, role=None, tool_choice=None):
+        del budget, role, tool_choice
+        self.turn += 1
+        if self.turn == 1:
+            return self._response([
+                ("search_indexed_financial_documents", {
+                    "question": self.query,
+                    "symbols": [self.symbol],
+                    "report_periods": [period],
+                    "task_type": "fact",
+                    "limit": 2,
+                })
+                for period in ("2023", "2024")
+            ])
+        if self.turn == 2:
+            search_messages = [
+                message for message in messages
+                if message.get("role") == "tool" and message.get("name") == "search_indexed_financial_documents"
+            ]
+            if len(search_messages) != 2:
+                raise RuntimeError("scripted tool driver did not receive indexed search results")
+            retrieved = [
+                item
+                for message in search_messages
+                for item in json.loads(str(message["content"])).get("retrieved", [])
+                if isinstance(item, dict)
+            ]
+            facts_by_period = {
+                str(item["financial_fact"].get("report_period")): item
+                for item in retrieved
+                if isinstance(item.get("financial_fact"), dict)
+                and item["financial_fact"].get("numeric_eligible") is True
+                and item["financial_fact"].get("report_period") in {"2023", "2024"}
+            }
+            if not {"2023", "2024"}.issubset(facts_by_period):
+                raise RuntimeError("indexed search did not return both reviewed annual source facts")
+            self.selected = [facts_by_period[period] for period in ("2023", "2024")]
+            return self._response([
+                ("read_indexed_financial_evidence", {"evidence_id": str(item["evidence_id"])})
+                for item in self.selected
+            ])
+        if self.turn == 3:
+            if not self.calculator_eligible:
+                return self._submit_source_observation(messages)
+            return self._response([("calculate_financial_metric", {
+                "operation": "growth_percent",
+                "operands": [
+                    {"evidence_id": str(item["evidence_id"]), "field": "营业收入"}
+                    for item in self.selected
+                ],
+            })])
+        if self.turn == 4:
+            if not self.calculator_eligible:
+                return self._submit_source_observation(messages)
+            return self._submit_calculation(messages)
+        raise RuntimeError("scripted tool driver exceeded its four-turn plan")
+
+    def _source_observations(self) -> list[dict[str, str]]:
+        return [
+            {
+                "evidence_id": str(item["evidence_id"]),
+                "field": "营业收入",
+                "value": str(item["financial_fact"]["normalized_value"]),
+                "unit": str(item["financial_fact"]["unit"]),
+                "report_period": str(item["financial_fact"]["report_period"]),
+            }
+            for item in self.selected
+        ]
+
+    def _submit_source_observation(self, _messages: list[dict[str, Any]]) -> dict[str, object]:
+        report = {
+            "summary": "The source observations were checked against the local captured filing; the requested calculation was withheld because the target table does not state its currency.",
+            "findings": [{
+                "symbol": self.symbol,
+                "conclusion": (
+                    "同一来源表的2023年度和2024年度营业收入单元格已核对；"
+                    "目标表未注明币种，因此不报告同比计算。"
+                ),
+                "claim_type": "source_fact",
+                "evidence_ids": [str(item["evidence_id"]) for item in self.selected],
+                "observations": self._source_observations(),
+                "uncertainties": ["Target table does not state currency or accounting basis."],
+            }],
+            "unresolved_items": ["Growth calculation withheld because the target table does not state its currency."],
+        }
+        return self._response([("submit_report", report)])
+
+    def _submit_calculation(self, messages: list[dict[str, Any]]) -> dict[str, object]:
+        calculation_message = next(
+            (message for message in reversed(messages)
+             if message.get("role") == "tool" and message.get("name") == "calculate_financial_metric"),
+            None,
+        )
+        if calculation_message is None:
+            raise RuntimeError("scripted tool driver did not receive the Decimal calculation result")
+        calculation = json.loads(str(calculation_message["content"]))
+        if calculation.get("status") != "calculated":
+            raise RuntimeError("deterministic financial calculator did not return a result")
+        result_id = str(calculation["evidence_id"])
+        result_value = str(calculation["value"])
+        facts = {str(item["financial_fact"]["report_period"]): item for item in self.selected}
+        conclusion = f"同一来源表中，营业收入从2023年度到2024年度变化了{result_value}%；该值由Decimal计算得出。"
+        uncertainties = []
+        if facts["2024"]["financial_fact"].get("accounting_basis") == "not_stated_in_target_table":
+            uncertainties.append("The target table does not state accounting basis; the calculation uses its adjacent annual columns.")
+        report = {
+            "summary": "The reported percentage is a deterministic calculation from two reviewed source facts; source meaning remains unverified.",
+            "findings": [{
+                "symbol": self.symbol,
+                "conclusion": conclusion,
+                "claim_type": "calculation",
+                "evidence_ids": [str(item["evidence_id"]) for item in self.selected] + [result_id],
+                "observations": self._source_observations() + [{
+                    "evidence_id": result_id,
+                    "field": str(calculation["metric"]),
+                    "value": result_value,
+                    "unit": str(calculation["unit"]),
+                    "report_period": str(calculation["report_period"]),
+                }],
+                "uncertainties": uncertainties,
+            }],
+            "unresolved_items": [],
+        }
+        return self._response([("submit_report", report)])
+
+
+def _merge_search_results(results: list[Mapping[str, Any]]) -> dict[str, Any]:
+    retrieved: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for result in results:
+        for item in result.get("retrieved", []):
+            if not isinstance(item, Mapping):
+                continue
+            evidence_id = str(item.get("evidence_id"))
+            if evidence_id not in seen_ids:
+                seen_ids.add(evidence_id)
+                retrieved.append(dict(item))
+    return {
+        "status": "available" if any(result.get("status") == "available" for result in results) else (
+            results[0].get("status", "no_evidence") if results else "no_evidence"
+        ),
+        "research_policy": results[0].get("research_policy") if results else None,
+        "channels": [channel for result in results for channel in result.get("channels", [])],
+        "coverage": [row for result in results for row in result.get("coverage", [])],
+        "warnings": sorted({warning for result in results for warning in result.get("warnings", [])}),
+        "retrieved": retrieved,
+    }
+
+
+def _run_agent_chain(
+    *,
+    service: IndustrialRagService,
+    release_id: str,
+    case: Mapping[str, Any],
+    decision_time: datetime,
+    research_ablation_id: int | None,
+    use_qwen: bool,
+) -> dict[str, Any]:
+    query = QUERY_TEXT
+    symbol = str(case["security_code"])
+    visible_ids: set[str] = set()
+    tools, handlers, catalog = _fundamental_handlers(
+        None,
+        decision_time,
+        industrial_rag_service=service,
+        industrial_rag_principal_id="local-public",
+        industrial_rag_release_id=release_id,
+        research_policy_json=_policy_json(use_qwen=use_qwen),
+        research_ablation_id=research_ablation_id,
+    )
+    handlers["submit_report"] = lambda arguments: _accept_report(
+        arguments,
+        catalog,
+        "fundamental",
+        visible_evidence_ids=visible_ids,
+        decision_time=decision_time,
+    )
+    client = ScriptedToolCallClient(
+        query=query,
+        symbol=symbol,
+        calculator_eligible=bool(case["calculator_eligible"]),
+    )
+    try:
+        result = _run_tool_agent(
+            role_id="fundamental",
+            system_prompt="Use the indexed local financial filing and cite every source fact.",
+            task={
+                "as_of": decision_time.isoformat(),
+                "question": query,
+                "symbol": symbol,
+                "allowed_data": "the pinned local strict-forward industrial RAG release only",
+            },
+            tools=tools,
+            handlers=handlers,
+            client=client,
+            budget=None,
+            max_turns=4,
+            visible_evidence_ids=visible_ids,
+        )
+    except InvalidResearchOutput as exc:
+        raise RuntimeError(f"fundamental report validation failed: {exc.category}: {exc.correction_detail}") from None
+    if result.get("status") != "completed":
+        raise RuntimeError("fundamental tool protocol did not complete")
+    trace = list(result["tool_trace"])
+    search_results = [item["result"] for item in trace if item["tool"] == "search_indexed_financial_documents"]
+    search = _merge_search_results(search_results)
+    reads = [item["result"] for item in trace if item["tool"] == "read_indexed_financial_evidence"]
+    finding = result["report"]["findings"][0]
+    if not reads or not all(item.get("content_scope", "").startswith("reopened_source") for item in reads):
+        raise RuntimeError("agent tool chain did not reopen source evidence")
+    expected_validation = (
+        "calculation_recomputed_decimal_50_half_even_semantics_unverified"
+        if case["calculator_eligible"]
+        else "source_observations_validated_semantics_unverified"
+    )
+    if finding.get("claim_validation", {}).get("status") != expected_validation:
+        raise RuntimeError("agent report did not pass the expected exact source or Decimal validation")
+    return {
+        "agent_driver": client.model,
+        "agent_model_called": False,
+        "query": query,
+        "security_code": symbol,
+        "research_ablation_id": research_ablation_id,
+        "module_intervention": "none" if research_ablation_id is None else "Qwen reranker disabled (ablation 12)",
+        "search_status": search.get("status"),
+        "search_result": search,
+        "research_policy": search.get("research_policy"),
+        "channels": search.get("channels"),
+        "coverage": search.get("coverage"),
+        "retrieval_order": [
+            {
+                "rank": index + 1,
+                "evidence_id": item.get("evidence_id"),
+                "research_role": item.get("research_role"),
+                "citation": {
+                    key: (item.get("citation") or {}).get(key)
+                    for key in ("source_id", "content_sha256", "page_number", "span_id", "table_id", "row_start", "row_end", "numeric_eligible")
+                    if (item.get("citation") or {}).get(key) is not None
+                },
+                "financial_fact": item.get("financial_fact"),
+            }
+            for index, item in enumerate(search.get("retrieved", []))
+        ],
+        "source_reads": reads,
+        "validated_report": result["report"],
+        "tool_trace": trace,
+    }
+
+
+def _run_rag_intervention(
+    *,
+    service: IndustrialRagService,
+    release_id: str,
+    symbol: str,
+    decision_time: datetime,
+    research_ablation_id: int,
+    report_period: str,
+    use_qwen: bool,
+) -> dict[str, Any]:
+    _tools, handlers, _catalog = _fundamental_handlers(
+        None,
+        decision_time,
+        industrial_rag_service=service,
+        industrial_rag_principal_id="local-public",
+        industrial_rag_release_id=release_id,
+        research_policy_json=_policy_json(use_qwen=use_qwen),
+        research_ablation_id=research_ablation_id,
+    )
+    return handlers["search_indexed_financial_documents"]({
+        "question": QUERY_TEXT,
+        "symbols": [symbol],
+        "report_periods": [report_period],
+        "task_type": "fact",
+        "limit": 2,
+    })
+
+
+def _module_matrix(
+    *,
+    service: IndustrialRagService,
+    release_id: str,
+    symbol: str,
+    decision_time: datetime,
+    baseline: Mapping[str, Any],
+    reranker_disabled: Mapping[str, Any],
+    use_qwen: bool,
+    progress_path: Path,
+) -> list[dict[str, Any]]:
+    baseline_items = list(baseline.get("retrieval_order", []))
+    baseline_ids = [str(item.get("evidence_id")) for item in baseline_items]
+    result_by_module: dict[int, dict[str, Any]] = {}
+    runnable_ids = {2, 3, 7, 8, 9, 11, 13, 14, 15, 16}
+    if use_qwen:
+        runnable_ids.update({10, 12})
+        result_by_module[12] = dict(reranker_disabled.get("search_result", {}))
+    descriptions = {
+        2: "Disable reviewed cross-page continuation context.",
+        3: "Remove semantic row-group chunks from the retrieval candidate set.",
+        7: "Disable constrained query rewriting.",
+        8: "Disable multi-hop decomposition.",
+        9: "Disable BM25 support retrieval while retaining its correction-search guard.",
+        10: "Disable the dense embedding channel.",
+        11: "Replace reciprocal-rank fusion with the first available channel.",
+        12: "Disable the configured local Qwen3 reranker.",
+        13: "Disable reviewed table-row expansion.",
+        14: "Disable normalized structured-fact retrieval while retaining report validation.",
+        15: "Remove the candidate context cap under the fixed tool ceiling.",
+        16: "Remove the candidate evidence cap under the service ceiling.",
+    }
+    for module_id in sorted(runnable_ids - ({12} if use_qwen else set())):
+        try:
+            period_results = [
+                _run_rag_intervention(
+                    service=service,
+                    release_id=release_id,
+                    symbol=symbol,
+                    decision_time=decision_time,
+                    research_ablation_id=module_id,
+                    report_period=period,
+                    use_qwen=use_qwen,
+                )
+                for period in ("2023", "2024")
+            ]
+            result_by_module[module_id] = _merge_search_results(period_results)
+        except Exception as exc:
+            result_by_module[module_id] = {
+                "status": "execution_error",
+                "execution_error": {"type": type(exc).__name__, "message": str(exc)},
+                "retrieved": [],
+            }
+        _write_json(progress_path, {
+            "security_code": symbol,
+            "completed_module_ids": sorted(result_by_module),
+            "results": result_by_module,
+        })
+    rows = []
+    for module_id, module_name, mode in _ABLATION_MODULES:
+        if module_id in runnable_ids:
+            result = result_by_module[module_id]
+            retrieved = [item for item in result.get("retrieved", []) if isinstance(item, Mapping)]
+            after_ids = [str(item.get("evidence_id")) for item in retrieved]
+            rows.append({
+                "module_id": module_id,
+                "module": module_name,
+                "catalog_mode": mode,
+                "execution_status": "error" if result.get("status") == "execution_error" else "executed",
+                "retrieval_status": result.get("status"),
+                "intervention_applied": True,
+                "same_question_release_source_as_baseline": True,
+                "research_ablation_id": module_id,
+                "intervention_description": descriptions[module_id],
+                "baseline_evidence_ids": baseline_ids,
+                "intervention_evidence_ids": after_ids,
+                "evidence_order_changed": baseline_ids != after_ids,
+                "channels": result.get("channels"),
+                "coverage": result.get("coverage"),
+                "numeric_fact_periods_returned": sorted({
+                    str((item.get("financial_fact") or {}).get("report_period"))
+                    for item in retrieved
+                    if isinstance(item.get("financial_fact"), Mapping)
+                    and (item.get("financial_fact") or {}).get("numeric_eligible") is True
+                }),
+                "warnings": result.get("warnings", []),
+                "execution_error": result.get("execution_error"),
+            })
+        else:
+            reasons = {
+                1: "Offline parser and index rebuild required; not safely switchable in this run.",
+                4: "Immutable page and cell citation linkage contract; preservation observed, no destructive ablation attempted.",
+                5: "Immutable issuer and metric alias contract; no alias mutation attempted.",
+                6: "Immutable time, period, and basis extraction contract; no temporal guard mutation attempted.",
+                17: "Immutable challenge and stop safety policy; no safety guard mutation attempted.",
+                18: "Claim and citation validator exercised by the numeric report chain; validator not ablated.",
+                19: "Decimal calculator and recomputation validator exercised where unit eligibility allowed; arithmetic safety not ablated.",
+                20: "Conflict and unsupported-claim safety checks remain enabled; no conflict guard mutation attempted.",
+            }
+            if module_id == 10 and not use_qwen:
+                reasons[module_id] = "Dense retrieval was absent from this supplemental baseline; dense-off would be a no-op."
+            if module_id == 12 and not use_qwen:
+                reasons[module_id] = "Reranking was disabled in this supplemental baseline; reranker-off would be a no-op."
+            rows.append({
+                "module_id": module_id,
+                "module": module_name,
+                "catalog_mode": mode,
+                "execution_status": "not_ablated",
+                "intervention_applied": False,
+                "same_question_release_source_as_baseline": True,
+                "reason": reasons[module_id],
+                "baseline_evidence_ids": baseline_ids,
+            })
+    return rows
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-manifest", type=Path, default=SOURCE_MANIFEST)
+    parser.add_argument("--docling-assets", type=Path, default=DOCLING_ASSETS)
+    parser.add_argument("--qwen-assets", type=Path, default=QWEN_ASSETS)
+    parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
+    parser.add_argument("--run-id", help="Unique local run directory")
+    parser.add_argument("--resume-existing", action="store_true", help="Reuse parsed documents and a published release in the named run directory")
+    parser.add_argument("--skip-qwen", action="store_true", help="Run retrieval and claim validation without local Qwen inference")
+    args = parser.parse_args()
+
+    run_id = args.run_id or datetime.now(timezone.utc).strftime("current-capture-%Y%m%dT%H%M%SZ")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", run_id):
+        raise ValueError("run-id must be a safe immutable identifier")
+    output_dir = args.output_root.resolve() / run_id
+    if args.resume_existing:
+        if not output_dir.is_dir() or not (output_dir / "industrial_rag.sqlite3").is_file():
+            raise FileNotFoundError("resume-existing requires an existing materialized current-capture run")
+    else:
+        output_dir.mkdir(parents=True, exist_ok=False)
+
+    manifest_records = _read_source_records(args.source_manifest)
+    store = IndustrialRagStore(
+        output_dir / "industrial_rag.sqlite3",
+        LocalContentAddressedStore(output_dir / "objects"),
+    )
+    source_records: list[dict[str, Any]] = []
+    version_ids: list[str] = []
+    for spec in CASE_SPECS:
+        source_record = manifest_records.get(str(spec["source_id"]))
+        if source_record is None:
+            raise ValueError(f"source record is missing: {spec['source_id']}")
+        if Path(str(source_record.get("local_path", ""))).name != str(spec["filename"]):
+            raise ValueError(f"source path does not match the reviewed current-capture case: {spec['source_id']}")
+        capture = _resume_source if args.resume_existing else _capture_source
+        capture_args = {
+            "spec": spec,
+            "source_record": source_record,
+            "output_dir": output_dir,
+            "store": store,
+        }
+        if args.resume_existing:
+            captured = capture(**capture_args, release_id=run_id)
+        else:
+            captured = capture(**capture_args)
+        source_records.append(captured)
+        version_ids.append(str(captured["version_id"]))
+
+    if args.resume_existing:
+        release_summary = store.release_summaries()
+        matching_release = next((item for item in release_summary["releases"] if item["release_id"] == run_id), None)
+        if release_summary["active_release_id"] != run_id or matching_release is None or matching_release["status"] != "published":
+            raise RuntimeError("resume-existing release is not the published active current-capture release")
+        if set(version_ids) != set(matching_release["versions"]):
+            raise RuntimeError("resume-existing source versions differ from the published release manifest")
+        release = {"status": matching_release["status"], "release": matching_release, "reused": True}
+    else:
+        release = build_release(
+            release_id=run_id,
+            version_ids=version_ids,
+            database_path=output_dir / "industrial_rag.sqlite3",
+            object_root=output_dir / "objects",
+            actor_id="local-supervision",
+            reason="Current-capture multi-issuer strict-forward development evidence",
+        )
+    query_progress_path = output_dir / "query_progress.json"
+    query_runs: list[dict[str, Any]] = (
+        json.loads(query_progress_path.read_text(encoding="utf-8"))
+        if args.resume_existing and query_progress_path.is_file()
+        else []
+    )
+    as_of = (
+        datetime.fromisoformat(str(query_runs[0]["as_of"])).astimezone(timezone.utc)
+        if query_runs else datetime.now(timezone.utc)
+    )
+    decision_time = as_of.astimezone(SHANGHAI)
+    release_id = store.active_release_id()
+    if release_id != run_id:
+        raise RuntimeError("new current-capture release is not the active release")
+
+    use_qwen = not args.skip_qwen
+    dense_adapter = None
+    reranker = None
+    if use_qwen:
+        embedding = Qwen3EmbeddingRuntime(args.qwen_assets)
+        reranker_runtime = Qwen3RerankerRuntime(args.qwen_assets)
+        dense_adapter = LocalQwenDenseAdapter(store, embedding)
+        reranker = LocalQwenReranker(reranker_runtime)
+    service = IndustrialRagService(
+        store,
+        channel_adapters={"dense": dense_adapter} if dense_adapter is not None else {},
+        reranker=reranker,
+        allow_retrospective_diagnostic=False,
+    )
+    model_manifest_path = args.qwen_assets / "raama_qwen_models.json"
+    docling_manifest_path = args.docling_assets / ASSET_MANIFEST
+    model_identity = {
+        "embedding_repo": EMBEDDING_REPO,
+        "embedding_revision": EMBEDDING_REVISION,
+        "embedding_cache_identity": dense_adapter.cache_identity if dense_adapter is not None else None,
+        "reranker_repo": RERANKER_REPO,
+        "reranker_revision": RERANKER_REVISION,
+        "reranker_cache_identity": reranker.cache_identity if reranker is not None else None,
+        "qwen_inference_enabled_this_run": use_qwen,
+        "local_files_only": True,
+        "asset_manifest_sha256": _sha256(model_manifest_path.read_bytes()),
+    }
+    completed_case_ids = {str(item["case_id"]) for item in query_runs}
+    for source, spec in zip(source_records, CASE_SPECS):
+        if str(source["case_id"]) in completed_case_ids:
+            continue
+        case = {
+            "case_id": source["case_id"],
+            "question": QUERY_TEXT,
+            "security_code": spec["security_code"],
+            "report_periods": ["2023", "2024"],
+            "calculator_eligible": spec.get("currency") == "CNY",
+            "source_id": source["source_id"],
+        }
+        baseline = _run_agent_chain(
+            service=service,
+            release_id=run_id,
+            case=case,
+            decision_time=decision_time,
+            research_ablation_id=None,
+            use_qwen=use_qwen,
+        )
+        _write_json(output_dir / f"agent_progress_{spec['security_code']}.json", baseline)
+        no_reranker = (
+            _run_agent_chain(
+                service=service,
+                release_id=run_id,
+                case=case,
+                decision_time=decision_time,
+                research_ablation_id=12,
+                use_qwen=True,
+            )
+            if use_qwen
+            else {"status": "not_run_qwen_disabled_in_supplemental_baseline"}
+        )
+        baseline_order = [item["evidence_id"] for item in baseline["retrieval_order"]]
+        no_reranker_order = [item["evidence_id"] for item in no_reranker.get("retrieval_order", [])]
+        module_rows = _module_matrix(
+            service=service,
+            release_id=run_id,
+            symbol=str(spec["security_code"]),
+            decision_time=decision_time,
+            baseline=baseline,
+            reranker_disabled=no_reranker,
+            use_qwen=use_qwen,
+            progress_path=output_dir / f"module_progress_{spec['security_code']}.json",
+        )
+        query_record = {
+            "case_id": source["case_id"],
+            "question": QUERY_TEXT,
+            "security_code": spec["security_code"],
+            "report_periods": ["2023", "2024"],
+            "as_of": as_of.isoformat(),
+            "time_mode": "strict_forward",
+            "numeric_calculation_eligible": bool(case["calculator_eligible"]),
+            "baseline_retrieval": baseline,
+            "paired_ablation_reranker_disabled": no_reranker,
+            "module_ablation_matrix": module_rows,
+            "module_comparison": {
+                "same_question_release_and_source": True,
+                "changed_module": "configured Qwen3 reranker disabled for ablation 12" if use_qwen else "no Qwen intervention; supplemental baseline has dense retrieval and reranking disabled",
+                "baseline_reranker_identity": model_identity["reranker_cache_identity"],
+                "baseline_dense_identity": model_identity["embedding_cache_identity"],
+                "retrieval_order_changed": baseline_order != no_reranker_order if use_qwen else None,
+                "baseline_order": baseline_order,
+                "reranker_disabled_order": no_reranker_order,
+            },
+        }
+        query_runs.append(query_record)
+        completed_case_ids.add(str(source["case_id"]))
+        _write_json(query_progress_path, query_runs)
+
+    record = {
+        "schema_version": "raama.financial-rag.current-capture.v1",
+        "run_id": run_id,
+        "capture_classification": "current-capture",
+        "capture_resume": {
+            "resumed_existing_capture": args.resume_existing,
+            "prior_attempt_reused_same_local_sources_and_release": args.resume_existing,
+            "prior_attempt_note": (
+                "The first attempt completed parsing, ingestion, and release publication, then stopped before inference because candidate_limit=8 exceeded the enforced maximum of 2. A second attempt loaded the pinned Qwen embedding and reranker and completed retrieval, but the scripted driver observed fewer than both annual facts in one query and stopped before persisting the retrieval result or a claim. The supplementary record does not repeat Qwen inference."
+                if args.resume_existing else None
+            ),
+        },
+        "as_of": as_of.isoformat(),
+        "available_from_rule": "recorded local source capture time is used as first_available_at",
+        "historical_2025_first_available_proxies_used": False,
+        "future_returns_evaluated": False,
+        "provider_calls": 0,
+        "agent_model_called": False,
+        "agent_tool_protocol": "real fundamental tool handlers, reopened evidence, deterministic Decimal calculator, and report validator driven by deterministic offline scripted tool calls",
+        "query_text_shared_by_all_issuers_and_ablations": QUERY_TEXT,
+        "release": release,
+        "release_id": run_id,
+        "time_mode": "strict_forward",
+        "source_records": source_records,
+        "model_identity": model_identity,
+        "docling_asset_manifest_sha256": _sha256(docling_manifest_path.read_bytes()) if docling_manifest_path.is_file() else None,
+        "local_inference_device": "CPU" if use_qwen else None,
+        "retrieval_channel_scope": ["structured_facts", "bm25", "dense"] if use_qwen else ["structured_facts", "bm25"],
+        "qwen_prior_attempt": {
+            "status": "retrieval_returned_without_both_annual_source_facts_captured" if args.resume_existing else "not_applicable",
+            "embedding_revision": EMBEDDING_REVISION,
+            "reranker_revision": RERANKER_REVISION,
+            "provider_calls": 0,
+            "retrieval_trace_persisted": False,
+        } if args.resume_existing else None,
+        "module_ablation_scope": "Actual bounded retrieval handler interventions for modules 2, 3, and 7-16; parser rebuild, immutable citation/alias/time contracts, and safety guards are recorded as not ablated.",
+        "queries": query_runs,
+        "limitations": [
+            "Three viewed development documents and one manually scoped table page per document are not an independent or blind benchmark.",
+            "Full-source page text uses pypdf; Docling parses only the reviewed revenue-table page, not every page.",
+            "Numeric facts were locally reviewed by Codex against the page images and parser output; this review is not independent.",
+            "The tool protocol is real, but the tool-call sequence is scripted; no language model or provider was called.",
+            "A prior local Qwen retrieval attempt returned without both annual facts exposed to the scripted driver; its exact retrieval response was not persisted. Results in this record use structured-fact and BM25 retrieval only.",
+            "CATL's reviewed table labels the values in 千元 but does not state currency; source observations are validated, but no currency calculation is attempted for that case.",
+            "Ping An and CATL target tables do not state accounting basis; any calculation for Ping An is limited to adjacent annual columns and records that uncertainty.",
+            "The module matrix records single-query retrieval outcomes only; it is not a causal ablation study, independent acceptance result, or quality score.",
+            "Retrieval ranks and exact claim validation do not establish semantic entailment or investment quality.",
+        ],
+    }
+    _write_json(output_dir / "current_capture_run.json", record)
+    print(json.dumps({
+        "run_id": run_id,
+        "output_dir": str(output_dir),
+        "release_status": release.get("status"),
+        "as_of": as_of.isoformat(),
+        "time_mode": "strict_forward",
+        "source_count": len(source_records),
+        "query_count": len(query_runs),
+        "provider_calls": 0,
+        "model_identity": model_identity,
+        "agent_claims": [
+            {
+                "case_id": item["case_id"],
+                "baseline_status": item["baseline_retrieval"]["validated_report"]["findings"][0]["claim_validation"]["status"],
+                "reranker_disabled_status": item["paired_ablation_reranker_disabled"].get("validated_report", {}).get("findings", [{}])[0].get("claim_validation", {}).get("status"),
+                "calculation_evidence": item["baseline_retrieval"]["validated_report"]["findings"][0]["claim_validation"]["calculation_evidence_ids"],
+                "retrieval_order_changed": item["module_comparison"]["retrieval_order_changed"],
+                "module_rows": len(item["module_ablation_matrix"]),
+                "module_interventions_executed": sum(row["intervention_applied"] for row in item["module_ablation_matrix"]),
+            }
+            for item in query_runs
+        ],
+    }, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

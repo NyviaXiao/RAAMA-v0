@@ -1746,6 +1746,7 @@ def _fundamental_handlers(
                     title = str(citation.get("title") or "")
                     source_ref = {
                         "evidence_id": evidence_id,
+                        "source_record_id": str(citation.get("source_id") or evidence_id),
                         "source_type": "public_financial_document",
                         "dataset": "industrial_rag",
                         "symbol": symbol,

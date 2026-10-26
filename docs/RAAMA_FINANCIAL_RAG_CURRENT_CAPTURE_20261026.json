@@ -1,0 +1,2392 @@
+{
+  "agent_driver": "real fundamental tool handlers, reopened evidence, deterministic Decimal calculator, and report validator driven by deterministic offline scripted tool calls",
+  "agent_model_called": false,
+  "as_of": "2026-10-26T12:03:13.899307+00:00",
+  "capture_classification": "current-capture",
+  "historical_first_available_proxies_used": false,
+  "limitations": [
+    "Three viewed development documents and one manually scoped table page per document are not an independent or blind benchmark.",
+    "Full-source page text uses pypdf; Docling parses only the reviewed revenue-table page, not every page.",
+    "Numeric facts were locally reviewed by Codex against the page images and parser output; this review is not independent.",
+    "The tool protocol is real, but the tool-call sequence is scripted; no language model or provider was called.",
+    "A prior local Qwen retrieval attempt returned without both annual facts exposed to the scripted driver; its exact retrieval response was not persisted. Results in this record use structured-fact and BM25 retrieval only.",
+    "CATL's reviewed table labels the values in 千元 but does not state currency; source observations are validated, but no currency calculation is attempted for that case.",
+    "Ping An and CATL target tables do not state accounting basis; any calculation for Ping An is limited to adjacent annual columns and records that uncertainty.",
+    "The module matrix records single-query retrieval outcomes only; it is not a causal ablation study, independent acceptance result, or quality score.",
+    "Retrieval ranks and exact claim validation do not establish semantic entailment or investment quality."
+  ],
+  "model_identity": {
+    "asset_manifest_sha256": "818db87ff07663fce9488e7ee33eba956c4074149b51073746daf4369053340b",
+    "embedding_cache_identity": null,
+    "embedding_repo": "Qwen/Qwen3-Embedding-0.6B",
+    "embedding_revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+    "local_files_only": true,
+    "qwen_inference_enabled_this_run": false,
+    "reranker_cache_identity": null,
+    "reranker_repo": "Qwen/Qwen3-Reranker-0.6B",
+    "reranker_revision": "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+  },
+  "module_rollup": [
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "layout_ocr_routing",
+      "module_id": 1,
+      "reasons": [
+        "Offline parser and index rebuild required; not safely switchable in this run."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "cross_page_table_reconstruction",
+      "module_id": 2,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "semantic_row_group_chunking",
+      "module_id": 3,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "hierarchy_page_cell_linkage",
+      "module_id": 4,
+      "reasons": [
+        "Immutable page and cell citation linkage contract; preservation observed, no destructive ablation attempted."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "entity_alias_disambiguation",
+      "module_id": 5,
+      "reasons": [
+        "Immutable issuer and metric alias contract; no alias mutation attempted."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "time_period_basis_extraction",
+      "module_id": 6,
+      "reasons": [
+        "Immutable time, period, and basis extraction contract; no temporal guard mutation attempted."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "constrained_query_rewrite",
+      "module_id": 7,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "multi_hop_decomposition",
+      "module_id": 8,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "bm25_support_channel",
+      "module_id": 9,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "dense_embedding_retrieval",
+      "module_id": 10,
+      "reasons": [
+        "Dense retrieval was absent from this supplemental baseline; dense-off would be a no-op."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "reciprocal_rank_fusion",
+      "module_id": 11,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "independent_reranker",
+      "module_id": 12,
+      "reasons": [
+        "Reranking was disabled in this supplemental baseline; reranker-off would be a no-op."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "reviewed_parent_context",
+      "module_id": 13,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "financial_fact_normalization",
+      "module_id": 14,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "candidate_only"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "context_allocation",
+      "module_id": 15,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": true,
+        "current_capture_cmb_2024_revenue": true,
+        "current_capture_pingan_2024_revenue": true
+      },
+      "module": "evidence_coverage_budget",
+      "module_id": 16,
+      "reasons": [],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": "available",
+        "current_capture_cmb_2024_revenue": "available",
+        "current_capture_pingan_2024_revenue": "available"
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "executed",
+        "current_capture_cmb_2024_revenue": "executed",
+        "current_capture_pingan_2024_revenue": "executed"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "challenge_and_stop",
+      "module_id": 17,
+      "reasons": [
+        "Immutable challenge and stop safety policy; no safety guard mutation attempted."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "claim_citation_alignment",
+      "module_id": 18,
+      "reasons": [
+        "Claim and citation validator exercised by the numeric report chain; validator not ablated."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "deterministic_arithmetic_validation",
+      "module_id": 19,
+      "reasons": [
+        "Decimal calculator and recomputation validator exercised where unit eligibility allowed; arithmetic safety not ablated."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    },
+    {
+      "evidence_order_changed_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "intervention_applied_by_case": {
+        "current_capture_catl_2024_revenue": false,
+        "current_capture_cmb_2024_revenue": false,
+        "current_capture_pingan_2024_revenue": false
+      },
+      "module": "conflict_and_unsupported_claim_checks",
+      "module_id": 20,
+      "reasons": [
+        "Conflict and unsupported-claim safety checks remain enabled; no conflict guard mutation attempted."
+      ],
+      "retrieval_status_by_case": {
+        "current_capture_catl_2024_revenue": null,
+        "current_capture_cmb_2024_revenue": null,
+        "current_capture_pingan_2024_revenue": null
+      },
+      "status_by_case": {
+        "current_capture_catl_2024_revenue": "not_ablated",
+        "current_capture_cmb_2024_revenue": "not_ablated",
+        "current_capture_pingan_2024_revenue": "not_ablated"
+      }
+    }
+  ],
+  "provider_calls": 0,
+  "queries": [
+    {
+      "as_of": "2026-10-26T12:03:13.899307+00:00",
+      "calculation_results": [
+        {
+          "accounting_basis": "本集团",
+          "currency": null,
+          "decimal_precision": 50,
+          "decimal_rounding": "ROUND_HALF_EVEN",
+          "evidence_id": "8b8e403d563b2b129b8effb2",
+          "formula": "(current - baseline) / baseline * 100",
+          "metric": "calculated_营业收入_growth_pct",
+          "operand_evidence_ids": [
+            "01af95bd219815c0c2074562",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "operands": [
+            {
+              "evidence_id": "01af95bd219815c0c2074562",
+              "field": "营业收入"
+            },
+            {
+              "evidence_id": "f892c954ff6791fa85101ca0",
+              "field": "营业收入"
+            }
+          ],
+          "report_period": "2024",
+          "source_timing_status": [
+            "captured_by_decision_time"
+          ],
+          "status": "calculated",
+          "symbol": "600036",
+          "unit": "percent",
+          "value": "-0.48212595429976734105324616731982201148255942534125"
+        }
+      ],
+      "case_id": "current_capture_cmb_2024_revenue",
+      "claim_type": "calculation",
+      "claim_validation": {
+        "calculation_evidence_ids": [
+          "8b8e403d563b2b129b8effb2"
+        ],
+        "claim_type": "calculation",
+        "conflicting_sources": [],
+        "status": "calculation_recomputed_decimal_50_half_even_semantics_unverified"
+      },
+      "module_matrix": [
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "layout_ocr_routing",
+          "module_id": 1,
+          "numeric_fact_periods_returned": null,
+          "reason": "Offline parser and index rebuild required; not safely switchable in this run.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable reviewed cross-page continuation context.",
+          "intervention_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "cross_page_table_reconstruction",
+          "module_id": 2,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove semantic row-group chunks from the retrieval candidate set.",
+          "intervention_evidence_ids": [
+            "01af95bd219815c0c2074562",
+            "3428036a87710d601fe30cfb",
+            "27bb378859dac33e7d31856e",
+            "3a1f7fab392ceca279f1369b",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "semantic_row_group_chunking",
+          "module_id": 3,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "hierarchy_page_cell_linkage",
+          "module_id": 4,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable page and cell citation linkage contract; preservation observed, no destructive ablation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "entity_alias_disambiguation",
+          "module_id": 5,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable issuer and metric alias contract; no alias mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "time_period_basis_extraction",
+          "module_id": 6,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable time, period, and basis extraction contract; no temporal guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable constrained query rewriting.",
+          "intervention_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "constrained_query_rewrite",
+          "module_id": 7,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable multi-hop decomposition.",
+          "intervention_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "multi_hop_decomposition",
+          "module_id": 8,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable BM25 support retrieval while retaining its correction-search guard.",
+          "intervention_evidence_ids": [
+            "01af95bd219815c0c2074562",
+            "55b2aa3d1d6cec238e203f2d",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "bm25_support_channel",
+          "module_id": 9,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "dense_embedding_retrieval",
+          "module_id": 10,
+          "numeric_fact_periods_returned": null,
+          "reason": "Dense retrieval was absent from this supplemental baseline; dense-off would be a no-op.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Replace reciprocal-rank fusion with the first available channel.",
+          "intervention_evidence_ids": [
+            "01af95bd219815c0c2074562",
+            "55b2aa3d1d6cec238e203f2d",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "reciprocal_rank_fusion",
+          "module_id": 11,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "independent_reranker",
+          "module_id": 12,
+          "numeric_fact_periods_returned": null,
+          "reason": "Reranking was disabled in this supplemental baseline; reranker-off would be a no-op.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable reviewed table-row expansion.",
+          "intervention_evidence_ids": [
+            "01af95bd219815c0c2074562",
+            "55b2aa3d1d6cec238e203f2d",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "reviewed_parent_context",
+          "module_id": 13,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable normalized structured-fact retrieval while retaining report validation.",
+          "intervention_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "3428036a87710d601fe30cfb",
+            "27bb378859dac33e7d31856e"
+          ],
+          "module": "financial_fact_normalization",
+          "module_id": 14,
+          "numeric_fact_periods_returned": [],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove the candidate context cap under the fixed tool ceiling.",
+          "intervention_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "context_allocation",
+          "module_id": 15,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove the candidate evidence cap under the service ceiling.",
+          "intervention_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "module": "evidence_coverage_budget",
+          "module_id": 16,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "challenge_and_stop",
+          "module_id": 17,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable challenge and stop safety policy; no safety guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "claim_citation_alignment",
+          "module_id": 18,
+          "numeric_fact_periods_returned": null,
+          "reason": "Claim and citation validator exercised by the numeric report chain; validator not ablated.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "deterministic_arithmetic_validation",
+          "module_id": 19,
+          "numeric_fact_periods_returned": null,
+          "reason": "Decimal calculator and recomputation validator exercised where unit eligibility allowed; arithmetic safety not ablated.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "55b2aa3d1d6cec238e203f2d",
+            "01af95bd219815c0c2074562",
+            "27bb378859dac33e7d31856e",
+            "f892c954ff6791fa85101ca0"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "conflict_and_unsupported_claim_checks",
+          "module_id": 20,
+          "numeric_fact_periods_returned": null,
+          "reason": "Conflict and unsupported-claim safety checks remain enabled; no conflict guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        }
+      ],
+      "observations": [
+        {
+          "evidence_id": "01af95bd219815c0c2074562",
+          "field": "operating_revenue",
+          "numeric_candidate_eligible": false,
+          "report_period": "2023",
+          "source_accounting_basis": "本集团",
+          "source_available_at": "2026-10-25T09:34:12.973011+00:00",
+          "source_currency": "CNY",
+          "source_timing_status": "captured_by_decision_time",
+          "source_vintage_verified": true,
+          "unit": "CNY",
+          "value": "339123000000"
+        },
+        {
+          "evidence_id": "f892c954ff6791fa85101ca0",
+          "field": "operating_revenue",
+          "numeric_candidate_eligible": false,
+          "report_period": "2024",
+          "source_accounting_basis": "本集团",
+          "source_available_at": "2026-10-25T09:34:12.973011+00:00",
+          "source_currency": "CNY",
+          "source_timing_status": "captured_by_decision_time",
+          "source_vintage_verified": true,
+          "unit": "CNY",
+          "value": "337488000000"
+        },
+        {
+          "evidence_id": "8b8e403d563b2b129b8effb2",
+          "field": "operating_revenue",
+          "numeric_candidate_eligible": false,
+          "report_period": "2024",
+          "source_accounting_basis": "本集团",
+          "source_available_at": "2026-10-25T17:34:12.973011+08:00",
+          "source_currency": null,
+          "source_timing_status": "captured_by_decision_time",
+          "source_vintage_verified": true,
+          "unit": "percent",
+          "value": "-0.48212595429976734105324616731982201148255942534125"
+        }
+      ],
+      "question": "2024年度营业收入是多少，较2023年度增长多少？",
+      "report_periods": [
+        "2023",
+        "2024"
+      ],
+      "security_code": "600036",
+      "time_mode": "strict_forward",
+      "uncertainties": []
+    },
+    {
+      "as_of": "2026-10-26T12:03:13.899307+00:00",
+      "calculation_results": [
+        {
+          "accounting_basis": "not_stated_in_target_table",
+          "currency": null,
+          "decimal_precision": 50,
+          "decimal_rounding": "ROUND_HALF_EVEN",
+          "evidence_id": "ab97f82206cf095ebb26ba8f",
+          "formula": "(current - baseline) / baseline * 100",
+          "metric": "calculated_营业收入_growth_pct",
+          "operand_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "operands": [
+            {
+              "evidence_id": "ee23671a1e19e24f6ccf01eb",
+              "field": "营业收入"
+            },
+            {
+              "evidence_id": "f40de3ff568fa4ed26f5d3a5",
+              "field": "营业收入"
+            }
+          ],
+          "report_period": "2024",
+          "source_timing_status": [
+            "captured_by_decision_time"
+          ],
+          "status": "calculated",
+          "symbol": "000001",
+          "unit": "percent",
+          "value": "-10.931456778729682633167171628243037298344252241969"
+        }
+      ],
+      "case_id": "current_capture_pingan_2024_revenue",
+      "claim_type": "calculation",
+      "claim_validation": {
+        "calculation_evidence_ids": [
+          "ab97f82206cf095ebb26ba8f"
+        ],
+        "claim_type": "calculation",
+        "conflicting_sources": [],
+        "status": "calculation_recomputed_decimal_50_half_even_semantics_unverified"
+      },
+      "module_matrix": [
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "layout_ocr_routing",
+          "module_id": 1,
+          "numeric_fact_periods_returned": null,
+          "reason": "Offline parser and index rebuild required; not safely switchable in this run.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable reviewed cross-page continuation context.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "cross_page_table_reconstruction",
+          "module_id": 2,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove semantic row-group chunks from the retrieval candidate set.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "semantic_row_group_chunking",
+          "module_id": 3,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "hierarchy_page_cell_linkage",
+          "module_id": 4,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable page and cell citation linkage contract; preservation observed, no destructive ablation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "entity_alias_disambiguation",
+          "module_id": 5,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable issuer and metric alias contract; no alias mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "time_period_basis_extraction",
+          "module_id": 6,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable time, period, and basis extraction contract; no temporal guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable constrained query rewriting.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "constrained_query_rewrite",
+          "module_id": 7,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable multi-hop decomposition.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "multi_hop_decomposition",
+          "module_id": 8,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable BM25 support retrieval while retaining its correction-search guard.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "bm25_support_channel",
+          "module_id": 9,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "dense_embedding_retrieval",
+          "module_id": 10,
+          "numeric_fact_periods_returned": null,
+          "reason": "Dense retrieval was absent from this supplemental baseline; dense-off would be a no-op.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Replace reciprocal-rank fusion with the first available channel.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "reciprocal_rank_fusion",
+          "module_id": 11,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "independent_reranker",
+          "module_id": 12,
+          "numeric_fact_periods_returned": null,
+          "reason": "Reranking was disabled in this supplemental baseline; reranker-off would be a no-op.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable reviewed table-row expansion.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "reviewed_parent_context",
+          "module_id": 13,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable normalized structured-fact retrieval while retaining report validation.",
+          "intervention_evidence_ids": [
+            "f4e9cd5fbf68df8a4e901296",
+            "03e02ef1d7c4532d227841b1",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed"
+          ],
+          "module": "financial_fact_normalization",
+          "module_id": 14,
+          "numeric_fact_periods_returned": [],
+          "reason": null,
+          "retrieval_status": "candidate_only",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove the candidate context cap under the fixed tool ceiling.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "context_allocation",
+          "module_id": 15,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove the candidate evidence cap under the service ceiling.",
+          "intervention_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "module": "evidence_coverage_budget",
+          "module_id": 16,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "challenge_and_stop",
+          "module_id": 17,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable challenge and stop safety policy; no safety guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "claim_citation_alignment",
+          "module_id": 18,
+          "numeric_fact_periods_returned": null,
+          "reason": "Claim and citation validator exercised by the numeric report chain; validator not ablated.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "deterministic_arithmetic_validation",
+          "module_id": 19,
+          "numeric_fact_periods_returned": null,
+          "reason": "Decimal calculator and recomputation validator exercised where unit eligibility allowed; arithmetic safety not ablated.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "ee23671a1e19e24f6ccf01eb",
+            "f4e9cd5fbf68df8a4e901296",
+            "465dd2da990ebd9e72ff0d7d",
+            "9a911ea9cc6879083e2849ed",
+            "f40de3ff568fa4ed26f5d3a5"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "conflict_and_unsupported_claim_checks",
+          "module_id": 20,
+          "numeric_fact_periods_returned": null,
+          "reason": "Conflict and unsupported-claim safety checks remain enabled; no conflict guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        }
+      ],
+      "observations": [
+        {
+          "evidence_id": "ee23671a1e19e24f6ccf01eb",
+          "field": "operating_revenue",
+          "numeric_candidate_eligible": false,
+          "report_period": "2023",
+          "source_accounting_basis": "not_stated_in_target_table",
+          "source_available_at": "2026-10-25T20:20:06+00:00",
+          "source_currency": "CNY",
+          "source_timing_status": "captured_by_decision_time",
+          "source_vintage_verified": true,
+          "unit": "CNY",
+          "value": "164699000000"
+        },
+        {
+          "evidence_id": "f40de3ff568fa4ed26f5d3a5",
+          "field": "operating_revenue",
+          "numeric_candidate_eligible": false,
+          "report_period": "2024",
+          "source_accounting_basis": "not_stated_in_target_table",
+          "source_available_at": "2026-10-25T20:20:06+00:00",
+          "source_currency": "CNY",
+          "source_timing_status": "captured_by_decision_time",
+          "source_vintage_verified": true,
+          "unit": "CNY",
+          "value": "146695000000"
+        },
+        {
+          "evidence_id": "ab97f82206cf095ebb26ba8f",
+          "field": "operating_revenue",
+          "numeric_candidate_eligible": false,
+          "report_period": "2024",
+          "source_accounting_basis": "not_stated_in_target_table",
+          "source_available_at": "2026-10-26T04:20:06+08:00",
+          "source_currency": null,
+          "source_timing_status": "captured_by_decision_time",
+          "source_vintage_verified": true,
+          "unit": "percent",
+          "value": "-10.931456778729682633167171628243037298344252241969"
+        }
+      ],
+      "question": "2024年度营业收入是多少，较2023年度增长多少？",
+      "report_periods": [
+        "2023",
+        "2024"
+      ],
+      "security_code": "000001",
+      "time_mode": "strict_forward",
+      "uncertainties": [
+        "The target table does not state accounting basis; the calculation uses its adjacent annual columns."
+      ]
+    },
+    {
+      "as_of": "2026-10-26T12:03:13.899307+00:00",
+      "calculation_results": [],
+      "case_id": "current_capture_catl_2024_revenue",
+      "claim_type": "source_fact",
+      "claim_validation": {
+        "calculation_evidence_ids": [],
+        "claim_type": "source_fact",
+        "conflicting_sources": [],
+        "status": "source_observations_validated_semantics_unverified"
+      },
+      "module_matrix": [
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "layout_ocr_routing",
+          "module_id": 1,
+          "numeric_fact_periods_returned": null,
+          "reason": "Offline parser and index rebuild required; not safely switchable in this run.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable reviewed cross-page continuation context.",
+          "intervention_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "cross_page_table_reconstruction",
+          "module_id": 2,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove semantic row-group chunks from the retrieval candidate set.",
+          "intervention_evidence_ids": [
+            "3efd3a9efb21226ab828f9d8",
+            "84f867bba50c5842e7b3d3a0",
+            "ce14ff6927b37810f91e4ccf",
+            "c2909e0ae0d09fb74ea7bd5f",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "semantic_row_group_chunking",
+          "module_id": 3,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "hierarchy_page_cell_linkage",
+          "module_id": 4,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable page and cell citation linkage contract; preservation observed, no destructive ablation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "entity_alias_disambiguation",
+          "module_id": 5,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable issuer and metric alias contract; no alias mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "time_period_basis_extraction",
+          "module_id": 6,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable time, period, and basis extraction contract; no temporal guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable constrained query rewriting.",
+          "intervention_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "constrained_query_rewrite",
+          "module_id": 7,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable multi-hop decomposition.",
+          "intervention_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "multi_hop_decomposition",
+          "module_id": 8,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable BM25 support retrieval while retaining its correction-search guard.",
+          "intervention_evidence_ids": [
+            "3efd3a9efb21226ab828f9d8",
+            "7206ca15ed36e91d728fe5ae",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "bm25_support_channel",
+          "module_id": 9,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "dense_embedding_retrieval",
+          "module_id": 10,
+          "numeric_fact_periods_returned": null,
+          "reason": "Dense retrieval was absent from this supplemental baseline; dense-off would be a no-op.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Replace reciprocal-rank fusion with the first available channel.",
+          "intervention_evidence_ids": [
+            "3efd3a9efb21226ab828f9d8",
+            "7206ca15ed36e91d728fe5ae",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "reciprocal_rank_fusion",
+          "module_id": 11,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "independent_reranker",
+          "module_id": 12,
+          "numeric_fact_periods_returned": null,
+          "reason": "Reranking was disabled in this supplemental baseline; reranker-off would be a no-op.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable reviewed table-row expansion.",
+          "intervention_evidence_ids": [
+            "3efd3a9efb21226ab828f9d8",
+            "7206ca15ed36e91d728fe5ae",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "reviewed_parent_context",
+          "module_id": 13,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": true,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Disable normalized structured-fact retrieval while retaining report validation.",
+          "intervention_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "84f867bba50c5842e7b3d3a0",
+            "ce14ff6927b37810f91e4ccf"
+          ],
+          "module": "financial_fact_normalization",
+          "module_id": 14,
+          "numeric_fact_periods_returned": [],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove the candidate context cap under the fixed tool ceiling.",
+          "intervention_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "context_allocation",
+          "module_id": 15,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": false,
+          "execution_error": null,
+          "intervention_applied": true,
+          "intervention_description": "Remove the candidate evidence cap under the service ceiling.",
+          "intervention_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "module": "evidence_coverage_budget",
+          "module_id": 16,
+          "numeric_fact_periods_returned": [
+            "2023",
+            "2024"
+          ],
+          "reason": null,
+          "retrieval_status": "available",
+          "status": "executed"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "challenge_and_stop",
+          "module_id": 17,
+          "numeric_fact_periods_returned": null,
+          "reason": "Immutable challenge and stop safety policy; no safety guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "claim_citation_alignment",
+          "module_id": 18,
+          "numeric_fact_periods_returned": null,
+          "reason": "Claim and citation validator exercised by the numeric report chain; validator not ablated.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "deterministic_arithmetic_validation",
+          "module_id": 19,
+          "numeric_fact_periods_returned": null,
+          "reason": "Decimal calculator and recomputation validator exercised where unit eligibility allowed; arithmetic safety not ablated.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        },
+        {
+          "baseline_evidence_ids": [
+            "7206ca15ed36e91d728fe5ae",
+            "3efd3a9efb21226ab828f9d8",
+            "ce14ff6927b37810f91e4ccf",
+            "763fae0efacbe630cecb094c"
+          ],
+          "evidence_order_changed": null,
+          "execution_error": null,
+          "intervention_applied": false,
+          "intervention_description": null,
+          "intervention_evidence_ids": [],
+          "module": "conflict_and_unsupported_claim_checks",
+          "module_id": 20,
+          "numeric_fact_periods_returned": null,
+          "reason": "Conflict and unsupported-claim safety checks remain enabled; no conflict guard mutation attempted.",
+          "retrieval_status": null,
+          "status": "not_ablated"
+        }
+      ],
+      "observations": [
+        {
+          "evidence_id": "3efd3a9efb21226ab828f9d8",
+          "field": "operating_revenue",
+          "numeric_candidate_eligible": false,
+          "report_period": "2023",
+          "source_accounting_basis": "not_stated_in_target_table",
+          "source_available_at": "2026-10-25T20:39:51+00:00",
+          "source_currency": "",
+          "source_timing_status": "captured_by_decision_time",
+          "source_vintage_verified": true,
+          "unit": "千元",
+          "value": "400917045"
+        },
+        {
+          "evidence_id": "763fae0efacbe630cecb094c",
+          "field": "operating_revenue",
+          "numeric_candidate_eligible": false,
+          "report_period": "2024",
+          "source_accounting_basis": "not_stated_in_target_table",
+          "source_available_at": "2026-10-25T20:39:51+00:00",
+          "source_currency": "",
+          "source_timing_status": "captured_by_decision_time",
+          "source_vintage_verified": true,
+          "unit": "千元",
+          "value": "362012554"
+        }
+      ],
+      "question": "2024年度营业收入是多少，较2023年度增长多少？",
+      "report_periods": [
+        "2023",
+        "2024"
+      ],
+      "security_code": "300750",
+      "time_mode": "strict_forward",
+      "uncertainties": [
+        "Target table does not state currency or accounting basis."
+      ]
+    }
+  ],
+  "qwen_prior_attempt": {
+    "embedding_revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+    "provider_calls": 0,
+    "reranker_revision": "e61197ed45024b0ed8a2d74b80b4d909f1255473",
+    "retrieval_trace_persisted": false,
+    "status": "retrieval_returned_without_both_annual_source_facts_captured"
+  },
+  "release": {
+    "backend": [
+      "sqlite_reference"
+    ],
+    "release_id": "current-capture-20261026T112508Z",
+    "spec_sha256": "eb04503e88732d21ea2287a4e66be5a7b9a57f61a53d9d544e2f5d5a25764a13",
+    "status": "published",
+    "version_ids": [
+      "v-77d98b2636f31c0a54672863",
+      "v-7c18dabfc09cad8385d8fafd",
+      "v-b4f1713d7b821eb076c10271"
+    ]
+  },
+  "run_id": "current-capture-20261026T112508Z",
+  "schema_version": "raama.financial-rag.current-capture-evidence.v1",
+  "source_records": [
+    {
+      "accounting_basis": "本集团",
+      "calculator_eligibility": "verified_absolute_currency",
+      "case_id": "current_capture_cmb_2024_revenue",
+      "fact_review_status": "reviewed_local_development_fact",
+      "first_available_at_used": "2026-10-25T09:34:12.973011+00:00",
+      "parser": {
+        "full_docling_parse": false,
+        "full_source": "pypdf_text_layer",
+        "full_source_page_count": 17,
+        "targeted": "docling_rapidocr_tableformer",
+        "targeted_physical_page": 3,
+        "targeted_table_id": "docling-table-1-p3",
+        "targeted_version": "docling-2.129.0+rapidocr-3.9.2+layout-8f39ad3c0b4c58e9c2d2c84a38465abf757272d8+tableformer-fc0f2d45e2218ea24bce5045f58a389aed16dc23"
+      },
+      "periods": {
+        "2023": {
+          "base_unit_conversion_factor": "1000000",
+          "calculator_unit": "CNY",
+          "calculator_value": "339123000000",
+          "pypdf_source_span_id": "span-v-7c18dabfc09cad8385d8fafd-page-3",
+          "raw_source_value": "339,123",
+          "source_normalized_value": "339123",
+          "source_unit": "人民币百万元"
+        },
+        "2024": {
+          "base_unit_conversion_factor": "1000000",
+          "calculator_unit": "CNY",
+          "calculator_value": "337488000000",
+          "pypdf_source_span_id": "span-v-7c18dabfc09cad8385d8fafd-page-3",
+          "raw_source_value": "337,488",
+          "source_normalized_value": "337488",
+          "source_unit": "人民币百万元"
+        }
+      },
+      "physical_page": 3,
+      "recorded_local_capture_at": "2026-10-25T09:34:12.973011+00:00",
+      "review_independent": false,
+      "source_bytes": 888889,
+      "source_id": "cninfo-1222895153",
+      "source_sha256": "7c18dabfc09cad8385d8fafd41341db8795598b1b4b87f5e27f35e681e647e3c",
+      "time_basis": "strict_forward"
+    },
+    {
+      "accounting_basis": "not_stated_in_target_table",
+      "calculator_eligibility": "verified_absolute_currency",
+      "case_id": "current_capture_pingan_2024_revenue",
+      "fact_review_status": "reviewed_local_development_fact",
+      "first_available_at_used": "2026-10-26T04:20:06+08:00",
+      "parser": {
+        "full_docling_parse": false,
+        "full_source": "pypdf_text_layer",
+        "full_source_page_count": 296,
+        "targeted": "docling_rapidocr_tableformer",
+        "targeted_physical_page": 16,
+        "targeted_table_id": "docling-table-1-p16",
+        "targeted_version": "docling-2.129.0+rapidocr-3.9.2+layout-8f39ad3c0b4c58e9c2d2c84a38465abf757272d8+tableformer-fc0f2d45e2218ea24bce5045f58a389aed16dc23"
+      },
+      "periods": {
+        "2023": {
+          "base_unit_conversion_factor": "1000000",
+          "calculator_unit": "CNY",
+          "calculator_value": "164699000000",
+          "pypdf_source_span_id": "span-v-77d98b2636f31c0a54672863-page-16",
+          "raw_source_value": "164,699",
+          "source_normalized_value": "164699",
+          "source_unit": "人民币百万元"
+        },
+        "2024": {
+          "base_unit_conversion_factor": "1000000",
+          "calculator_unit": "CNY",
+          "calculator_value": "146695000000",
+          "pypdf_source_span_id": "span-v-77d98b2636f31c0a54672863-page-16",
+          "raw_source_value": "146,695",
+          "source_normalized_value": "146695",
+          "source_unit": "人民币百万元"
+        }
+      },
+      "physical_page": 16,
+      "recorded_local_capture_at": "2026-10-26T04:20:06+08:00",
+      "review_independent": false,
+      "source_bytes": 1945169,
+      "source_id": "cninfo-1222806505",
+      "source_sha256": "77d98b2636f31c0a546728637d99da85d00c4d1783e1372b090a753ad46e14f1",
+      "time_basis": "strict_forward"
+    },
+    {
+      "accounting_basis": "not_stated_in_target_table",
+      "calculator_eligibility": "source_observation_only_currency_not_stated_in_target_table",
+      "case_id": "current_capture_catl_2024_revenue",
+      "fact_review_status": "reviewed_local_development_fact",
+      "first_available_at_used": "2026-10-26T04:39:51+08:00",
+      "parser": {
+        "full_docling_parse": false,
+        "full_source": "pypdf_text_layer",
+        "full_source_page_count": 229,
+        "targeted": "docling_rapidocr_tableformer",
+        "targeted_physical_page": 9,
+        "targeted_table_id": "docling-table-2-p9",
+        "targeted_version": "docling-2.129.0+rapidocr-3.9.2+layout-8f39ad3c0b4c58e9c2d2c84a38465abf757272d8+tableformer-fc0f2d45e2218ea24bce5045f58a389aed16dc23"
+      },
+      "periods": {
+        "2023": {
+          "base_unit_conversion_factor": null,
+          "calculator_unit": "千元",
+          "calculator_value": "400917045",
+          "pypdf_source_span_id": "span-v-b4f1713d7b821eb076c10271-page-9",
+          "raw_source_value": "400,917,045",
+          "source_normalized_value": "400917045",
+          "source_unit": "千元"
+        },
+        "2024": {
+          "base_unit_conversion_factor": null,
+          "calculator_unit": "千元",
+          "calculator_value": "362012554",
+          "pypdf_source_span_id": "span-v-b4f1713d7b821eb076c10271-page-9",
+          "raw_source_value": "362,012,554",
+          "source_normalized_value": "362012554",
+          "source_unit": "千元"
+        }
+      },
+      "physical_page": 9,
+      "recorded_local_capture_at": "2026-10-26T04:39:51+08:00",
+      "review_independent": false,
+      "source_bytes": 2070073,
+      "source_id": "cninfo-1222806982",
+      "source_sha256": "b4f1713d7b821eb076c102711d177fe942ccc2bc8dd171ae5d7a95799a65b0ad",
+      "time_basis": "strict_forward"
+    }
+  ],
+  "strict_forward_rule": "recorded local source capture time is used as first_available_at",
+  "supplemental_retrieval": {
+    "baseline_search_tool_calls": 6,
+    "bounded_research_searches_per_handler_call": 2,
+    "channels": [
+      "structured_facts",
+      "bm25"
+    ],
+    "elapsed_seconds": {
+      "catl_final_resume_invocation": 6.5,
+      "catl_validation_correction_invocation": 1.7,
+      "issuer_1_and_2_partial_invocation": 10.9,
+      "prior_qwen_attempt": "more than 25 minutes by repeated 30-second polling; exact duration not measured",
+      "sum_of_recorded_retrieval_only_invocations": 19.1
+    },
+    "policy": {
+      "candidate_limit": 2,
+      "challenge_policy": "mandatory_correction_search",
+      "channels": [
+        "structured_facts",
+        "bm25"
+      ],
+      "context_char_limit": 800,
+      "context_source_limit": 2,
+      "evaluation_ablation_id": null,
+      "evidence_limit": 8,
+      "max_searches": 2,
+      "memory_refs": [
+        "procedural_experience"
+      ],
+      "parent_context_mode": "reviewed_parent_and_child",
+      "reranker_profile": "disabled",
+      "rrf_rank_constant": 60,
+      "stop_policy": "coverage_then_bounded_search",
+      "symbol_limit": 1,
+      "table_expansion_limit": 4
+    },
+    "runtime_module_handler_calls": 60
+  }
+}
