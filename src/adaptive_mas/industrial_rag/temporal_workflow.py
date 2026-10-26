@@ -21,7 +21,7 @@ from temporalio.exceptions import ActivityError
 from temporalio.worker import Worker
 
 with workflow.unsafe.imports_passed_through():
-    from adaptive_mas.harness_state import HarnessStateStore, StateConflict
+    from adaptive_mas.harness_state import HarnessStateStore
     from adaptive_mas.industrial_rag.cli import ingest_file
 
 
@@ -188,32 +188,6 @@ def ingest_document_activity(value: IndustrialRagIngestActivityInput) -> dict[st
     )
     activity.heartbeat({"stage": "ingesting"})
 
-    def freeze_ingested_at() -> str:
-        artifact_name = "industrial_rag_ingest_identity"
-        identity = state_store.get_artifact(request.task_id, artifact_name)
-        if identity is None:
-            proposed = {
-                "source_sha256": request.source_sha256,
-                "metadata_sha256": request.metadata_sha256,
-                "captured_at": request.captured_at,
-                "ingested_at": datetime.now(timezone.utc).isoformat(),
-            }
-            try:
-                state_store.put_artifact(request.task_id, artifact_name, proposed)
-            except StateConflict:
-                # Concurrent activity retries may race to establish the same immutable identity.
-                pass
-            identity = state_store.get_artifact(request.task_id, artifact_name)
-        if (
-            identity is None
-            or identity.get("source_sha256") != request.source_sha256
-            or identity.get("metadata_sha256") != request.metadata_sha256
-            or identity.get("captured_at") != request.captured_at
-            or not isinstance(identity.get("ingested_at"), str)
-        ):
-            raise RuntimeError("Temporal ingest retry found a conflicting durable ingest identity")
-        return str(identity["ingested_at"])
-
     result = ingest_file(
         source_path=request.source_path,
         metadata_path=request.metadata_path,
@@ -225,7 +199,7 @@ def ingest_document_activity(value: IndustrialRagIngestActivityInput) -> dict[st
         source_bytes=source_bytes,
         metadata_bytes=metadata_bytes,
         captured_at=request.captured_at,
-        ingested_at_factory=freeze_ingested_at,
+        ingested_at_factory=lambda: datetime.now(timezone.utc),
     )
     state_store.put_artifact(request.task_id, "industrial_rag_ingest_result", result)
     state_store.checkpoint_task(

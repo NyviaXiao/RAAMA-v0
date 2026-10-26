@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -194,19 +195,16 @@ async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str
         attempts = attempt_log.read_text(encoding="utf-8").splitlines()
         events = durable.list_task_events(request.task_id)
         artifact = durable.get_artifact(request.task_id, "industrial_rag_ingest_result")
-        identity = durable.get_artifact(request.task_id, "industrial_rag_ingest_identity")
         if (
             len(attempts) < 2
             or not isinstance(result, dict)
             or result.get("status") not in {"ingested", "reused"}
             or artifact != result
-            or identity is None
             or result.get("content_sha256") != request.source_sha256
             or result.get("version_id") != original_metadata["version_id"]
             or result.get("document_id") != original_metadata["document_id"]
-            or identity.get("ingested_at", "") < str(request.captured_at)
-            or identity.get("source_sha256") != request.source_sha256
-            or identity.get("metadata_sha256") != request.metadata_sha256
+            or not isinstance(result.get("ingested_at"), str)
+            or datetime.fromisoformat(str(result["ingested_at"])) < datetime.fromisoformat(str(request.captured_at))
             or state.get("status") != "completed"
             or state.get("budget") != {"provider_calls_max": 0, "provider_calls_used": 0}
             or len([event for event in events if event["event_key"] == "industrial_rag_ingest_persisted"]) != 1
@@ -221,7 +219,7 @@ async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str
             persisted_version is None
             or persisted_version[0] != request.source_sha256
             or persisted_version[1] != request.captured_at
-            or persisted_version[2] != identity["ingested_at"]
+            or persisted_version[2] != result["ingested_at"]
         ):
             raise AssertionError("Temporal ingest did not persist the captured source and durable ingest identity")
         captured_source_bytes, captured_metadata_bytes = read_captured_input_bytes(request)
@@ -261,7 +259,7 @@ async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str
             "original_paths_changed_after_capture_without_changing_ingest": True,
             "tampered_captured_source_rejected": True,
             "tampered_captured_metadata_rejected": True,
-            "ingested_at_frozen_after_source_capture": True,
+            "ingested_at_written_with_the_rag_transaction_and_reused": True,
             "task_event_count": len(events),
             "workflow_state_completed": True,
             "provider_calls": 0,

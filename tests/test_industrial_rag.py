@@ -1380,6 +1380,10 @@ def test_sqlite_to_postgres_transaction_and_queue_translation_is_explicit() -> N
     assert query.endswith("LIMIT 1 FOR UPDATE SKIP LOCKED")
     assert "%s" in query
     assert translate_sqlite_contract("INSERT OR IGNORE INTO rag_access_grants VALUES(?,?,1,?)").endswith("ON CONFLICT DO NOTHING")
+    assert translate_sqlite_contract("INSERT OR REPLACE INTO rag_query_cache VALUES(?,?,?)") == (
+        "INSERT INTO rag_query_cache VALUES(%s, %s, %s) ON CONFLICT(cache_key) DO UPDATE "
+        "SET payload_json=EXCLUDED.payload_json, created_at=EXCLUDED.created_at"
+    )
     assert translate_sqlite_contract(
         "SELECT json_extract(t.payload_json,'$.continuation_candidate.previous_table_id') FROM rag_tables t"
     ) == "SELECT (t.payload_json::jsonb #>> '{continuation_candidate,previous_table_id}') FROM rag_tables t"

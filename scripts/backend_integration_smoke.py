@@ -371,9 +371,26 @@ def main() -> None:
         "content_addressed_object_remains_until_isolated_volume_cleanup": True,
     }
 
-    ingested = store.ingest_bundle(bundle)
+    ingested = store.ingest_bundle(bundle, ingested_at_factory=lambda: datetime.now(timezone.utc))
     if ingested.get("status") != "ingested" or objects.get(payload_sha256) != payload:
         raise AssertionError("PostgreSQL/S3 application ingest did not reopen the source object")
+    def unexpected_ingest_time_selection() -> datetime:
+        raise AssertionError("PostgreSQL duplicate ingest attempted to replace the committed ingest time")
+
+    reused_ingest = store.ingest_bundle(bundle, ingested_at_factory=unexpected_ingest_time_selection)
+    if reused_ingest.get("status") != "reused" or reused_ingest.get("ingested_at") != ingested.get("ingested_at"):
+        raise AssertionError("PostgreSQL duplicate ingest did not reuse the timestamp committed with the source row")
+    output["postgres_ingest_time_transaction_recovery"] = {
+        "timestamp_selected_during_transaction": True,
+        "committed_retry_reused_stored_timestamp": True,
+    }
+    cache_key = f"postgres-cache-contract-{suffix}"
+    store.cache_put(cache_key, {"generation": 1})
+    first_cache_read = store.cache_get(cache_key)
+    store.cache_put(cache_key, {"generation": 2})
+    if first_cache_read != {"generation": 1} or store.cache_get(cache_key) != {"generation": 2}:
+        raise AssertionError("PostgreSQL query cache did not read and replace its JSON payload")
+    output["postgres_query_cache_upsert"] = {"read_after_write": True, "replace_updated_payload": True}
 
     def fail_synthetic_outbox_handler(
         _event_key: str, _event_type: str, _payload: Mapping[str, object],
@@ -607,7 +624,9 @@ def main() -> None:
         raise AssertionError("Qdrant adapter accepted a release other than the active publication")
     if qdrant_query_requests != successful_qdrant_query_requests:
         raise AssertionError("nonactive release rejection issued a Qdrant query")
-    store.set_access("local-public", document_id, can_read=False)
+    permission_revision_before_revoke = store.permission_revision()
+    permission_revision_after_revoke = store.set_access("local-public", document_id, can_read=False)
+    permission_revision_after_noop = store.set_access("local-public", document_id, can_read=False)
     try:
         try:
             opensearch_adapter.search_with_control(query_plan, [version_id], None)
@@ -616,7 +635,17 @@ def main() -> None:
         else:
             raise AssertionError("OpenSearch adapter returned a source to a revoked principal")
     finally:
-        store.set_access("local-public", document_id, can_read=True)
+        permission_revision_after_restore = store.set_access("local-public", document_id, can_read=True)
+    if (
+        permission_revision_after_revoke != permission_revision_before_revoke + 1
+        or permission_revision_after_noop != permission_revision_after_revoke
+        or permission_revision_after_restore != permission_revision_after_noop + 1
+    ):
+        raise AssertionError("PostgreSQL permission revision did not change once per effective access update")
+    output["postgres_permission_revision_idempotency"] = {
+        "revoke_and_restore_each_increment_once": True,
+        "same_value_update_did_not_increment": True,
+    }
     if opensearch_search_requests != successful_search_requests:
         raise AssertionError("revoked-principal rejection issued an OpenSearch query")
     if qdrant_query_requests != successful_qdrant_query_requests:
@@ -649,6 +678,14 @@ def main() -> None:
         expected_content_sha256=payload_sha256,
         note="synthetic PostgreSQL JSON-path contract probe",
     )
+    repeated_continuation = store.review_table_continuation(
+        child_table_id,
+        action="confirm",
+        reviewer_id="continuation-reviewer",
+        release_id=release_id,
+        expected_content_sha256=payload_sha256,
+        note="same-action idempotency probe",
+    )
     revoked_continuation = store.review_table_continuation(
         child_table_id,
         action="revoke",
@@ -659,12 +696,15 @@ def main() -> None:
     )
     if (
         confirmed_continuation["status"] != "confirmed" or not confirmed_continuation["changed"]
+        or repeated_continuation["status"] != "confirmed" or repeated_continuation["changed"]
+        or repeated_continuation["revision"] != confirmed_continuation["revision"]
         or revoked_continuation["status"] != "revoked" or not revoked_continuation["changed"]
         or revoked_continuation["revision"] != confirmed_continuation["revision"] + 1
     ):
         raise AssertionError("PostgreSQL continuation review did not confirm and revoke the synthetic candidate")
     output["postgres_continuation_review_json_path_translation"] = {
-        "confirmed": True, "revoked": True, "revision_increased_twice": True,
+        "confirmed": True, "same_action_idempotent": True, "revoked": True,
+        "revision_increased_twice": True,
     }
     missing_receipt_release_id = f"{release_id}-missing-backend"
     missing_receipt_spec = replace(

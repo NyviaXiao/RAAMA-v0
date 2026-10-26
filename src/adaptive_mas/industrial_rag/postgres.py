@@ -119,6 +119,10 @@ class PostgresIndustrialRagStore(IndustrialRagStore):
             raise RuntimeError("PostgreSQL connection failed; connection details are omitted from diagnostics") from None
         return _PostgresConnection(raw)
 
+    def _begin_outbox_claim(self, connection: _PostgresConnection) -> None:
+        # The row lock plus SKIP LOCKED serializes claims without SSI aborts between workers.
+        connection.execute("BEGIN ISOLATION LEVEL READ COMMITTED")
+
     def _migrate(self) -> None:
         path = Path(__file__).parent / "migrations" / "0001_industrial_rag.sql"
         statements = [item.strip() for item in path.read_text(encoding="utf-8").split(";") if item.strip()]

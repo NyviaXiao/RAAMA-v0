@@ -7,7 +7,7 @@ import json
 import sqlite3
 import time
 from contextlib import closing
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -178,13 +178,21 @@ class IndustrialRagStore:
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
+    def _begin_outbox_claim(self, connection: sqlite3.Connection) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+
     @staticmethod
     def _record_hash(value: object) -> str:
         # Hash the same UTC-normalized mapping that is persisted as JSON so a
         # release receipt survives a JSON round trip without changing meaning.
         return stable_hash(_normalise_record(value))
 
-    def ingest_bundle(self, bundle: DocumentBundle) -> dict[str, object]:
+    def ingest_bundle(
+        self,
+        bundle: DocumentBundle,
+        *,
+        ingested_at_factory: Callable[[], datetime | str] | None = None,
+    ) -> dict[str, object]:
         document, version = bundle.document, bundle.version
         if not bundle.payload:
             raise ValueError("document bytes are required")
@@ -234,12 +242,16 @@ class IndustrialRagStore:
                     (version.source_id, version.version_id),
                 ).fetchone()
                 if existing is not None:
+                    expected_version_data = version_data
+                    if ingested_at_factory is not None:
+                        existing_version = replace(version, ingested_at=existing["ingested_at"])
+                        expected_version_data = _normalise_record(existing_version)
                     if (
                         existing["source_id"] != version.source_id
                         or existing["version_id"] != version.version_id
                         or existing["document_id"] != document.document_id
                         or existing["content_sha256"] != version.content_sha256
-                        or existing["metadata_json"] != _json(version_data)
+                        or existing["metadata_json"] != _json(expected_version_data)
                     ):
                         raise ImmutableConflict("source/version identity was reused with changed bytes or metadata")
                     prior_document = connection.execute(
@@ -250,7 +262,15 @@ class IndustrialRagStore:
                         raise ImmutableConflict("document identity was reused with changed metadata")
                     self._verify_existing_children(connection, bundle)
                     connection.commit()
-                    return {"status": "reused", "document_id": document.document_id, "version_id": version.version_id, "content_sha256": version.content_sha256}
+                    return {
+                        "status": "reused", "document_id": document.document_id,
+                        "version_id": version.version_id, "content_sha256": version.content_sha256,
+                        "ingested_at": str(existing["ingested_at"]),
+                    }
+                if ingested_at_factory is not None:
+                    version = replace(version, ingested_at=ingested_at_factory())
+                    bundle = replace(bundle, version=version)
+                    version_data = _normalise_record(version)
                 prior_document = connection.execute("SELECT * FROM rag_documents WHERE document_id=?", (document.document_id,)).fetchone()
                 if prior_document is None:
                     connection.execute(
@@ -301,7 +321,11 @@ class IndustrialRagStore:
             except Exception:
                 connection.rollback()
                 raise
-        return {"status": "ingested", "document_id": document.document_id, "version_id": version.version_id, "content_sha256": version.content_sha256, "outbox_event_key": event_key}
+        return {
+            "status": "ingested", "document_id": document.document_id,
+            "version_id": version.version_id, "content_sha256": version.content_sha256,
+            "outbox_event_key": event_key, "ingested_at": str(version_data["ingested_at"]),
+        }
 
     @staticmethod
     def _verify_existing_children(connection: sqlite3.Connection, bundle: DocumentBundle) -> None:
@@ -1052,7 +1076,7 @@ class IndustrialRagStore:
             raise ValueError("consumer_id and positive lease_seconds are required")
         now_epoch = time.time()
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_outbox_claim(connection)
             row = connection.execute(
                 "SELECT * FROM rag_outbox WHERE status='pending' OR (status='processing' AND lease_until<?) ORDER BY event_id LIMIT 1",
                 (now_epoch,),

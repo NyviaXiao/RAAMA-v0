@@ -89,7 +89,7 @@ def ingest_file(
         parser_timeout_seconds=300,
     )
     capture_time = captured_at or _now()
-    ingest_time = ingested_at_factory() if ingested_at_factory is not None else (ingested_at or _now())
+    ingest_time = capture_time if ingested_at_factory is not None else (ingested_at or _now())
     version_id = str(metadata.get("version_id") or f"v-{digest[:24]}")
     document = Document(
         document_id=str(metadata["document_id"]), title=str(metadata["title"]),
@@ -132,7 +132,7 @@ def ingest_file(
         read_principals=tuple(str(value) for value in metadata.get("read_principals", ["local-public"])),
     )
     store = _store(database_path, object_root)
-    result = store.ingest_bundle(bundle)
+    result = store.ingest_bundle(bundle, ingested_at_factory=ingested_at_factory)
     result["parser"] = {
         "status": version.parser_status, "name": version.parser_name,
         "version": version.parser_version, "confidence": parser_confidence,
