@@ -30,12 +30,15 @@ from adaptive_mas.industrial_rag.qwen_models import (  # noqa: E402
     Qwen3RerankerRuntime,
 )
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService  # noqa: E402
-from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore  # noqa: E402
+from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore, ObjectStoreError  # noqa: E402
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore  # noqa: E402
 from scripts import run_financial_rag_current_capture as capture  # noqa: E402
 
 
 SOURCE_RUN_ID = "current-capture-qwen-cmb-traced-20261026"
+SOURCE_RUN_IDENTITY_SHA256 = "8f14cdc0760513c125b35fb057b7ab0caa661e03f11fedc3a19ef3bd8ad89b9d"
+SOURCE_RUNTIME_MODEL_IDENTITY_SHA256 = "1a9250a6bbdbed5140e6c99868c2954bbf47d2b5390146fc85d54aeda2e6125a"
+SOURCE_CASE_IDENTITY_SHA256 = "b0e3da8fbbe19b9a90eca7969b0b18d0bb6cb46db553edd2f77778dcc65a9899"
 SOURCE_RUN_DIR = ROOT / ".tmp" / "industrial_rag_current_capture_20261026" / SOURCE_RUN_ID
 LIVE_OUTPUT_ROOT = ROOT / ".tmp" / "industrial_rag_live_agent_20261027"
 FALLBACK_MODEL = "qwen3.7-max-preview"
@@ -125,7 +128,171 @@ class QuotaFallbackClient:
             return self.fallback.complete(*args, **kwargs)
 
 
-def _verify_capture_run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _verify_capture_case_identity(
+    envelope: dict[str, Any],
+    baseline_progress: dict[str, Any],
+    spec: dict[str, Any],
+    store: IndustrialRagStore,
+) -> dict[str, object]:
+    run_identity = envelope.get("run_identity")
+    if (
+        envelope.get("schema_version") != "raama.financial-rag.current-capture.run-identity-envelope.v1"
+        or not isinstance(run_identity, dict)
+        or envelope.get("run_identity_sha256") != capture._canonical_hash(run_identity)
+        or envelope.get("run_identity_sha256") != SOURCE_RUN_IDENTITY_SHA256
+    ):
+        raise capture.RunIdentityError("source capture run identity envelope is invalid")
+    run_identity_sha256 = str(envelope["run_identity_sha256"])
+    case_id = str(spec["case_id"])
+    if (
+        run_identity.get("run_id") != SOURCE_RUN_ID
+        or run_identity.get("case_specs_sha256") != capture._canonical_hash(capture.CASE_SPECS)
+        or run_identity.get("source_manifest_sha256") != capture._sha256(capture.SOURCE_MANIFEST.read_bytes())
+        or run_identity.get("query") != capture.QUERY_TEXT
+        or run_identity.get("time_mode") != "strict_forward"
+        or run_identity.get("evaluation_scope") != {"case_ids": [case_id], "module_matrix_enabled": False}
+    ):
+        raise capture.RunIdentityError("source capture run binding differs from the reviewed case configuration")
+
+    policy_json = run_identity.get("research_policy_json")
+    policy_sha256 = run_identity.get("research_policy_sha256")
+    if not isinstance(policy_json, str) or policy_sha256 != capture._sha256(policy_json.encode("utf-8")):
+        raise capture.RunIdentityError("source capture research policy binding is invalid")
+
+    sources = run_identity.get("source_records")
+    if not isinstance(sources, list) or len(sources) != 1 or not isinstance(sources[0], dict):
+        raise capture.RunIdentityError("source capture must bind exactly one source record")
+    source = dict(sources[0])
+    if source.get("case_id") != case_id or source.get("source_id") != spec.get("source_id"):
+        raise capture.RunIdentityError("source capture case is bound to a different source")
+    source_sha256 = str(source.get("source_sha256", ""))
+    version_id = str(source.get("version_id", ""))
+    if not capture.re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        raise capture.RunIdentityError("source capture original hash is invalid")
+    try:
+        source_payload = store.object_store.get(source_sha256)
+    except (FileNotFoundError, ObjectStoreError) as error:
+        raise capture.RunIdentityError("source capture original is unavailable from its content-addressed store") from error
+    if capture._sha256(source_payload) != source_sha256:
+        raise capture.RunIdentityError("source capture original bytes do not match the bound source hash")
+
+    release = run_identity.get("release")
+    if not isinstance(release, dict) or (
+        release.get("release_id") != SOURCE_RUN_ID
+        or release.get("active_release_id") != SOURCE_RUN_ID
+        or store.active_release_id() != SOURCE_RUN_ID
+    ):
+        raise capture.RunIdentityError("source capture release is not the pinned active release")
+    _release_spec, release_spec_sha256 = store.release_spec(SOURCE_RUN_ID)
+    if release.get("spec_sha256") != release_spec_sha256:
+        raise capture.RunIdentityError("source capture release specification hash changed")
+    release_versions = store.release_versions(SOURCE_RUN_ID)
+    if release.get("version_ids") != release_versions or version_id not in release_versions:
+        raise capture.RunIdentityError("source capture release versions differ from the bound source")
+    release_summary = store.release_summaries()
+    published_release = next(
+        (item for item in release_summary["releases"] if item["release_id"] == SOURCE_RUN_ID),
+        None,
+    )
+    if (
+        release_summary["active_release_id"] != SOURCE_RUN_ID
+        or published_release is None
+        or published_release["status"] != "published"
+    ):
+        raise capture.RunIdentityError("source capture release is not published")
+
+    source_rows = store.source_manifest([version_id])
+    if len(source_rows) != 1:
+        raise capture.RunIdentityError("source capture version is absent from the registered release")
+    registered_source = source_rows[0]
+    if (
+        registered_source["source_id"] != source.get("source_id")
+        or registered_source["content_sha256"] != source_sha256
+        or registered_source["version_id"] != version_id
+    ):
+        raise capture.RunIdentityError("source capture identity differs from the registered original")
+    if capture._indexed_fact_identity(store, [source]) != run_identity.get("indexed_financial_facts"):
+        raise capture.RunIdentityError("source capture financial fact identity differs from the registered release")
+
+    access_scope = run_identity.get("access_scope")
+    if (
+        not isinstance(access_scope, dict)
+        or set(access_scope) != {"principal_id", "permission_revision", "continuation_revision"}
+        or not isinstance(access_scope.get("principal_id"), str)
+        or not access_scope["principal_id"]
+    ):
+        raise capture.RunIdentityError("source capture access scope is missing")
+    if (
+        store.permission_revision() != access_scope.get("permission_revision")
+        or store.continuation_revision() != access_scope.get("continuation_revision")
+    ):
+        raise capture.RunIdentityError("source capture access or continuation revision has changed")
+
+    as_of = datetime.fromisoformat(str(run_identity["as_of"]))
+    case_identity = capture._case_identity_fields(
+        run_identity_sha256,
+        spec,
+        source,
+        as_of=as_of,
+        retrieval_policy_sha256=str(policy_sha256),
+        access_scope=access_scope,
+    )
+    permitted = store.permitted_versions(
+        str(access_scope["principal_id"]),
+        str(spec["security_code"]),
+        as_of,
+        time_mode="strict_forward",
+        report_periods=tuple(str(item) for item in case_identity["report_periods"]),
+        accounting_basis=(str(spec["accounting_basis"]) if spec.get("accounting_basis") is not None else None),
+        release_id=SOURCE_RUN_ID,
+    )
+    if (
+        len(permitted) != 1
+        or permitted[0]["version_id"] != version_id
+        or permitted[0]["source_id"] != source.get("source_id")
+        or permitted[0]["content_sha256"] != source_sha256
+        or permitted[0]["security_code"] != spec.get("security_code")
+        or permitted[0]["accounting_basis"] != spec.get("accounting_basis")
+        or permitted[0]["first_available_at"] != source.get("first_available_at")
+    ):
+        raise capture.RunIdentityError("source capture case does not resolve to its exact permitted release evidence")
+
+    runtime_model_identity = envelope.get("runtime_model_identity")
+    runtime_model_identity_sha256 = envelope.get("runtime_model_identity_sha256")
+    if (
+        not isinstance(runtime_model_identity, dict)
+        or runtime_model_identity_sha256 != capture._canonical_hash(runtime_model_identity)
+        or runtime_model_identity_sha256 != SOURCE_RUNTIME_MODEL_IDENTITY_SHA256
+        or baseline_progress.get("runtime_model_identity_sha256") != runtime_model_identity_sha256
+    ):
+        raise capture.RunIdentityError("source capture runtime model identity is invalid")
+    case_identity_sha256 = capture._canonical_hash(case_identity)
+    if (
+        case_identity_sha256 != SOURCE_CASE_IDENTITY_SHA256
+        or baseline_progress.get("progress_kind") != "agent"
+        or baseline_progress.get("research_ablation_id") is not None
+        or baseline_progress.get("case_identity_sha256") != case_identity_sha256
+        or any(baseline_progress.get(key) != value for key, value in case_identity.items())
+    ):
+        raise capture.RunIdentityError("local Qwen baseline progress does not match the bound source case identity")
+    return {**case_identity, "case_identity_sha256": case_identity_sha256}
+
+
+def _verify_runtime_access_revisions(
+    store: IndustrialRagStore,
+    case_identity: dict[str, object],
+) -> tuple[int, int]:
+    permission_revision = store.permission_revision()
+    continuation_revision = store.continuation_revision()
+    if (
+        permission_revision != case_identity["permission_revision"]
+        or continuation_revision != case_identity["continuation_revision"]
+    ):
+        raise capture.RunIdentityError("source access or continuation revision changed before the live agent request")
+    return permission_revision, continuation_revision
+
+
+def _verify_capture_run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, object]]:
     if not SOURCE_RUN_DIR.is_dir():
         raise FileNotFoundError(f"bound source capture is missing: {SOURCE_RUN_ID}")
     envelope = capture._read_run_identity(SOURCE_RUN_DIR / "run_identity.json")
@@ -169,7 +336,12 @@ def _verify_capture_run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any
     expected_case = next((spec for spec in capture.CASE_SPECS if str(spec["case_id"]) == case_id), None)
     if expected_case is None:
         raise capture.RunIdentityError("source capture case is absent from the reviewed case registry")
-    return envelope, baseline_progress, dict(expected_case)
+    source_store = IndustrialRagStore(
+        SOURCE_RUN_DIR / "industrial_rag.sqlite3",
+        LocalContentAddressedStore(SOURCE_RUN_DIR / "objects"),
+    )
+    case_identity = _verify_capture_case_identity(envelope, baseline_progress, dict(expected_case), source_store)
+    return envelope, baseline_progress, dict(expected_case), case_identity
 
 
 def _load_service(
@@ -181,6 +353,12 @@ def _load_service(
     )
     if store.active_release_id() != SOURCE_RUN_ID:
         raise capture.RunIdentityError("the bound source release is no longer active in its local store")
+    source_access_scope = source_envelope["run_identity"]["access_scope"]
+    if (
+        store.permission_revision() != source_access_scope["permission_revision"]
+        or store.continuation_revision() != source_access_scope["continuation_revision"]
+    ):
+        raise capture.RunIdentityError("source access or continuation revision changed before model loading")
     embedding = Qwen3EmbeddingRuntime(capture.QWEN_ASSETS)
     reranker_runtime = Qwen3RerankerRuntime(capture.QWEN_ASSETS)
     dense = LocalQwenDenseAdapter(
@@ -214,22 +392,14 @@ def main() -> None:
     if not capture.re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", args.run_id):
         raise ValueError("run-id must be a safe immutable identifier")
 
-    source_envelope, baseline_progress, spec = _verify_capture_run()
+    source_envelope, _baseline_progress, spec, case_identity = _verify_capture_run()
     output_dir = LIVE_OUTPUT_ROOT / args.run_id
     output_dir.mkdir(parents=True, exist_ok=False)
     store, service, runtime_identity = _load_service(source_envelope)
+    permission_revision, continuation_revision = _verify_runtime_access_revisions(store, case_identity)
     provider_client = _load_provider_client()
     runtime_identity_sha256 = capture._canonical_hash(runtime_identity)
-    baseline_identity = baseline_progress
-    case_identity = {
-        key: baseline_identity[key]
-        for key in (
-            "run_identity_sha256", "case_id", "security_code", "source_id", "source_sha256",
-            "version_id", "report_periods", "query", "as_of", "time_mode",
-            "retrieval_policy_sha256", "principal_id", "permission_revision", "continuation_revision",
-            "case_identity_sha256",
-        )
-    }
+    source_run_identity = source_envelope["run_identity"]
     implementation_hashes = _implementation_hashes()
     live_identity: dict[str, object] = {
         "schema_version": "raama.financial-rag.live-agent-identity.v1",
@@ -237,6 +407,7 @@ def main() -> None:
         "source_capture_run_id": SOURCE_RUN_ID,
         "source_run_identity_sha256": source_envelope["run_identity_sha256"],
         "source_runtime_model_identity_sha256": source_envelope["runtime_model_identity_sha256"],
+        "source_implementation_sha256": source_run_identity["implementation_sha256"],
         "case_identity_sha256": case_identity["case_identity_sha256"],
         "runtime_model_identity_sha256": runtime_identity_sha256,
         "agent_driver": "qwen_generation_tool_calls",
@@ -271,8 +442,6 @@ def main() -> None:
         run_identity_sha256=live_identity_sha256,
         runtime_model_identity_sha256=runtime_identity_sha256,
     )
-    permission_revision = store.permission_revision()
-    continuation_revision = store.continuation_revision()
     release_id = SOURCE_RUN_ID
     started_at = datetime.now().astimezone().isoformat()
     progress: dict[str, Any] = {
@@ -331,7 +500,7 @@ def main() -> None:
         industrial_rag_service=service,
         industrial_rag_principal_id=str(case_identity["principal_id"]),
         industrial_rag_release_id=release_id,
-        research_policy_json=str(capture._read_run_identity(SOURCE_RUN_DIR / "run_identity.json")["run_identity"]["research_policy_json"]),
+        research_policy_json=str(source_run_identity["research_policy_json"]),
         retrieval_trace_callback=trace_callback,
     )
     handlers["submit_report"] = lambda arguments: capture._accept_report(
