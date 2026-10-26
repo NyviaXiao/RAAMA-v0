@@ -229,7 +229,7 @@ class HarnessStateStore:
             row = connection.execute("SELECT status FROM tasks WHERE task_id=?", (task_id,)).fetchone()
             if row is None:
                 raise KeyError(f"unknown task_id {task_id}")
-            if row["status"] == "completed":
+            if row["status"] in {"completed", "cancelled", "failed", "unknown", "dead_letter"}:
                 connection.commit()
                 return
             connection.execute(
@@ -322,9 +322,12 @@ class HarnessStateStore:
         task_id: str,
         result: Mapping[str, object],
         *,
+        expected_statuses: set[str] | frozenset[str] | None = None,
         feedback_id: str | None = None,
         feedback: Mapping[str, object] | None = None,
     ) -> None:
+        if expected_statuses is not None and not expected_statuses:
+            raise ValueError("expected_statuses must be nonempty when provided")
         payload_json = _json(dict(result))
         feedback_json = _json(dict(feedback)) if feedback is not None else None
         feedback_hash = hashlib.sha256(feedback_json.encode("utf-8")).hexdigest() if feedback_json else None
@@ -337,6 +340,10 @@ class HarnessStateStore:
             if row["status"] == "completed":
                 if row["result_json"] != payload_json:
                     raise StateConflict("completed task result is immutable")
+            elif expected_statuses is not None and row["status"] not in expected_statuses:
+                raise StateConflict(
+                    f"task status {row['status']!r} is outside the completion fence"
+                )
             if feedback_json is not None:
                 if not feedback_id:
                     raise ValueError("feedback_id is required with feedback")

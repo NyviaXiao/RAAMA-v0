@@ -421,6 +421,7 @@ class TemporalFailureActivityInput:
     state_database_path: str
     error_type: str
     message: str
+    result_artifact: str = "industrial_rag_operation_result"
 
 
 @dataclass(frozen=True)
@@ -468,10 +469,16 @@ def ingest_document_activity(value: IndustrialRagIngestActivityInput) -> dict[st
         if not isinstance(result, dict):
             raise RuntimeError("completed Temporal ingest task has no persisted result")
         return result
+    if task["status"] != "running":
+        saved_result = state_store.get_artifact(request.task_id, "industrial_rag_ingest_result")
+        reconciliation = "; committed ingest artifact requires explicit reconciliation" if saved_result is not None else ""
+        raise RuntimeError(f"Temporal ingest task is {task['status']}{reconciliation}")
 
     saved_result = state_store.get_artifact(request.task_id, "industrial_rag_ingest_result")
     if saved_result is not None:
-        state_store.complete_task(request.task_id, saved_result)
+        state_store.complete_task(
+            request.task_id, saved_result, expected_statuses={"running"},
+        )
         return saved_result
 
     source_bytes, metadata_bytes = read_captured_input_bytes(request)
@@ -501,7 +508,7 @@ def ingest_document_activity(value: IndustrialRagIngestActivityInput) -> dict[st
         {"content_sha256": result["content_sha256"], "status": result["status"]},
         event_key="industrial_rag_ingest_persisted",
     )
-    state_store.complete_task(request.task_id, result)
+    state_store.complete_task(request.task_id, result, expected_statuses={"running"})
     activity.heartbeat({"stage": "completed", "content_sha256": result["content_sha256"]})
     return result
 
@@ -512,14 +519,20 @@ def _operation_identity(operation: str, request: object) -> dict[str, object]:
 
 def _load_operation_result(store: HarnessStateStore, task_id: str) -> dict[str, object] | None:
     task = store.get_task(task_id)
-    if task is not None and task["status"] == "completed":
+    if task is None:
+        raise KeyError(f"unknown task_id {task_id}")
+    if task["status"] == "completed":
         result = task.get("result")
         if isinstance(result, dict):
             return result
         raise RuntimeError("completed Temporal operation task has no persisted result")
+    if task["status"] != "running":
+        saved = store.get_artifact(task_id, "industrial_rag_operation_result")
+        reconciliation = "; committed operation artifact requires explicit reconciliation" if saved is not None else ""
+        raise RuntimeError(f"Temporal operation task is {task['status']}{reconciliation}")
     saved = store.get_artifact(task_id, "industrial_rag_operation_result")
     if saved is not None:
-        store.complete_task(task_id, saved)
+        store.complete_task(task_id, saved, expected_statuses={"running"})
         return saved
     return None
 
@@ -530,20 +543,21 @@ def initialize_temporal_task_activity(value: TemporalTaskInitialization) -> dict
     task = store.open_task(
         value.task_id, value.idempotency_key, value.request, max_provider_calls=0,
     )
-    task = store.get_task(value.task_id)
-    result = task.get("result") if task and task["status"] == "completed" else None
-    if task is not None and task["status"] == "completed" and not isinstance(result, dict):
+    if task["status"] == "completed":
+        result = task.get("result")
+        if isinstance(result, dict):
+            return {"status": "completed", "result": result}
         raise RuntimeError("completed Temporal task has no persisted result")
-    if not isinstance(result, dict):
-        result = store.get_artifact(value.task_id, value.result_artifact)
-        if result is not None:
-            store.complete_task(value.task_id, result)
-    if result is not None:
-        return {"status": "completed", "result": result}
-    if task["status"] in {"cancelled", "dead_letter", "failed", "unknown"}:
-        return {"status": str(task["status"]), "result": None}
-    if task["status"] == "paused":
-        return {"status": "paused", "result": None}
+    if task["status"] != "running":
+        artifact = store.get_artifact(value.task_id, value.result_artifact)
+        result: dict[str, object] = {
+            "status": str(task["status"]),
+            "result": None,
+            "reconciliation_required": artifact is not None,
+        }
+        if artifact is not None:
+            result["result_artifact_name"] = value.result_artifact
+        return result
     return {"status": "running", "result": None}
 
 
@@ -601,7 +615,7 @@ def build_index_activity(value: IndustrialRagIndexActivityInput) -> dict[str, ob
         {"release_id": request.release_id, "status": result.get("status")},
         event_key="industrial_rag_index_persisted",
     )
-    store.complete_task(request.task_id, result)
+    store.complete_task(request.task_id, result, expected_statuses={"running"})
     return result
 
 
@@ -670,7 +684,7 @@ def evaluate_manifest_activity(value: IndustrialRagEvaluationActivityInput) -> d
         {"benchmark_sha256": result["benchmark_sha256"], "prediction_sha256": result["prediction_sha256"]},
         event_key="industrial_rag_evaluation_persisted",
     )
-    store.complete_task(request.task_id, result)
+    store.complete_task(request.task_id, result, expected_statuses={"running"})
     return result
 
 
@@ -879,7 +893,7 @@ def run_research_activity(value: IndustrialRagResearchActivityInput) -> dict[str
         {"bundle_sha256": request.bundle_sha256, "provider_calls": 0},
         event_key="financial_research_persisted",
     )
-    store.complete_task(request.task_id, persisted)
+    store.complete_task(request.task_id, persisted, expected_statuses={"running"})
     return persisted
 
 
@@ -917,7 +931,17 @@ def fail_temporal_task_activity(value: TemporalFailureActivityInput) -> dict[str
         payload={"error_type": value.error_type, "message": value.message[:2000]},
     )
     task = store.get_task(value.task_id)
-    return {"accepted": accepted, "status": task["status"] if task else "missing"}
+    artifact = store.get_artifact(value.task_id, value.result_artifact)
+    outcome: dict[str, object] = {
+        "accepted": accepted,
+        "status": task["status"] if task else "missing",
+        "reconciliation_required": artifact is not None,
+    }
+    if artifact is not None:
+        outcome["result_artifact_name"] = value.result_artifact
+    if task is not None and task["status"] == "completed" and isinstance(task.get("result"), dict):
+        outcome["result"] = task["result"]
+    return outcome
 
 
 def dead_letter_temporal_task(
@@ -940,7 +964,16 @@ def dead_letter_temporal_task(
         event_key=f"temporal-dead-letter:{command_id}",
     )
     task = store.get_task(task_id)
-    return {"changed": changed, "status": task["status"] if task else "missing"}
+    artifact_name = next((
+        name for name in ("industrial_rag_operation_result", "industrial_rag_ingest_result")
+        if store.get_artifact(task_id, name) is not None
+    ), None)
+    return {
+        "changed": changed,
+        "status": task["status"] if task else "missing",
+        "reconciliation_required": artifact_name is not None,
+        "result_artifact_name": artifact_name,
+    }
 
 
 @workflow.defn(name="industrial-rag-ingest-v1")
@@ -1079,21 +1112,36 @@ class IndustrialRagIngestWorkflow:
                     "status": "completed",
                     "stage": "ingest_result_reused",
                     "checkpoint": "stored_result_reused",
+                    "pending_reconciliation": [],
                     "next_step": None,
                 }
                 return initialized["result"]
             if initialized["status"] == "paused":
                 if not self._pending_controls:
                     self._pause_requested = True
+                artifact_name = initialized.get("result_artifact_name")
+                self._state = {
+                    **self._state,
+                    "status": "paused",
+                    "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
+                }
             elif initialized["status"] != "running":
+                artifact_name = initialized.get("result_artifact_name")
+                reconciliation_required = bool(initialized.get("reconciliation_required"))
                 self._state = {
                     **self._state,
                     "status": initialized["status"],
                     "stage": f"task_{initialized['status']}",
                     "checkpoint": "terminal_task_state_reused",
-                    "next_step": None,
+                    "reconciliation_required": reconciliation_required,
+                    "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
+                    "next_step": "operator_reconcile_committed_side_effect" if reconciliation_required else None,
                 }
-                return {"status": initialized["status"], "task_id": request.task_id}
+                result: dict[str, object] = {"status": initialized["status"], "task_id": request.task_id}
+                if reconciliation_required:
+                    result["reconciliation_required"] = True
+                    result["result_artifact_name"] = artifact_name
+                return result
             if not await self._safe_point(request.task_id, request.state_database_path):
                 return {"status": "cancelled", "task_id": request.task_id}
             result = await workflow.execute_activity(
@@ -1117,6 +1165,7 @@ class IndustrialRagIngestWorkflow:
                         request.state_database_path,
                         type(error).__name__,
                         str(error),
+                        result_artifact="industrial_rag_ingest_result",
                     ),
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(
@@ -1126,13 +1175,43 @@ class IndustrialRagIngestWorkflow:
                 )
             except ActivityError:
                 failure = {"accepted": False, "status": "failure_recording_failed"}
+            durable_status = str(failure["status"])
+            reconciliation_required = bool(failure.get("reconciliation_required"))
+            artifact_name = failure.get("result_artifact_name")
+            if durable_status == "completed" and isinstance(failure.get("result"), dict):
+                self._state = {
+                    **self._state,
+                    "status": "completed",
+                    "stage": "ingest_committed_before_workflow_failure",
+                    "checkpoint": "stored_result_reused",
+                    "pending_reconciliation": [],
+                    "next_step": None,
+                }
+                return failure["result"]
+            if durable_status in {"cancelled", "dead_letter", "unknown"}:
+                self._state = {
+                    **self._state,
+                    "status": durable_status,
+                    "stage": f"ingest_{durable_status}_preserved",
+                    "reconciliation_required": reconciliation_required,
+                    "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
+                    "checkpoint": "terminal_task_state_preserved",
+                    "next_step": "operator_reconcile_committed_side_effect" if reconciliation_required else None,
+                }
+                result = {"status": durable_status, "task_id": request.task_id}
+                if reconciliation_required:
+                    result["reconciliation_required"] = True
+                    result["result_artifact_name"] = artifact_name
+                return result
             self._state = {
                 **self._state,
-                "status": "completed" if failure["status"] == "completed" else "failed",
-                "stage": "ingest_committed_before_workflow_failure" if failure["status"] == "completed" else "ingest_failed",
+                "status": "failed",
+                "stage": "ingest_failed",
                 "unknown": ["activity outcome may require worker-side inspection"],
+                "reconciliation_required": reconciliation_required,
+                "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
                 "checkpoint": "failure_recorded" if failure["accepted"] else "activity_failed",
-                "next_step": "inspect_temporal_history_and_task_state",
+                "next_step": "operator_reconcile_committed_side_effect" if reconciliation_required else "inspect_temporal_history_and_task_state",
             }
             raise
         self._state = {
@@ -1143,6 +1222,7 @@ class IndustrialRagIngestWorkflow:
                 {"content_sha256": result["content_sha256"], "version_id": result["version_id"]},
             ],
             "checkpoint": "ingest_result_persisted",
+            "pending_reconciliation": [],
             "next_step": None,
         }
         return result
@@ -1249,7 +1329,9 @@ class IndustrialRagOperationWorkflow:
         self._state = {**self._state, "status": "running"}
         return True
 
-    async def _mark_failed(self, task_id: str, state_database_path: str, error: BaseException) -> None:
+    async def _mark_failed(
+        self, task_id: str, state_database_path: str, error: BaseException,
+    ) -> dict[str, object]:
         try:
             outcome = await workflow.execute_activity(
                 fail_temporal_task_activity,
@@ -1264,14 +1346,39 @@ class IndustrialRagOperationWorkflow:
             )
         except ActivityError:
             outcome = {"accepted": False, "status": "failure_recording_failed"}
+        durable_status = str(outcome["status"])
+        reconciliation_required = bool(outcome.get("reconciliation_required"))
+        artifact_name = outcome.get("result_artifact_name")
+        visible_status = (
+            durable_status
+            if durable_status in {"completed", "cancelled", "dead_letter", "unknown"}
+            else "failed"
+        )
         self._state = {
             **self._state,
-            "status": "failed" if outcome["status"] != "completed" else "completed",
-            "stage": "operation_failed" if outcome["status"] != "completed" else "operation_committed_before_workflow_failure",
-            "unknown": ["inspect the durable task artifact when activity outcome is ambiguous"],
+            "status": visible_status,
+            "stage": (
+                "operation_committed_before_workflow_failure"
+                if durable_status == "completed" else
+                f"operation_{durable_status}_preserved"
+                if durable_status in {"cancelled", "dead_letter", "unknown"} else
+                "operation_failed"
+            ),
+            "reconciliation_required": reconciliation_required,
+            "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
+            "unknown": (
+                ["inspect the durable task artifact when activity outcome is ambiguous"]
+                if reconciliation_required else []
+            ),
             "checkpoint": "operation_failure_recorded" if outcome["accepted"] else "operation_failure_not_recorded",
-            "next_step": "inspect_temporal_history_and_task_state",
+            "next_step": (
+                "operator_reconcile_committed_side_effect"
+                if reconciliation_required else
+                "inspect_temporal_history_and_task_state"
+                if visible_status == "failed" else None
+            ),
         }
+        return outcome
 
     @workflow.run
     async def run(self, operation: IndustrialRagOperationRequest) -> dict[str, object]:
@@ -1336,22 +1443,38 @@ class IndustrialRagOperationWorkflow:
                     "status": "completed",
                     "stage": "operation_reused",
                     "checkpoint": "stored_result_reused",
+                    "pending_reconciliation": [],
                     "next_step": None,
                 }
                 return initialized["result"]
             if initialized["status"] == "paused":
                 if not self._pending_controls:
                     self._pause_requested = True
-                self._state = {**self._state, "status": "paused", "stage": "restored_paused_checkpoint"}
+                artifact_name = initialized.get("result_artifact_name")
+                self._state = {
+                    **self._state,
+                    "status": "paused",
+                    "stage": "restored_paused_checkpoint",
+                    "reconciliation_required": bool(initialized.get("reconciliation_required")),
+                    "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
+                }
             elif initialized["status"] != "running":
+                artifact_name = initialized.get("result_artifact_name")
+                reconciliation_required = bool(initialized.get("reconciliation_required"))
                 self._state = {
                     **self._state,
                     "status": initialized["status"],
                     "stage": f"task_{initialized['status']}",
                     "checkpoint": "terminal_task_state_reused",
-                    "next_step": None,
+                    "reconciliation_required": reconciliation_required,
+                    "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
+                    "next_step": "operator_reconcile_committed_side_effect" if reconciliation_required else None,
                 }
-                return {"status": initialized["status"], "task_id": task_id}
+                result: dict[str, object] = {"status": initialized["status"], "task_id": task_id}
+                if reconciliation_required:
+                    result["reconciliation_required"] = True
+                    result["result_artifact_name"] = artifact_name
+                return result
 
             if not await self._safe_point(task_id, state_database_path):
                 return {"status": "cancelled", "task_id": task_id}
@@ -1443,11 +1566,21 @@ class IndustrialRagOperationWorkflow:
                 "stage": "operation_completed",
                 "evidence": [{"result_status": result.get("status"), "task_id": task_id}],
                 "checkpoint": "operation_result_persisted",
+                "pending_reconciliation": [],
                 "next_step": None,
             }
             return result
         except ActivityError as error:
-            await self._mark_failed(task_id, state_database_path, error)
+            outcome = await self._mark_failed(task_id, state_database_path, error)
+            durable_status = str(outcome["status"])
+            if durable_status == "completed" and isinstance(outcome.get("result"), dict):
+                return outcome["result"]
+            if durable_status in {"cancelled", "dead_letter", "unknown"}:
+                result = {"status": durable_status, "task_id": task_id}
+                if outcome.get("reconciliation_required"):
+                    result["reconciliation_required"] = True
+                    result["result_artifact_name"] = outcome.get("result_artifact_name")
+                return result
             raise
 
 

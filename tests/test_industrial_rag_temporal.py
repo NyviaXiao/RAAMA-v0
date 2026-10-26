@@ -285,6 +285,76 @@ def test_temporal_ingest_cancel_is_durable_and_prevents_activity_side_effect(tmp
     assert state.list_task_events(request.task_id)[-1]["stage"] == "cancelled"
 
 
+def test_temporal_ingest_dead_letter_with_result_artifact_requires_reconciliation(tmp_path, monkeypatch) -> None:
+    source_path = tmp_path / "dead-letter-ingest-source.txt"
+    metadata_path = tmp_path / "dead-letter-ingest-metadata.json"
+    source_path.write_text("Synthetic source for dead-letter recovery.", encoding="utf-8")
+    metadata_path.write_text(json.dumps({
+        "document_id": "dead-letter-ingest-document",
+        "version_id": "dead-letter-ingest-version",
+        "source_id": "dead-letter-ingest-source",
+        "title": "Synthetic dead-letter fixture",
+        "document_type": "synthetic_report",
+        "security_code": "000001",
+        "entity_name": "Synthetic issuer",
+        "report_period": "2026",
+        "accounting_basis": "consolidated",
+        "source_url": "https://example.invalid/dead-letter-ingest",
+        "rights_note": "Synthetic fixture only",
+        "published_at": "2026-01-01T00:00:00+00:00",
+        "first_available_at": "2026-01-01T00:00:00+00:00",
+        "time_basis": "strict_forward",
+        "read_principals": ["local-public"],
+    }, sort_keys=True), encoding="utf-8")
+    request = capture_ingest_request(IndustrialRagIngestRequest(
+        task_id="dead-letter-ingest-task",
+        idempotency_key="dead-letter-ingest-key",
+        source_path=str(source_path),
+        metadata_path=str(metadata_path),
+        database_path=str(tmp_path / "dead-letter-ingest.sqlite3"),
+        object_root=str(tmp_path / "dead-letter-ingest-objects"),
+        scratch_root=str(tmp_path / "dead-letter-ingest-scratch"),
+        state_database_path=str(tmp_path / "dead-letter-ingest-state.sqlite3"),
+    ))
+    state = HarnessStateStore(request.state_database_path)
+    state.open_task(
+        request.task_id,
+        request.idempotency_key,
+        temporal_workflow._ingest_task_request(request),
+        max_provider_calls=0,
+    )
+    artifact = {"status": "ingested", "version_id": "dead-letter-ingest-version"}
+    state.put_artifact(request.task_id, "industrial_rag_ingest_result", artifact)
+    assert state.transition_task_status(
+        request.task_id, expected_statuses={"running"}, status="failed", stage="failed",
+        event_key="ingest-failed-before-dead-letter", payload={"error": "synthetic failure"},
+    )
+    assert state.dead_letter_task(
+        request.task_id, expected_status="failed", operator_id="operator-ingest",
+        reason="Preserve the artifact for explicit reconciliation.", event_key="ingest-dead-letter",
+    )
+
+    initialized = initialize_temporal_task_activity(TemporalTaskInitialization(
+        request.task_id,
+        request.idempotency_key,
+        request.state_database_path,
+        temporal_workflow._ingest_task_request(request),
+        result_artifact="industrial_rag_ingest_result",
+    ))
+    assert initialized == {
+        "status": "dead_letter",
+        "result": None,
+        "reconciliation_required": True,
+        "result_artifact_name": "industrial_rag_ingest_result",
+    }
+    with pytest.raises(RuntimeError, match="committed ingest artifact requires explicit reconciliation"):
+        ingest_document_activity(IndustrialRagIngestActivityInput(request))
+    assert state.get_task(request.task_id)["status"] == "dead_letter"
+    assert state.get_task(request.task_id)["stage"] == "dead_letter"
+    assert state.get_artifact(request.task_id, "industrial_rag_ingest_result") == artifact
+    assert not Path(request.database_path).exists()
+
+
 def _evaluation_inputs(tmp_path: Path) -> tuple[Path, Path, dict[str, object], dict[str, object]]:
     manifest_path = tmp_path / "manifest.json"
     predictions_path = tmp_path / "predictions.json"
@@ -720,7 +790,12 @@ def test_temporal_index_failure_is_durable_and_can_be_dead_lettered(tmp_path, mo
         reason="Missing source version has been investigated.",
         command_id="dead-letter-1",
     )
-    assert dead_letter == {"changed": True, "status": "dead_letter"}
+    assert dead_letter == {
+        "changed": True,
+        "status": "dead_letter",
+        "reconciliation_required": False,
+        "result_artifact_name": None,
+    }
     assert state.list_task_events(request.task_id)[-1]["payload"]["operator_id"] == "operator-c"
     assert dead_letter_temporal_task(
         request.state_database_path,
@@ -729,4 +804,172 @@ def test_temporal_index_failure_is_durable_and_can_be_dead_lettered(tmp_path, mo
         operator_id="operator-c",
         reason="Missing source version has been investigated.",
         command_id="dead-letter-1",
-    ) == {"changed": True, "status": "dead_letter"}
+    ) == {
+        "changed": True,
+        "status": "dead_letter",
+        "reconciliation_required": False,
+        "result_artifact_name": None,
+    }
+
+
+def test_temporal_index_reuses_completed_result_after_commit_ack_loss(tmp_path, monkeypatch) -> None:
+    request = _synthetic_index_request(tmp_path)
+    activity_input = IndustrialRagIndexActivityInput(request)
+    real_complete_task = HarnessStateStore.complete_task
+    real_build_release = temporal_workflow.build_release
+    build_calls = []
+    monkeypatch.setattr(temporal_workflow.activity, "heartbeat", lambda *args, **kwargs: None)
+
+    def count_build_release(**kwargs):
+        build_calls.append(True)
+        return real_build_release(**kwargs)
+
+    def commit_then_lose_ack(self, *args, **kwargs):
+        real_complete_task(self, *args, **kwargs)
+        raise RuntimeError("injected activity acknowledgement loss after task commit")
+
+    monkeypatch.setattr(temporal_workflow, "build_release", count_build_release)
+    monkeypatch.setattr(HarnessStateStore, "complete_task", commit_then_lose_ack)
+    with pytest.raises(RuntimeError, match="acknowledgement loss"):
+        build_index_activity(activity_input)
+
+    monkeypatch.setattr(HarnessStateStore, "complete_task", real_complete_task)
+    replayed = build_index_activity(activity_input)
+    state = HarnessStateStore(request.state_database_path)
+    assert replayed["status"] == "published"
+    assert state.get_task(request.task_id)["status"] == "completed"
+    assert state.get_task(request.task_id)["result"] == replayed
+    assert state.get_artifact(request.task_id, "industrial_rag_operation_result") == replayed
+    assert build_calls == [True]
+    assert [event["stage"] for event in state.list_task_events(request.task_id)] == [
+        "created", "index_started", "index_persisted", "completed",
+    ]
+    assert cli._store(request.database_path, request.object_root).active_release_id() == request.release_id
+
+
+def test_temporal_dead_letter_preserves_committed_index_for_operator_reconciliation(tmp_path, monkeypatch) -> None:
+    request = _synthetic_index_request(tmp_path)
+    activity_input = IndustrialRagIndexActivityInput(request)
+    real_complete_task = HarnessStateStore.complete_task
+    real_build_release = temporal_workflow.build_release
+    build_calls = []
+    monkeypatch.setattr(temporal_workflow.activity, "heartbeat", lambda *args, **kwargs: None)
+
+    def count_build_release(**kwargs):
+        build_calls.append(True)
+        return real_build_release(**kwargs)
+
+    def fail_task_result_persistence(self, *_args, **_kwargs):
+        raise RuntimeError("injected task-result persistence failure")
+
+    monkeypatch.setattr(temporal_workflow, "build_release", count_build_release)
+    monkeypatch.setattr(HarnessStateStore, "complete_task", fail_task_result_persistence)
+    with pytest.raises(RuntimeError, match="task-result persistence failure"):
+        build_index_activity(activity_input)
+
+    monkeypatch.setattr(HarnessStateStore, "complete_task", real_complete_task)
+    state = HarnessStateStore(request.state_database_path)
+    artifact = state.get_artifact(request.task_id, "industrial_rag_operation_result")
+    assert artifact is not None and artifact["status"] == "published"
+    assert state.get_task(request.task_id)["status"] == "running"
+
+    failure = temporal_workflow.fail_temporal_task_activity(temporal_workflow.TemporalFailureActivityInput(
+        request.task_id,
+        request.state_database_path,
+        "RuntimeError",
+        "task-result persistence failed after release publication",
+    ))
+    assert failure == {
+        "accepted": True,
+        "status": "failed",
+        "reconciliation_required": True,
+        "result_artifact_name": "industrial_rag_operation_result",
+    }
+    dead_letter = dead_letter_temporal_task(
+        request.state_database_path,
+        request.task_id,
+        expected_status="failed",
+        operator_id="operator-reconcile",
+        reason="Release publication committed, but task-result completion failed.",
+        command_id="dead-letter-after-publication",
+    )
+    assert dead_letter == {
+        "changed": True,
+        "status": "dead_letter",
+        "reconciliation_required": True,
+        "result_artifact_name": "industrial_rag_operation_result",
+    }
+
+    task_request = temporal_workflow._operation_identity("industrial_rag.index.v1", request)
+    initialized = initialize_temporal_task_activity(TemporalTaskInitialization(
+        request.task_id, request.idempotency_key, request.state_database_path, task_request,
+    ))
+    assert initialized == {
+        "status": "dead_letter",
+        "result": None,
+        "reconciliation_required": True,
+        "result_artifact_name": "industrial_rag_operation_result",
+    }
+
+    operation = IndustrialRagOperationRequest("index", asdict(request))
+    instance = IndustrialRagOperationWorkflow()
+    calls = []
+
+    async def fake_execute_activity(fn, value, **_kwargs):
+        calls.append(fn.__name__)
+        return fn(value)
+
+    monkeypatch.setattr(temporal_workflow.workflow, "execute_activity", fake_execute_activity)
+    workflow_result = asyncio.run(instance.run(operation))
+    assert workflow_result == {
+        "status": "dead_letter",
+        "task_id": request.task_id,
+        "reconciliation_required": True,
+        "result_artifact_name": "industrial_rag_operation_result",
+    }
+    assert calls == ["initialize_temporal_task_activity"]
+    assert instance.state()["pending_reconciliation"] == ["industrial_rag_operation_result"]
+
+    with pytest.raises(RuntimeError, match="explicit reconciliation"):
+        build_index_activity(activity_input)
+    assert state.get_task(request.task_id)["status"] == "dead_letter"
+    assert state.get_task(request.task_id)["stage"] == "dead_letter"
+    assert state.get_artifact(request.task_id, "industrial_rag_operation_result") == artifact
+    assert [event["stage"] for event in state.list_task_events(request.task_id)] == [
+        "created", "index_started", "index_persisted", "failed", "dead_letter",
+    ]
+    assert cli._store(request.database_path, request.object_root).active_release_id() == request.release_id
+    assert build_calls == [True]
+
+
+def test_temporal_cancelled_task_with_committed_artifact_is_not_automatically_completed(tmp_path, monkeypatch) -> None:
+    request = _synthetic_index_request(tmp_path)
+    task_request = temporal_workflow._operation_identity("industrial_rag.index.v1", request)
+    state = HarnessStateStore(request.state_database_path)
+    state.open_task(request.task_id, request.idempotency_key, task_request, max_provider_calls=0)
+    artifact = {"status": "published", "release_id": request.release_id}
+    state.put_artifact(request.task_id, "industrial_rag_operation_result", artifact)
+    assert state.transition_task_status(
+        request.task_id,
+        expected_statuses={"running"},
+        status="cancelled",
+        stage="cancelled",
+        event_key="operator-cancel-after-commit",
+        payload={"operator_id": "operator-cancel", "reason": "Stop automatic replay."},
+    )
+
+    initialized = initialize_temporal_task_activity(TemporalTaskInitialization(
+        request.task_id, request.idempotency_key, request.state_database_path, task_request,
+    ))
+    assert initialized == {
+        "status": "cancelled",
+        "result": None,
+        "reconciliation_required": True,
+        "result_artifact_name": "industrial_rag_operation_result",
+    }
+    with pytest.raises(RuntimeError, match="task is cancelled"):
+        build_index_activity(IndustrialRagIndexActivityInput(request))
+    assert state.get_task(request.task_id)["status"] == "cancelled"
+    assert state.get_task(request.task_id)["stage"] == "cancelled"
+    assert state.get_task(request.task_id).get("result") is None
+    assert state.get_artifact(request.task_id, "industrial_rag_operation_result") == artifact

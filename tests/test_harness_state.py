@@ -125,6 +125,44 @@ def test_durable_task_lifecycle_and_dead_letter_are_audited_and_fenced(tmp_path)
         )
 
 
+@pytest.mark.parametrize("terminal_status", ["cancelled", "dead_letter"])
+def test_task_completion_and_checkpoints_cannot_replace_operator_terminal_state(tmp_path, terminal_status):
+    store = HarnessStateStore(tmp_path / f"terminal-{terminal_status}.sqlite3")
+    store.open_task("terminal-task", "terminal-key", {"operation": "index"}, max_provider_calls=0)
+    artifact = {"status": "published", "release_id": "release-with-reconciliation-needed"}
+    store.put_artifact("terminal-task", "industrial_rag_operation_result", artifact)
+
+    if terminal_status == "cancelled":
+        assert store.transition_task_status(
+            "terminal-task", expected_statuses={"running"}, status="cancelled", stage="cancelled",
+            event_key="operator-cancel", payload={"reason": "Cancel this task."},
+        )
+    else:
+        assert store.transition_task_status(
+            "terminal-task", expected_statuses={"running"}, status="failed", stage="failed",
+            event_key="task-failed", payload={"error": "synthetic failure"},
+        )
+        assert store.dead_letter_task(
+            "terminal-task", expected_status="failed", operator_id="operator-1",
+            reason="No automatic replay is authorized.", event_key="operator-dead-letter",
+        )
+
+    terminal = store.get_task("terminal-task")
+    assert terminal["status"] == terminal_status
+    assert terminal["stage"] == terminal_status
+    with pytest.raises(StateConflict, match="completion fence"):
+        store.complete_task(
+            "terminal-task", artifact, expected_statuses={"running"},
+        )
+    store.checkpoint_task("terminal-task", "late_replay_checkpoint", {"replayed": True})
+
+    after_replay_attempt = store.get_task("terminal-task")
+    assert after_replay_attempt["status"] == terminal_status
+    assert after_replay_attempt["stage"] == terminal_status
+    assert store.get_task("terminal-task").get("result") is None
+    assert store.get_artifact("terminal-task", "industrial_rag_operation_result") == artifact
+
+
 def test_unknown_request_prevents_another_outbound_request_until_reconciled(tmp_path):
     store = HarnessStateStore(tmp_path / "unknown.sqlite3")
     store.open_task("task", "task", {"fixture": True}, max_provider_calls=3)
