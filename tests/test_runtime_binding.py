@@ -5,11 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from adaptive_mas.agents.harness_prompts import seed_candidate
 from adaptive_mas.runtime_binding import (
     _path_digest,
     build_workflow_runtime_binding,
     validate_workflow_runtime_binding,
 )
+from adaptive_mas.release_governance import HarnessReleaseStore
+from adaptive_mas.workflow_snapshot import materialize_workflow_snapshot
 
 
 def _workflow_fixture(root: Path) -> tuple[dict[str, object], dict[str, str]]:
@@ -107,3 +110,72 @@ def test_workflow_file_digest_streams_without_read_bytes(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
     assert _path_digest(target) == ("file", expected)
+
+
+def test_workflow_snapshot_restores_queued_inputs_and_rejects_snapshot_tampering(tmp_path: Path) -> None:
+    request, _ = _workflow_fixture(tmp_path)
+    store_root = tmp_path / "harness_versions"
+    release_store = HarnessReleaseStore(store_root, project_root=tmp_path)
+    artifact_names = (
+        "training_seed", "training_state", "calibration", "model_versions", "data_versions", "tool_schema",
+    )
+    registered = release_store.register_package({
+        "candidate_version_id": "fixture-runtime-v1",
+        "candidate": seed_candidate(),
+        "config": {"prediction_horizon_sessions": 3},
+        "runtime_context": {
+            "training_state": {"mature_rows": [1]},
+            "training_seed_provenance": {"trained_through": "2025-01-01"},
+            "versions": {"config_sha256": "a" * 64},
+        },
+        "artifacts": {
+            name: {"version": f"{name}-v1", "payload": {"fixture": name}}
+            for name in artifact_names
+        },
+    })
+    runtime_package = {
+        "package_id": registered["package_id"],
+        "package_sha256": registered["package_sha256"],
+    }
+    snapshot = materialize_workflow_snapshot(
+        request,
+        project_root=tmp_path,
+        snapshot_root=tmp_path / "service_artifacts" / "snapshot-task" / "workflow_snapshot",
+        runtime_package=runtime_package,
+        runtime_package_store_root=store_root,
+    )
+    binding = build_workflow_runtime_binding(
+        request,
+        project_root=tmp_path,
+        runtime_package=runtime_package,
+        materialization=snapshot,
+    )
+    snapshot_paths = {
+        key: str(descriptor["path"])
+        for key, descriptor in snapshot["inputs"].items()
+    }
+    copied_config = Path(snapshot_paths["config"])
+    original_config = Path(request["config"])
+    assert all(len(str(descriptor["sha256"])) == 64 for descriptor in snapshot["inputs"].values())
+    assert len(str(snapshot["runtime_registry_sha256"])) == 64
+
+    original_config.write_text("changed after task submission", encoding="utf-8")
+    assert validate_workflow_runtime_binding(
+        binding, project_root=tmp_path, request_paths=snapshot_paths,
+    ) == binding["binding_sha256"]
+    assert copied_config.read_text(encoding="utf-8") == "config-fixture"
+    copied_source_root = Path(snapshot["source_root"])
+    assert (copied_source_root / "scripts" / "run_harness_decision.py").is_file()
+
+    copied_config.write_text("tampered queued snapshot", encoding="utf-8")
+    with pytest.raises(ValueError, match="materialized input failed integrity verification: config"):
+        validate_workflow_runtime_binding(
+            binding, project_root=tmp_path, request_paths=snapshot_paths,
+        )
+    copied_config.write_text("config-fixture", encoding="utf-8")
+    copied_entrypoint = copied_source_root / "scripts" / "run_harness_decision.py"
+    copied_entrypoint.write_text(copied_entrypoint.read_text(encoding="utf-8") + "\n# tamper\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="workflow source snapshot failed integrity verification"):
+        validate_workflow_runtime_binding(
+            binding, project_root=tmp_path, request_paths=snapshot_paths,
+        )

@@ -19,6 +19,7 @@ import threading
 import time
 import tomllib
 import uuid
+import shutil
 from contextlib import closing
 from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +33,7 @@ from adaptive_mas.release_governance import HarnessReleaseStore
 from adaptive_mas.research_provenance import stable_hash
 from adaptive_mas.risk_profile import resolve_risk_profile, validate_canonical_risk_profile
 from adaptive_mas.runtime_binding import build_workflow_runtime_binding
+from adaptive_mas.workflow_snapshot import materialize_workflow_snapshot, verify_workflow_materialization
 
 
 class ServiceConflict(RuntimeError):
@@ -707,6 +709,13 @@ class HarnessServiceStore:
             row = connection.execute("SELECT * FROM service_jobs WHERE task_id=?", (task_id,)).fetchone()
             return self._job(row)
 
+    def get_job_by_idempotency_key(self, idempotency_key: str) -> dict[str, object] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM service_jobs WHERE idempotency_key=?", (idempotency_key,)
+            ).fetchone()
+            return self._job(row)
+
     def list_jobs(self, limit: int = 50) -> list[dict[str, object]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -1011,7 +1020,7 @@ def _replay_runner(
 ) -> dict[str, object]:
     request = job["request"]
     assert isinstance(request, Mapping)
-    root = project_root
+    root = project_root.resolve()
     run_root = database_path.parent
     artifact_dir = run_root / "service_artifacts" / str(job["task_id"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -1026,27 +1035,58 @@ def _replay_runner(
         json.dumps(request["risk_profile"], ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
     )
     runtime_binding = request.get("runtime_binding")
+    materialization: Mapping[str, object] | None = None
+    source_root = root
+    request_paths: dict[str, str | Path] = {
+        key: str(request[key])
+        for key in (
+            "baostock_run_dir", "config", "public_cache_dir", "reuse_research_json", "training_seed",
+        )
+    }
     if isinstance(runtime_binding, Mapping):
         runtime_binding_path.write_text(
             json.dumps(runtime_binding, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
         )
+        raw_materialization = runtime_binding.get("materialization")
+        if raw_materialization is not None:
+            if not isinstance(raw_materialization, Mapping):
+                raise ValueError("queued workflow materialization descriptor is invalid")
+            materialization = raw_materialization
+            verify_workflow_materialization(materialization, project_root=root)
+            source_root = Path(str(materialization["source_root"]))
+            materialized_inputs = materialization.get("inputs")
+            if not isinstance(materialized_inputs, Mapping):
+                raise ValueError("queued workflow materialization has no input map")
+            if set(materialized_inputs) != set(request_paths):
+                raise ValueError("queued workflow materialization is missing required inputs")
+            request_paths = {
+                key: str(materialized_inputs[key]["path"])
+                for key in request_paths
+                if isinstance(materialized_inputs[key], Mapping)
+            }
+            if len(request_paths) != 5:
+                raise ValueError("queued workflow materialized input paths are invalid")
+    harness_version_dir = (
+        str(materialization["runtime_package_store_root"])
+        if materialization is not None else str(request["harness_version_dir"])
+    )
     command = [
         sys.executable,
-        str(root / "scripts" / "run_harness_decision.py"),
-        "--baostock-run-dir", str(request["baostock_run_dir"]),
+        str(source_root / "scripts" / "run_harness_decision.py"),
+        "--baostock-run-dir", str(request_paths["baostock_run_dir"]),
         "--portfolio-state-json", str(portfolio_path),
         "--as-of", str(request["as_of"]),
         "--horizon-sessions", str(request["horizon_sessions"]),
         "--risk-profile-json", str(risk_profile_path),
-        "--config", str(request["config"]),
-        "--training-seed", str(request["training_seed"]),
+        "--config", str(request_paths["config"]),
+        "--training-seed", str(request_paths["training_seed"]),
         "--training-seed-trained-through", str(request["training_seed_trained_through"]),
         "--training-seed-horizon-sessions", str(request["training_seed_horizon_sessions"]),
-        "--public-cache-dir", str(request["public_cache_dir"]),
-        "--harness-version-dir", str(request["harness_version_dir"]),
+        "--public-cache-dir", str(request_paths["public_cache_dir"]),
+        "--harness-version-dir", harness_version_dir,
         "--run-dir", str(run_root),
         "--task-id", str(job["task_id"]),
-        "--reuse-research-json", str(request["reuse_research_json"]),
+        "--reuse-research-json", str(request_paths["reuse_research_json"]),
         "--output", str(output_path),
     ]
     if isinstance(runtime_binding, Mapping):
@@ -1058,15 +1098,23 @@ def _replay_runner(
         ))
         if package.get("package_sha256") is not None:
             command.extend(("--pinned-runtime-package-sha256", str(package["package_sha256"])))
+        if materialization is not None:
+            command.extend(("--workflow-project-root", str(root)))
     environment = dict(os.environ)
     for name in tuple(environment):
         if name.upper() in {
             "QWEN_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "POPAGENT_LLM_KEY"
         } or name.upper().endswith("_API_KEY"):
             environment.pop(name, None)
+    if materialization is not None:
+        snapshot_pythonpath = str(source_root / "src")
+        existing_pythonpath = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [snapshot_pythonpath, *([existing_pythonpath] if existing_pythonpath else [])]
+        )
     process = subprocess.Popen(
         command,
-        cwd=root,
+        cwd=source_root,
         env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1353,16 +1401,50 @@ class HarnessRequestHandler(BaseHTTPRequestHandler):
                 task_id = str(payload.get("task_id") or uuid.uuid4().hex)
                 if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", task_id):
                     raise ValueError("task_id is not a safe identifier")
+                service_store: HarnessServiceStore = context["store"]  # type: ignore[assignment]
+                if service_store.get_job_by_idempotency_key(idempotency_key) is not None:
+                    job = service_store.submit(task_id, idempotency_key, request)
+                    self._send_json(202, self._job_payload(job))
+                    return
                 runtime_package = HarnessReleaseStore(
                     str(request["harness_version_dir"]),
                     project_root=context["project_root"],
                 ).pin_active_runtime_package()
-                request["runtime_binding"] = build_workflow_runtime_binding(
-                    request,
-                    project_root=context["project_root"],
-                    runtime_package=runtime_package,
+                root = Path(context["project_root"]).resolve()
+                snapshot_root = (
+                    Path(service_store.database_path).parent
+                    / "service_artifacts" / f"ws-{uuid.uuid4().hex[:12]}"
                 )
-                job = context["store"].submit(task_id, idempotency_key, request)  # type: ignore[union-attr]
+                try:
+                    materialization = materialize_workflow_snapshot(
+                        request,
+                        project_root=root,
+                        snapshot_root=snapshot_root,
+                        runtime_package=runtime_package,
+                        runtime_package_store_root=request["harness_version_dir"],
+                    )
+                    request["runtime_binding"] = build_workflow_runtime_binding(
+                        request,
+                        project_root=root,
+                        runtime_package=runtime_package,
+                        materialization=materialization,
+                    )
+                    job = service_store.submit(task_id, idempotency_key, request)
+                except Exception:
+                    if snapshot_root.exists():
+                        shutil.rmtree(snapshot_root, ignore_errors=True)
+                    raise
+                stored_binding = job.get("request", {}).get("runtime_binding", {})
+                stored_materialization = (
+                    stored_binding.get("materialization")
+                    if isinstance(stored_binding, Mapping) else None
+                )
+                if (
+                    isinstance(stored_materialization, Mapping)
+                    and stored_materialization.get("snapshot_root") != str(snapshot_root.resolve())
+                    and snapshot_root.exists()
+                ):
+                    shutil.rmtree(snapshot_root, ignore_errors=True)
                 self._send_json(202, self._job_payload(job))
                 return
             if path.startswith("/api/tasks/") and path.endswith("/control"):

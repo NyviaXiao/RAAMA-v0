@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
@@ -259,6 +262,110 @@ def test_worker_handoff_preserves_the_same_canonical_profile(tmp_path, monkeypat
     assert observed["profile"] == normalized["risk_profile"]
     assert "--risk-budget-annualized" not in observed["command"]
     assert observed["profile"]["constraints"]["maximum_symbol_weight"] == 0.04
+
+
+def test_task_submission_replays_from_the_materialized_snapshot_and_rejects_tampering(tmp_path, monkeypatch):
+    server, thread = _server(tmp_path)
+    root = _project(tmp_path)
+    request = _request(root)
+    payload = {"task_id": "snapshot-task", "idempotency_key": "snapshot-key", "request": request}
+    try:
+        status, submitted = _http(server, "POST", "/api/tasks", payload)
+        assert status == 202, submitted
+        store = server.context["store"]
+        job = store.get_job("snapshot-task")
+        assert job is not None
+        binding = job["request"]["runtime_binding"]
+        materialization = binding["materialization"]
+        snapshot_root = Path(materialization["snapshot_root"])
+        assert (Path(materialization["source_root"]) / "scripts" / "run_harness_decision.py").is_file()
+        assert materialization["runtime_package"]["package_id"] == "seed"
+
+        retry_status, retry = _http(server, "POST", "/api/tasks", payload)
+        assert retry_status == 202
+        assert retry["task_id"] == submitted["task_id"]
+        assert len(list(snapshot_root.parent.iterdir())) == 1
+
+        snapshot_source_root = Path(materialization["source_root"])
+        snapshot_environment = dict(os.environ)
+        snapshot_environment["PYTHONPATH"] = os.pathsep.join(
+            [str(snapshot_source_root / "src"), snapshot_environment.get("PYTHONPATH", "")]
+        )
+        binding_path = tmp_path / "queued-runtime-binding.json"
+        binding_path.write_text(json.dumps(binding, ensure_ascii=False), encoding="utf-8")
+        binding_check = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json, sys; from pathlib import Path; "
+                "from adaptive_mas.runtime_binding import validate_workflow_runtime_binding; "
+                "binding=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8')); "
+                "paths=json.loads(sys.argv[3]); "
+                "validate_workflow_runtime_binding(binding, project_root=sys.argv[2], request_paths=paths)",
+                str(binding_path),
+                str(tmp_path),
+                json.dumps({key: value["path"] for key, value in materialization["inputs"].items()}),
+            ],
+            cwd=snapshot_source_root,
+            env=snapshot_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert binding_check.returncode == 0, binding_check.stderr
+
+        original_config = Path(request["config"])
+        original_config.write_text("horizon_sessions = 99\n", encoding="utf-8")
+        help_result = subprocess.run(
+            [
+                sys.executable,
+                str(snapshot_source_root / "scripts" / "run_harness_decision.py"),
+                "--help",
+            ],
+            cwd=snapshot_source_root,
+            env=snapshot_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert help_result.returncode == 0, help_result.stderr
+        observed = {"launches": 0}
+
+        class CompletedProcess:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return "", ""
+
+        def fake_popen(command, **kwargs):
+            observed["launches"] += 1
+            observed["command"] = command
+            observed["cwd"] = Path(kwargs["cwd"])
+            observed["pythonpath"] = kwargs["env"]["PYTHONPATH"].split(os.pathsep)[0]
+            copied_inputs = materialization["inputs"]
+            for key in ("baostock_run_dir", "config", "public_cache_dir", "reuse_research_json", "training_seed"):
+                argument = "--" + key.replace("_", "-")
+                assert Path(command[command.index(argument) + 1]) == Path(copied_inputs[key]["path"])
+            assert Path(copied_inputs["config"]["path"]).read_text(encoding="utf-8") == "horizon_sessions = 3\n"
+            assert Path(command[command.index("--harness-version-dir") + 1]) == Path(materialization["runtime_package_store_root"])
+            assert Path(command[command.index("--workflow-project-root") + 1]) == tmp_path.resolve()
+            Path(command[command.index("--output") + 1]).write_text("{}", encoding="utf-8")
+            return CompletedProcess()
+
+        monkeypatch.setattr("adaptive_mas.harness_service.subprocess.Popen", fake_popen)
+        assert _replay_runner(job, project_root=tmp_path, database_path=store.database_path) == {}
+        assert observed["cwd"] == Path(materialization["source_root"])
+        assert Path(observed["pythonpath"]) == Path(materialization["source_root"]) / "src"
+        assert observed["launches"] == 1
+
+        Path(materialization["inputs"]["config"]["path"]).write_text("tampered", encoding="utf-8")
+        with pytest.raises(ValueError, match="materialized input failed integrity verification: config"):
+            _replay_runner(job, project_root=tmp_path, database_path=store.database_path)
+        assert observed["launches"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_sqlite_idempotency_concurrent_claims_and_worker_recovery(tmp_path):

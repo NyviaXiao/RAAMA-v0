@@ -84,6 +84,7 @@ def main() -> None:
         help="Use a completed research_result_file from the shared GEPA evolution run without making another provider request.",
     )
     parser.add_argument("--workflow-binding-json", type=Path)
+    parser.add_argument("--workflow-project-root", type=Path)
     parser.add_argument("--pinned-runtime-package-id")
     parser.add_argument("--pinned-runtime-package-sha256")
     parser.add_argument("--output", type=Path)
@@ -110,7 +111,7 @@ def main() -> None:
             raise ValueError("workflow runtime package arguments differ from the queued snapshot")
         workflow_binding_sha256 = validate_workflow_runtime_binding(
             workflow_binding,
-            project_root=project_dir,
+            project_root=args.workflow_project_root or project_dir,
             request_paths={
                 "baostock_run_dir": args.baostock_run_dir,
                 "config": args.config,

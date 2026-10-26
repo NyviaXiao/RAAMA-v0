@@ -54,25 +54,46 @@ def build_workflow_runtime_binding(
     *,
     project_root: str | Path,
     runtime_package: Mapping[str, object],
+    materialization: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     root = Path(project_root).resolve()
-    inputs = {}
-    for key in _INPUT_KEYS:
-        raw = request.get(key)
-        if not isinstance(raw, str):
-            raise ValueError(f"workflow request is missing its {key} input")
-        path = Path(raw).resolve()
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise ValueError("workflow inputs must stay inside the configured project root") from exc
-        kind, digest = _path_digest(path)
-        inputs[key] = {"path": str(path), "kind": kind, "sha256": digest}
+    inputs: dict[str, object] = {}
+    if materialization is not None:
+        if materialization.get("implementation_identity") != source_package_identity():
+            raise ValueError("materialized implementation differs from the source being queued")
+        if materialization.get("runtime_package") != dict(runtime_package):
+            raise ValueError("materialized runtime package differs from the queued package pin")
+        materialized_inputs = materialization.get("inputs")
+        if not isinstance(materialized_inputs, Mapping) or set(materialized_inputs) != set(_INPUT_KEYS):
+            raise ValueError("workflow materialization does not include every required input")
+        for key in _INPUT_KEYS:
+            descriptor = materialized_inputs[key]
+            if not isinstance(descriptor, Mapping):
+                raise ValueError(f"workflow materialized input descriptor is invalid: {key}")
+            path = Path(str(descriptor.get("path"))).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("workflow snapshots must stay inside the configured project root") from exc
+            inputs[key] = dict(descriptor)
+    else:
+        for key in _INPUT_KEYS:
+            raw = request.get(key)
+            if not isinstance(raw, str):
+                raise ValueError(f"workflow request is missing its {key} input")
+            path = Path(raw).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("workflow inputs must stay inside the configured project root") from exc
+            kind, digest = _path_digest(path)
+            inputs[key] = {"path": str(path), "source_path": str(path), "kind": kind, "sha256": digest}
     body = {
         "schema_version": _BINDING_SCHEMA,
         "implementation_identity": source_package_identity(),
         "inputs": inputs,
         "runtime_package": dict(runtime_package),
+        "materialization": dict(materialization) if materialization is not None else None,
     }
     return {**body, "binding_sha256": stable_hash(body)}
 
@@ -95,6 +116,15 @@ def validate_workflow_runtime_binding(
     if not isinstance(inputs, Mapping) or set(inputs) != set(_INPUT_KEYS):
         raise ValueError("workflow runtime binding has an unsupported input manifest")
     root = Path(project_root).resolve()
+    materialization = binding.get("materialization")
+    if materialization is not None:
+        if not isinstance(materialization, Mapping):
+            raise ValueError("workflow materialization descriptor is invalid")
+        if materialization.get("runtime_package") != binding.get("runtime_package"):
+            raise ValueError("workflow materialized runtime package differs from the queued package pin")
+        from adaptive_mas.workflow_snapshot import verify_workflow_materialization
+
+        verify_workflow_materialization(materialization, project_root=root)
     for key in _INPUT_KEYS:
         descriptor = inputs[key]
         actual = Path(request_paths[key]).resolve()
