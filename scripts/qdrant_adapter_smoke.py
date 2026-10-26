@@ -149,6 +149,41 @@ def main() -> None:
             raise AssertionError("release-bound Qdrant application search returned no source evidence")
         completed_queries = query_requests
 
+        handle = adapter._collection_handle(release_id)
+        scroll = client.request(
+            "POST", f"/collections/{handle}/points/scroll",
+            {"limit": 1, "with_payload": True, "with_vector": True},
+        )
+        stored_points = scroll.get("result", {}).get("points", [])
+        if not stored_points:
+            raise AssertionError("Qdrant smoke collection did not retain its indexed point")
+        point = stored_points[0]
+        forged_vector = [0.0, 1.0]
+        forged_payload = dict(point["payload"])
+        forged_payload.pop("record_sha256")
+        forged_payload["vector_sha256"] = adapter._vector_sha256(forged_vector)
+        forged_payload["record_sha256"] = stable_hash(forged_payload)
+        if (
+            forged_payload["vector_sha256"] != adapter._vector_sha256(forged_vector)
+            or forged_payload["record_sha256"] != stable_hash({
+                key: value for key, value in forged_payload.items() if key != "record_sha256"
+            })
+        ):
+            raise AssertionError("Qdrant smoke tamper fixture is not internally self-consistent")
+        client.request(
+            "PUT", f"/collections/{handle}/points?wait=true",
+            {"points": [{"id": point["id"], "vector": forged_vector, "payload": forged_payload}]},
+        )
+        try:
+            adapter.search_with_control(plan, version_ids, None)
+        except QdrantBackendError:
+            pass
+        else:
+            raise AssertionError("Qdrant accepted a forged vector with matching payload hashes")
+        if query_requests != completed_queries + 1:
+            raise AssertionError("Qdrant tamper check did not exercise the application query path")
+        completed_queries = query_requests
+
         try:
             adapter.search_with_control(replace(plan, release_id=f"{release_id}-inactive"), version_ids, None)
         except QdrantBackendError:
@@ -182,6 +217,7 @@ def main() -> None:
             "release_id": release_id,
             "qdrant_receipt_ready": True,
             "release_bound_dense_search": True,
+            "coherent_vector_payload_tamper_rejected": True,
             "nonactive_release_rejected_before_query": True,
             "revoked_principal_rejected_before_query": True,
             "pre_availability_query_rejected_before_query": True,

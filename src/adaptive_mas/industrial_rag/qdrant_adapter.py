@@ -486,6 +486,19 @@ class QdrantVectorIndexAdapter:
             or collection.get("points_count") != len(release_blocks)
         ):
             raise QdrantBackendError("Qdrant collection differs from the active release metadata")
+        release_versions = self.store.release_versions(release_id)
+        index_data, release_points, _ = self._release_inputs(release_id, release_versions)
+        if (
+            index_data["index_manifest_sha256"] != spec["vector_index_manifest_sha256"]
+            or index_data["source_manifest_sha256"] != source_hash
+            or index_data["embedding_model"] != spec["embedding_model"]
+            or index_data["embedding_dimension"] != spec["embedding_dimension"]
+        ):
+            raise QdrantBackendError("verified local vectors differ from the immutable release point manifest")
+        expected_vector_hashes = {
+            str(point["id"]): str(point["vector_sha256"])
+            for point in release_points
+        }
         if control is not None:
             control.check()
         query_text = plan.query + (" " + " ".join(plan.aliases) if plan.aliases else "")
@@ -524,17 +537,23 @@ class QdrantVectorIndexAdapter:
             payload = dict(hit["payload"])
             key = (str(payload.get("version_id")), str(payload.get("block_id")))
             row = local_by_id.get(key)
-            if row is None or str(hit.get("id")) != self._point_id(*key):
+            point_id = str(hit.get("id"))
+            expected_vector_sha256 = expected_vector_hashes.get(point_id)
+            if (
+                row is None
+                or point_id != self._point_id(*key)
+                or expected_vector_sha256 is None
+            ):
                 raise QdrantBackendError("Qdrant result is outside the permitted release source")
             expected_static = self._block_payload(
                 row, release_id=release_id, source_manifest_sha256=source_hash,
                 index_manifest_sha256=str(spec["vector_index_manifest_sha256"]),
-                vector_sha256=str(payload.get("vector_sha256", "")),
+                vector_sha256=expected_vector_sha256,
             )
             vector = hit.get("vector")
             if (
                 payload != expected_static
-                or self._vector_sha256(vector) != payload["vector_sha256"]
+                or self._vector_sha256(vector) != expected_vector_sha256
                 or str(row["security_code"] or "") != plan.security_code
             ):
                 raise QdrantBackendError("Qdrant hit differs from its verified release source record")

@@ -47,6 +47,8 @@ def ingest_file(
     scratch_root: str | Path,
     pdf_backend: str = "pypdf",
     docling_artifacts_path: str | Path | None = None,
+    captured_at: datetime | str | None = None,
+    ingested_at: datetime | str | None = None,
 ) -> dict[str, object]:
     source = Path(source_path).resolve()
     if not source.is_file():
@@ -73,7 +75,8 @@ def ingest_file(
         timeout_seconds=330 if pdf_backend == "docling" else 45,
         parser_timeout_seconds=300,
     )
-    captured_at = _now()
+    capture_time = captured_at or _now()
+    ingest_time = ingested_at or _now()
     version_id = str(metadata.get("version_id") or f"v-{digest[:24]}")
     document = Document(
         document_id=str(metadata["document_id"]), title=str(metadata["title"]),
@@ -94,8 +97,8 @@ def ingest_file(
         rights_note=str(metadata["rights_note"]),
         published_at=metadata.get("published_at"),
         first_available_at=metadata.get("first_available_at"),
-        captured_at=captured_at,
-        ingested_at=_now(),
+        captured_at=capture_time,
+        ingested_at=ingest_time,
         valid_from=metadata.get("valid_from"),
         valid_to=metadata.get("valid_to"),
         revised_at=metadata.get("revised_at"),

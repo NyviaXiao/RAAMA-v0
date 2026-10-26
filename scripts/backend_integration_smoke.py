@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import replace
@@ -188,6 +189,7 @@ def main() -> None:
     parser.add_argument("--env-file", type=Path, required=True, help="Private KEY=VALUE file; never include it in Git or probe output")
     parser.add_argument("--project-name", required=True, help="Unique isolated Compose project name, for example raama-smoke-<random>")
     parser.add_argument("--fixture", type=Path, default=ROOT / "tests" / "fixtures" / "backend_smoke_document.v1.json")
+    parser.add_argument("--result-file", type=Path, help="Optional path for the sanitized synthetic probe result")
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,48}", args.project_name):
         raise ValueError("project-name must be a unique lowercase Compose-safe identifier")
@@ -207,6 +209,7 @@ def main() -> None:
         "rustfs": _published_port(args, "rustfs", 9000),
         "opensearch": _published_port(args, "opensearch", 9200),
         "qdrant": _published_port(args, "qdrant", 6333),
+        "temporal_rpc": _published_port(args, "temporal", 7233),
         "temporal_ui": _published_port(args, "temporal", 8233),
     }
     suffix = uuid.uuid4().hex[:12]
@@ -445,6 +448,37 @@ def main() -> None:
         raise AssertionError("release-bound OpenSearch/Qdrant application search returned no source evidence")
     successful_search_requests = opensearch_search_requests
     successful_qdrant_query_requests = qdrant_query_requests
+    qdrant_handle = qdrant_adapter._collection_handle(release_id)
+    qdrant_scroll = qdrant_client.request(
+        "POST", f"/collections/{qdrant_handle}/points/scroll",
+        {"limit": 1, "with_payload": True, "with_vector": True},
+    )
+    qdrant_points = qdrant_scroll.get("result", {}).get("points", [])
+    if not qdrant_points:
+        raise AssertionError("Qdrant release collection did not retain its indexed point")
+    qdrant_point = qdrant_points[0]
+    forged_vector = [0.0, 1.0]
+    forged_payload = dict(qdrant_point["payload"])
+    forged_payload.pop("record_sha256")
+    forged_payload["vector_sha256"] = qdrant_adapter._vector_sha256(forged_vector)
+    forged_payload["record_sha256"] = stable_hash(forged_payload)
+    if forged_payload["record_sha256"] != stable_hash({
+        key: value for key, value in forged_payload.items() if key != "record_sha256"
+    }):
+        raise AssertionError("Qdrant coherent-tamper fixture has an invalid record hash")
+    qdrant_client.request(
+        "PUT", f"/collections/{qdrant_handle}/points?wait=true",
+        {"points": [{"id": qdrant_point["id"], "vector": forged_vector, "payload": forged_payload}]},
+    )
+    try:
+        qdrant_adapter.search_with_control(query_plan, [version_id], None)
+    except QdrantBackendError:
+        pass
+    else:
+        raise AssertionError("Qdrant accepted a forged vector with self-consistent payload hashes")
+    if qdrant_query_requests != successful_qdrant_query_requests + 1:
+        raise AssertionError("Qdrant coherent-tamper probe did not reach the application query path")
+    successful_qdrant_query_requests = qdrant_query_requests
     try:
         opensearch_adapter.search_with_control(
             replace(query_plan, release_id=f"{release_id}-not-active"), [version_id], None,
@@ -531,7 +565,7 @@ def main() -> None:
         "completed_event_not_claimable_again": True,
         "reference_receipt_ready": True, "opensearch_receipt_ready": True, "qdrant_receipt_ready": True,
         "release_bound_bm25_search": True, "nonactive_release_rejected_before_search": True,
-        "release_bound_dense_search": True,
+        "release_bound_dense_search": True, "coherent_vector_payload_tamper_rejected": True,
         "revoked_principal_rejected_before_search": True,
         "pre_availability_query_rejected_before_search": True, "release_published": True,
     }
@@ -605,7 +639,31 @@ def main() -> None:
     if "SERVING" not in temporal_health.stdout.upper():
         raise AssertionError("Temporal development service did not report SERVING")
     output["temporal_dev_ui_and_rpc"] = {"ui_http_status": status, "rpc_health": "SERVING"}
-    print(json.dumps(output, ensure_ascii=False, sort_keys=True, indent=2))
+    temporary_root = ROOT / ".tmp"
+    temporary_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"raama-temporal-{suffix}-", dir=temporary_root) as scratch:
+        recovery = subprocess.run(
+            [
+                sys.executable, str(ROOT / "scripts" / "temporal_ingest_recovery_smoke.py"),
+                "--address", f"127.0.0.1:{ports['temporal_rpc']}",
+                "--state-dir", str(Path(scratch) / "workflow"),
+            ],
+            cwd=ROOT, capture_output=True, text=True, timeout=90,
+        )
+    if recovery.returncode != 0:
+        raise RuntimeError(
+            "Temporal application recovery probe failed: "
+            + (recovery.stderr or recovery.stdout)[-3000:]
+        )
+    temporal_recovery = json.loads(recovery.stdout)
+    if temporal_recovery.get("worker_crashed_after_activity_side_effect") is not True:
+        raise AssertionError("Temporal application workflow did not prove worker recovery")
+    output["temporal_ingest_worker_recovery"] = temporal_recovery
+    rendered = json.dumps(output, ensure_ascii=False, sort_keys=True, indent=2)
+    if args.result_file is not None:
+        args.result_file.parent.mkdir(parents=True, exist_ok=True)
+        args.result_file.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
 
 
 if __name__ == "__main__":
