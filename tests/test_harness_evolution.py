@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from types import SimpleNamespace
 
@@ -40,6 +40,7 @@ from adaptive_mas.harness_evolution import (
     build_retrospective_cases,
     _public_tool_projection,
     _paired_case_deltas,
+    _pin_industrial_rag_runtime,
     _selection_summary,
     _reflection_safe_info,
     score_research_result,
@@ -48,6 +49,20 @@ from adaptive_mas.harness_evolution import (
     run_gepa_evolution,
 )
 from adaptive_mas.data.research import MembershipSnapshot, ResearchData
+from adaptive_mas.industrial_rag.models import (
+    Block,
+    CorpusReleaseSpec,
+    Document,
+    DocumentBundle,
+    DocumentVersion,
+    FinancialFact,
+    Section,
+    Span,
+)
+from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore
+from adaptive_mas.industrial_rag.repository import IndustrialRagStore
+from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
+from adaptive_mas.research_provenance import stable_hash
 
 
 def _synthetic_result() -> dict[str, object]:
@@ -452,8 +467,11 @@ def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp
             required_observations=[],
         ))
     candidate = seed_candidate()
+    rag_revisions = {"permission": 0, "continuation": 0}
     class VersionedReranker:
-        cache_identity = {"implementation": "fixture-reranker", "version": "v1"}
+        cache_identity = {
+            "implementation": "fixture-reranker", "version": "v1", "configuration": {"mode": "identity"},
+        }
 
         def __call__(self, plan, evidence):
             return evidence
@@ -462,6 +480,8 @@ def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp
         store=SimpleNamespace(
             active_release_id=lambda: "release-fixture",
             release_spec=lambda release_id: ({"source_manifest_sha256": "a" * 64}, "b" * 64),
+            permission_revision=lambda: rag_revisions["permission"],
+            continuation_revision=lambda: rag_revisions["continuation"],
         ),
         channel_adapters={},
         reranker=VersionedReranker(),
@@ -496,9 +516,10 @@ def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp
 
     run_dir = tmp_path / "module_ablations" / "module-12-pair"
     trace = json.loads((run_dir / "evaluation_action_traces.json").read_text(encoding="utf-8"))
-    assert result["status"] == "complete"
-    assert trace["checkpoint_status"] == "complete"
+    assert result["status"] == "incomplete_no_rag_execution"
+    assert trace["checkpoint_status"] == "incomplete_no_rag_execution"
     assert trace["evaluation_count"] == 8
+    assert all(row["status"] == "incomplete_no_rag_execution" for row in trace["evaluations"])
     assert [row[1] for row in evaluation_calls] == [None, 12] * 4
     assert all(row[2] == "release-fixture" for row in evaluation_calls)
     assert result["runtime_intervention"]["research_ablation_id"] == 12
@@ -523,6 +544,221 @@ def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp
             run_id="must-not-start",
             industrial_rag_service=rag_service,
         )
+
+    def change_permission_revision_during_evaluation(*args, **kwargs):
+        result = fake_evaluate(*args, **kwargs)
+        rag_revisions["permission"] += 1
+        return result
+
+    monkeypatch.setattr(
+        "adaptive_mas.harness_evolution.evaluate_candidate",
+        change_permission_revision_during_evaluation,
+    )
+    with pytest.raises(RuntimeError, match="runtime or permission state changed"):
+        run_paired_module_ablation(
+            12,
+            cases,
+            candidate=candidate,
+            research=ResearchData([], [], [], [], []),
+            client=SimpleNamespace(model="fixture-model", endpoint="https://fixture.invalid"),
+            budget=CallBudget(max_calls=160),
+            config={"fixture": True},
+            output_root=tmp_path,
+            run_id="permission-revision-drift",
+            industrial_rag_service=rag_service,
+        )
+
+
+def test_rag_runtime_pin_requires_versioned_components_and_captures_review_revisions() -> None:
+    class Component:
+        cache_identity = {
+            "implementation": "fixture-dense",
+            "revision": "model-r4",
+            "configuration": {"index": "local-v1"},
+        }
+
+        def __call__(self, plan, version_ids):
+            return []
+
+    store = SimpleNamespace(
+        active_release_id=lambda: "release-fixture",
+        release_spec=lambda release_id: ({"source_manifest_sha256": "a" * 64}, "b" * 64),
+        permission_revision=lambda: 4,
+        continuation_revision=lambda: 2,
+    )
+    service = SimpleNamespace(store=store, channel_adapters={"dense": Component()}, reranker=None)
+
+    pinned = _pin_industrial_rag_runtime(service, principal_id="local-public", release_id=None)
+    assert pinned["permission_revision"] == 4
+    assert pinned["continuation_revision"] == 2
+    assert pinned["runtime_components"]["dense"]["revision"] == "model-r4"
+
+    service.channel_adapters["dense"].cache_identity = {
+        "implementation": "fixture-dense", "revision": "model-r4", "configuration": {},
+    }
+    with pytest.raises(ValueError, match="nonempty configuration identity"):
+        _pin_industrial_rag_runtime(service, principal_id="local-public", release_id=None)
+    service.channel_adapters["dense"].cache_identity = {
+        "implementation": "fixture-dense", "revision": "model-r4", "configuration": {"scale": float("nan")},
+    }
+    with pytest.raises(ValueError, match="finite JSON"):
+        _pin_industrial_rag_runtime(service, principal_id="local-public", release_id=None)
+
+
+def _module_ablation_rag_service(tmp_path):
+    payload = "2024年度营业收入 337488 人民币百万元".encode("utf-8")
+    captured_at = datetime(2025, 3, 1, 10, tzinfo=timezone.utc)
+    first_available_at = captured_at - timedelta(hours=2)
+    version_id = "module-ablation-version"
+    document = Document(
+        document_id="module-ablation-document",
+        title="2024年度财务报告摘要",
+        document_type="annual_report_summary",
+        security_code="600036",
+        entity_name="招商银行股份有限公司",
+        report_period="2024",
+        accounting_basis="consolidated",
+    )
+    version = DocumentVersion(
+        version_id=version_id,
+        source_id="module-ablation-source",
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+        source_url="https://example.invalid/fixture.pdf",
+        rights_note="Synthetic local test fixture.",
+        first_available_at=first_available_at,
+        published_at=first_available_at,
+        captured_at=captured_at,
+        ingested_at=captured_at + timedelta(minutes=1),
+        time_basis="strict_forward",
+        parser_name="fixture-parser",
+        parser_version="fixture-v1",
+        parser_confidence=1.0,
+    )
+    text = payload.decode("utf-8")
+    section = Section(f"{version_id}-section", version_id, "经营情况", 1, start_page=1, end_page=1)
+    span = Span(f"{version_id}-span", version_id, 1, 0, len(text), text)
+    block = Block(
+        f"{version_id}-block", version_id, text,
+        section_id=f"{version_id}-section", page_number=1,
+        char_start=0, char_end=len(text), span_id=f"{version_id}-span",
+    )
+    fact = FinancialFact(
+        fact_id=f"{version_id}-fact", version_id=version_id,
+        security_code="600036", entity_name="招商银行股份有限公司",
+        metric="营业收入", raw_value="337488", normalized_value="337488",
+        unit="人民币百万元", multiplier="1", currency="CNY",
+        report_period="2024", consolidation="consolidated",
+        span_ids=(f"{version_id}-span",), parser_version="fixture-v1",
+        confidence=1.0, review_status="reviewed",
+    )
+    bundle = DocumentBundle(
+        document, version, payload, (section,), (span,), (block,), facts=(fact,),
+        read_principals=("local-public",),
+    )
+    store = IndustrialRagStore(
+        tmp_path / "rag.sqlite3",
+        LocalContentAddressedStore(tmp_path / "objects"),
+    )
+    store.ingest_bundle(bundle)
+    while store.consume_outbox_once(
+        "sqlite-reference-indexer-v1",
+        lambda event_key, event_type, event_payload: {
+            "handler_key": event_key,
+            "event_type": event_type,
+            "verified_content_sha256": hashlib.sha256(
+                store.object_store.get(str(event_payload["content_sha256"]))
+            ).hexdigest(),
+        },
+    ) is not None:
+        pass
+    release_id = "module-ablation-release"
+    source_hash = stable_hash(store.source_manifest([version_id]))
+    text_hash = str(store.preview_reference_index_manifest(release_id, [version_id])["index_manifest_sha256"])
+    vector_hash = stable_hash({"release_id": release_id, "backend": "qdrant", "status": "unavailable", "points": []})
+    store.create_release(CorpusReleaseSpec(
+        release_id=release_id,
+        source_manifest_sha256=source_hash,
+        parser_version="fixture-parser-v1",
+        chunker_version="fixture-chunker-v1",
+        embedding_model="none",
+        embedding_dimension=None,
+        required_backends=("sqlite_reference",),
+        text_index_manifest_sha256=text_hash,
+        vector_index_manifest_sha256=vector_hash,
+    ), [version_id])
+    receipt = store.build_reference_index_receipt(release_id)
+    store.mark_backend_ready(receipt, store.verify_reference_index)
+    store.publish_release(release_id, actor_id="fixture-operator", reason="isolated local regression test")
+    return IndustrialRagService(store), release_id
+
+
+def test_paired_ablation_requires_real_local_rag_trace_and_records_fusion_difference(tmp_path, monkeypatch) -> None:
+    cases = {name: [] for name in ("selection", "frozen_evaluation")}
+    for index, split in enumerate(("selection", "selection", "frozen_evaluation", "frozen_evaluation")):
+        cases[split].append(HarnessCase(
+            date(2026, 5, 1 + index),
+            {"data_mode": "retrospective_fixture", "case_index": index},
+            split,
+            required_observations=[],
+        ))
+    rag_service, release_id = _module_ablation_rag_service(tmp_path)
+    candidate = seed_candidate()
+    policy = parse_research_policy(candidate["research_policy_json"])
+    policy["channels"] = ["structured_facts", "bm25"]
+    policy["reranker_profile"] = "disabled"
+    candidate["research_policy_json"] = json.dumps(policy, ensure_ascii=False, sort_keys=True)
+
+    def local_rag_evaluate(task_candidate, case, *, trace_sink, research_ablation_id, **kwargs):
+        decision_time = datetime.combine(case.as_of, datetime.min.time()).replace(
+            hour=16, tzinfo=timezone(timedelta(hours=8)),
+        )
+        _, handlers, _ = _fundamental_handlers(
+            {},
+            decision_time,
+            industrial_rag_service=rag_service,
+            industrial_rag_principal_id="local-public",
+            industrial_rag_release_id=release_id,
+            research_policy_json=task_candidate["research_policy_json"],
+            research_ablation_id=research_ablation_id,
+        )
+        tool_result = handlers["search_indexed_financial_documents"]({
+            "question": "2024年度营业收入是多少",
+            "symbols": ["600036"],
+            "report_periods": ["2024"],
+        })
+        trace_sink.append({"agents": {"fundamental": {"tool_trace": [{
+            "tool": "search_indexed_financial_documents",
+            "result": tool_result,
+        }]}}})
+        metrics = {"fact_accuracy": 1.0, "citation_precision": 1.0, "score": 1.0}
+        usage = {"logical_estimated_cost_cny": 0.0, "provider_call_count": 0}
+        return 1.0, {"quality_metrics": metrics, "task_model_usage": usage}
+
+    monkeypatch.setattr("adaptive_mas.harness_evolution.evaluate_candidate", local_rag_evaluate)
+    result = run_paired_module_ablation(
+        11,
+        cases,
+        candidate=candidate,
+        research=ResearchData([], [], [], [], []),
+        client=SimpleNamespace(model="fixture-model", endpoint="https://fixture.invalid"),
+        budget=CallBudget(max_calls=160),
+        config={"fixture": True},
+        output_root=tmp_path,
+        run_id="module-11-real-rag-pair",
+        industrial_rag_service=rag_service,
+        industrial_rag_release_id=release_id,
+    )
+
+    trace = json.loads((tmp_path / "module_ablations" / "module-11-real-rag-pair" / "evaluation_action_traces.json").read_text(encoding="utf-8"))
+    assert result["status"] == "complete"
+    assert all(row["rag_execution_observed"] for row in trace["evaluations"])
+    ablated_rows = [row for row in trace["evaluations"] if row["label"] == "ablated"]
+    assert all(row["rag_intervention_observed"] for row in ablated_rows)
+    first_pair = [row for row in trace["evaluations"] if row["as_of"] == "2026-05-01"]
+    baseline_step = first_pair[0]["rag_operation_evidence"]["searches"][0]["steps"][0]
+    ablated_step = first_pair[1]["rag_operation_evidence"]["searches"][0]["steps"][0]
+    assert baseline_step["fusion"]["method"] == "reciprocal_rank_fusion"
+    assert ablated_step["fusion"]["method"] == "fusion_disabled_first_available_channel"
 
 
 def test_public_tool_projection_keeps_retrospective_capture_audit_fields() -> None:

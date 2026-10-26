@@ -101,16 +101,19 @@ def _pin_industrial_rag_runtime(
     for name, component in sorted(service.channel_adapters.items()):
         identity = getattr(component, "cache_identity", None)
         identity = identity() if callable(identity) else identity
-        if not isinstance(identity, Mapping):
-            raise ValueError(f"industrial RAG channel {name} needs a versioned cache_identity")
-        components[name] = dict(identity)
+        components[name] = _validated_rag_component_identity(name, identity)
     reranker = service.reranker
     if reranker is not None:
         identity = getattr(reranker, "cache_identity", None)
         identity = identity() if callable(identity) else identity
-        if not isinstance(identity, Mapping):
-            raise ValueError("industrial RAG reranker needs a versioned cache_identity")
-        components["reranker"] = dict(identity)
+        components["reranker"] = _validated_rag_component_identity("reranker", identity)
+    permission_revision = service.store.permission_revision()
+    continuation_revision = service.store.continuation_revision()
+    if (
+        isinstance(permission_revision, bool) or not isinstance(permission_revision, int) or permission_revision < 0
+        or isinstance(continuation_revision, bool) or not isinstance(continuation_revision, int) or continuation_revision < 0
+    ):
+        raise ValueError("industrial RAG permission and continuation revisions must be nonnegative integers")
     return {
         "status": "pinned",
         "release_id": pinned_release_id,
@@ -119,8 +122,48 @@ def _pin_industrial_rag_runtime(
         "source_manifest_sha256": spec.get("source_manifest_sha256"),
         "principal_id": principal_id,
         "time_mode": "strict_forward",
+        "permission_revision": permission_revision,
+        "continuation_revision": continuation_revision,
         "runtime_components": components,
     }
+
+
+def _validated_rag_component_identity(name: str, identity: object) -> dict[str, object]:
+    if not isinstance(identity, Mapping):
+        raise ValueError(f"industrial RAG component {name} needs a versioned cache_identity")
+    serialized = dict(identity)
+    implementation = serialized.get("implementation")
+    version = serialized.get("version") or serialized.get("revision")
+    configuration = serialized.get("configuration")
+    if (
+        not isinstance(implementation, str) or not implementation.strip()
+        or not isinstance(version, str) or not version.strip()
+        or not isinstance(configuration, (Mapping, str))
+        or (isinstance(configuration, Mapping) and not configuration)
+        or (isinstance(configuration, str) and not configuration.strip())
+    ):
+        raise ValueError(f"industrial RAG component {name} needs implementation, version, and nonempty configuration identity")
+    try:
+        json.dumps(serialized, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"industrial RAG component {name} cache_identity must be finite JSON") from exc
+    return serialized
+
+
+def _assert_pinned_industrial_rag_runtime(
+    service: IndustrialRagService,
+    *,
+    principal_id: str,
+    release_id: str,
+    expected_identity: Mapping[str, object],
+) -> None:
+    current = _pin_industrial_rag_runtime(
+        service,
+        principal_id=principal_id,
+        release_id=release_id,
+    )
+    if _stable_hash(current) != _stable_hash(dict(expected_identity)):
+        raise RuntimeError("industrial RAG runtime or permission state changed after the evaluation package was pinned")
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -1628,6 +1671,114 @@ def _paired_case_deltas(
     }
 
 
+def _rag_operation_evidence(
+    actions: object,
+    module_id: int,
+    *,
+    require_intervention: bool,
+) -> dict[str, object]:
+    """Summarize executed local RAG searches and confirm the selected runtime switch."""
+    pending = [actions]
+    search_summaries: list[dict[str, object]] = []
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Mapping):
+            if current.get("tool") == "search_indexed_financial_documents":
+                result = current.get("result")
+                if isinstance(result, Mapping):
+                    policy = result.get("research_policy")
+                    coverage = result.get("coverage")
+                    if (
+                        isinstance(policy, Mapping)
+                        and policy.get("evaluation_ablation_id") == (module_id if require_intervention else None)
+                        and isinstance(coverage, list)
+                    ):
+                        for query in coverage:
+                            if not isinstance(query, Mapping):
+                                continue
+                            planner = query.get("planner")
+                            if not isinstance(planner, Mapping):
+                                continue
+                            steps = planner.get("steps")
+                            if not isinstance(steps, list):
+                                continue
+                            executed_steps = [
+                                dict(step) for step in steps
+                                if isinstance(step, Mapping)
+                                and isinstance(step.get("query_sha256"), str)
+                                and isinstance(step.get("result_status"), str)
+                                and isinstance(step.get("candidate_count"), int)
+                                and not isinstance(step.get("candidate_count"), bool)
+                            ]
+                            if executed_steps:
+                                search_summaries.append({
+                                    "planner": dict(planner),
+                                    "research_policy": dict(policy),
+                                    "steps": executed_steps,
+                                })
+            pending.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            pending.extend(current)
+
+    def intervention_observed(summary: Mapping[str, object]) -> bool:
+        planner = summary["planner"]
+        assert isinstance(planner, Mapping)
+        policy = summary["research_policy"]
+        assert isinstance(policy, Mapping)
+        steps = summary["steps"]
+        assert isinstance(steps, list)
+        if module_id == 2:
+            return planner.get("include_continuation_context") is False
+        if module_id == 3:
+            return planner.get("row_group_chunking") is False
+        if module_id == 7:
+            return planner.get("query_rewrite_enabled") is False
+        if module_id == 8:
+            return planner.get("multi_hop_enabled") is False
+        if module_id == 9:
+            channels = planner.get("channels")
+            return isinstance(channels, list) and "bm25" not in channels
+        if module_id == 10:
+            channels = planner.get("channels")
+            return isinstance(channels, list) and "dense" not in channels
+        if module_id == 11:
+            return (
+                planner.get("fusion_strategy") == "first_available_channel"
+                and any(
+                    isinstance(step, Mapping)
+                    and isinstance(step.get("fusion"), Mapping)
+                    and step["fusion"].get("method") == "fusion_disabled_first_available_channel"
+                    for step in steps
+                )
+            )
+        if module_id == 12:
+            return all(
+                isinstance(step, Mapping)
+                and isinstance(step.get("reranking"), Mapping)
+                and step["reranking"].get("status") == "disabled"
+                for step in steps
+            )
+        if module_id == 13:
+            return planner.get("table_expansion_limit") == 0
+        if module_id == 14:
+            channels = planner.get("channels")
+            return isinstance(channels, list) and "structured_facts" not in channels
+        if module_id == 15:
+            return policy.get("context_char_limit") == 16000
+        if module_id == 16:
+            return planner.get("evidence_limit") == 64
+        return False
+
+    return {
+        "search_count": len(search_summaries),
+        "searches": search_summaries,
+        "intervention_observed": (
+            any(intervention_observed(row) for row in search_summaries)
+            if require_intervention else None
+        ),
+    }
+
+
 def _quality_gates_hold(candidate: dict[str, object], baseline: dict[str, object]) -> bool:
     for metric in (
         "fact_accuracy", "required_fact_coverage", "citation_precision",
@@ -2536,6 +2687,12 @@ def run_paired_module_ablation(
         for label, task_candidate, candidate_sha256 in candidates:
             trace_sink: list[dict[str, object]] = []
             try:
+                _assert_pinned_industrial_rag_runtime(
+                    industrial_rag_service,
+                    principal_id=industrial_rag_principal_id,
+                    release_id=pinned_release_id,
+                    expected_identity=rag_runtime_identity,
+                )
                 score, info = evaluate_candidate(
                     task_candidate,
                     case,
@@ -2552,6 +2709,12 @@ def run_paired_module_ablation(
                     research_ablation_id=module_id if label == "ablated" else None,
                     industrial_rag_runtime_identity=rag_runtime_identity,
                 )
+                _assert_pinned_industrial_rag_runtime(
+                    industrial_rag_service,
+                    principal_id=industrial_rag_principal_id,
+                    release_id=pinned_release_id,
+                    expected_identity=rag_runtime_identity,
+                )
             except Exception as exc:
                 evaluations.append({
                     "split": case.split,
@@ -2565,6 +2728,19 @@ def run_paired_module_ablation(
                 })
                 checkpoint("failed")
                 raise
+            rag_evidence = _rag_operation_evidence(
+                trace_sink, module_id, require_intervention=(label == "ablated"),
+            )
+            rag_execution_observed = int(rag_evidence["search_count"]) > 0
+            rag_intervention_observed = (
+                rag_execution_observed and rag_evidence["intervention_observed"] is True
+                if label == "ablated" else None
+            )
+            evaluation_status = (
+                "completed"
+                if rag_execution_observed and (label == "baseline" or rag_intervention_observed is True)
+                else "incomplete_no_rag_execution"
+            )
             evaluation = {
                 "split": case.split,
                 "label": label,
@@ -2574,6 +2750,10 @@ def run_paired_module_ablation(
                 "score": score,
                 "quality_metrics": info["quality_metrics"],
                 "task_model_usage": info["task_model_usage"],
+                "status": evaluation_status,
+                "rag_execution_observed": rag_execution_observed,
+                "rag_intervention_observed": rag_intervention_observed,
+                "rag_operation_evidence": rag_evidence,
                 "actions": trace_sink,
             }
             evaluations.append(evaluation)
@@ -2585,6 +2765,17 @@ def run_paired_module_ablation(
                 "task_model_usage": info["task_model_usage"],
             })
 
+    _assert_pinned_industrial_rag_runtime(
+        industrial_rag_service,
+        principal_id=industrial_rag_principal_id,
+        release_id=pinned_release_id,
+        expected_identity=rag_runtime_identity,
+    )
+    run_status = (
+        "complete"
+        if all(row.get("status") == "completed" for row in evaluations)
+        else "incomplete_no_rag_execution"
+    )
     paired = {
         split: _paired_case_deltas(rows[split]["baseline"], rows[split]["ablated"])
         for split in ("selection", "frozen_evaluation")
@@ -2592,7 +2783,7 @@ def run_paired_module_ablation(
     logical_calls = budget.logical_calls[logical_start:]
     report = {
         "schema_version": "adaptive-mas.gepa-module-ablation-result.v1",
-        "status": "complete",
+        "status": run_status,
         "run_id": run_id,
         "module_id": module_id,
         "module": module_row["module"],
@@ -2602,6 +2793,10 @@ def run_paired_module_ablation(
         "changed_policy_fields": module_row["changed_policy_fields"],
         "runtime_intervention": module_row.get("runtime_intervention"),
         "industrial_rag_runtime": rag_runtime_identity,
+        "incomplete_reason": (
+            None if run_status == "complete"
+            else "one or more paired evaluations lacked an executed local RAG search or the declared runtime intervention"
+        ),
         "paired_evaluation": paired,
         "failure_attribution_scope": "observed per-metric and cost deltas on fixed cases; not causal proof of module effect",
         "provider_call_count": sum(row.get("status") in {"started", "completed"} for row in budget.calls[call_start:]),
@@ -2610,7 +2805,7 @@ def run_paired_module_ablation(
         "case_inputs_file": "case_inputs.json",
         "action_trace_file": "evaluation_action_traces.json",
     }
-    checkpoint("complete")
+    checkpoint(run_status)
     _write_json(run_dir / "paired_evaluation.json", paired)
     _write_json(run_dir / "result.json", report)
     return report

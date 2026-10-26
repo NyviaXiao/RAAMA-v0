@@ -1213,11 +1213,29 @@ def test_market_state_and_regime_gate_use_matured_state_records():
     assert abs(sum(weights.values()) - 1.0) < 1e-9
 
 
-def test_research_source_does_not_reference_local_scoring_file():
-    project_root = Path(__file__).parents[1]
-    production_sources = (project_root / "src").rglob("*.py")
+def test_research_loader_and_workflow_binding_never_open_the_holdout_file(tmp_path, monkeypatch):
+    from adaptive_mas.data.market_data import load_training_bars
+    from adaptive_mas.runtime_binding import _path_digest
 
-    assert all("test.csv" not in path.read_text(encoding="utf-8") for path in production_sources)
+    training_dir = tmp_path / "training"
+    training_dir.mkdir()
+    (training_dir / "train.csv").write_text(
+        "股票代码,日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌额,换手率,涨跌幅\n"
+        "600000,2026-01-05,10,10,11,9,100,1000,20,0,1,0\n",
+        encoding="utf-8",
+    )
+    holdout = training_dir / "test.csv"
+    holdout.write_text("intentionally unread", encoding="utf-8")
+    original_open = Path.open
+
+    def reject_holdout_open(path, *args, **kwargs):
+        if path.name.lower() == "test.csv":
+            raise AssertionError("holdout file must never be opened")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_holdout_open)
+    assert load_training_bars(training_dir)[0]["symbol"] == "600000"
+    assert _path_digest(training_dir)[0] == "directory"
 
 
 def test_paired_block_bootstrap_is_deterministic_for_identical_series():

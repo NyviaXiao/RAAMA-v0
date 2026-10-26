@@ -869,6 +869,10 @@ class IndustrialRagService:
                 "result_status": result.get("status"),
                 "candidate_count": len(result.get("retrieved", [])),
                 "channels": result.get("channels", {}),
+                "fusion": result.get("fusion"),
+                "reranking": result.get("reranking"),
+                "permission_revision": result.get("permission_revision"),
+                "continuation_revision": result.get("continuation_revision"),
             })
             for raw_item in result.get("retrieved", []):
                 item = dict(raw_item)
@@ -1209,6 +1213,7 @@ class IndustrialRagService:
                 "implementation": "fixed_metric_alias_period_templates",
                 "max_searches": max_searches,
                 "evidence_limit": evidence_limit,
+                "table_expansion_limit": table_expansion_limit,
                 "rrf_rank_constant": rrf_rank_constant,
                 "reranker_profile": "configured" if use_reranker else "disabled",
                 "query_rewrite_enabled": query_rewrite_enabled,

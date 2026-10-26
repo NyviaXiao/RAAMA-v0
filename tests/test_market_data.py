@@ -3,6 +3,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from adaptive_mas.data import load_training_bars, normalize_stock_code
 
@@ -89,14 +90,15 @@ class MarketDataBoundaryTests(unittest.TestCase):
     def test_research_loader_reads_training_file_only(self):
         self.write_training_csv([VALID_ROW])
         (self.data_dir / "test.csv").write_text("invalid scoring file", encoding="utf-8")
-        self.assertEqual(load_training_bars(self.data_dir)[0]["symbol"], "600000")
+        original_open = Path.open
 
-        production_dir = Path(__file__).parents[1] / "src" / "adaptive_mas"
-        production_sources = list(production_dir.rglob("*.py"))
-        self.assertTrue(production_sources)
-        self.assertTrue(
-            all("test.csv" not in source.read_text(encoding="utf-8") for source in production_sources)
-        )
+        def reject_holdout_open(path, *args, **kwargs):
+            if path.name.lower() == "test.csv":
+                raise AssertionError("holdout file must never be opened")
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", reject_holdout_open):
+            self.assertEqual(load_training_bars(self.data_dir)[0]["symbol"], "600000")
 
 
 if __name__ == "__main__":
