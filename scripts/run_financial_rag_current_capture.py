@@ -61,6 +61,7 @@ DOCLING_ASSETS = SUPERVISION / "docling-models"
 QWEN_ASSETS = SUPERVISION / "qwen-models"
 OUTPUT_ROOT = ROOT / ".tmp" / "industrial_rag_current_capture_20261026"
 QUERY_TEXT = "2024年度营业收入是多少，较2023年度增长多少？"
+CAPTURE_PRINCIPAL_ID = "local-public"
 
 
 class RunIdentityError(RuntimeError):
@@ -239,6 +240,11 @@ def _build_run_identity(
             "version_ids": sorted(store.release_versions(run_id)),
             "active_release_id": release_summary["active_release_id"],
         },
+        "access_scope": {
+            "principal_id": CAPTURE_PRINCIPAL_ID,
+            "permission_revision": store.permission_revision(),
+            "continuation_revision": store.continuation_revision(),
+        },
         "indexed_financial_facts": _indexed_fact_identity(store, source_records),
         "docling_asset_manifest_sha256": _sha256(docling_manifest_path.read_bytes()),
         "model": {
@@ -285,6 +291,7 @@ def _case_identity_fields(
     *,
     as_of: datetime,
     retrieval_policy_sha256: str,
+    access_scope: Mapping[str, object],
 ) -> dict[str, object]:
     return {
         "run_identity_sha256": run_identity_sha256,
@@ -298,6 +305,9 @@ def _case_identity_fields(
         "as_of": as_of.astimezone(timezone.utc).isoformat(),
         "time_mode": "strict_forward",
         "retrieval_policy_sha256": retrieval_policy_sha256,
+        "principal_id": access_scope["principal_id"],
+        "permission_revision": access_scope["permission_revision"],
+        "continuation_revision": access_scope["continuation_revision"],
     }
 
 
@@ -708,7 +718,7 @@ def _capture_source(
         tables=records["tables"],
         cells=records["cells"],
         facts=tuple(facts),
-        read_principals=("local-public", "local-supervision"),
+        read_principals=(CAPTURE_PRINCIPAL_ID, "local-supervision"),
     )
     ingest = store.ingest_bundle(bundle)
     review_record = {
@@ -1108,7 +1118,7 @@ def _run_agent_chain(
         None,
         decision_time,
         industrial_rag_service=service,
-        industrial_rag_principal_id="local-public",
+        industrial_rag_principal_id=CAPTURE_PRINCIPAL_ID,
         industrial_rag_release_id=release_id,
         research_policy_json=_policy_json(use_qwen=use_qwen),
         research_ablation_id=research_ablation_id,
@@ -1322,7 +1332,7 @@ def _run_rag_intervention(
         None,
         decision_time,
         industrial_rag_service=service,
-        industrial_rag_principal_id="local-public",
+        industrial_rag_principal_id=CAPTURE_PRINCIPAL_ID,
         industrial_rag_release_id=release_id,
         research_policy_json=_policy_json(use_qwen=use_qwen),
         research_ablation_id=research_ablation_id,
@@ -1612,12 +1622,12 @@ def main() -> None:
             actor_id="local-supervision",
             reason="Current-capture multi-issuer strict-forward development evidence",
         )
-    decision_time = as_of.astimezone(SHANGHAI)
     release_id = store.active_release_id()
     if release_id != run_id:
         raise RuntimeError("new current-capture release is not the active release")
     if as_of is None:
         as_of = datetime.now(timezone.utc)
+    decision_time = as_of.astimezone(SHANGHAI)
 
     source_manifest_path = (ROOT / args.source_manifest).resolve() if not args.source_manifest.is_absolute() else args.source_manifest.resolve()
     docling_manifest_path = args.docling_assets / ASSET_MANIFEST
@@ -1671,6 +1681,7 @@ def main() -> None:
             source_by_case_id[case_id],
             as_of=as_of,
             retrieval_policy_sha256=retrieval_policy_sha256,
+            access_scope=run_identity["access_scope"],
         )
         for case_id, spec in spec_by_case_id.items()
     }

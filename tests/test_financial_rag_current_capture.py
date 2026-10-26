@@ -22,6 +22,9 @@ def _case_identity() -> dict[str, object]:
         "as_of": "2026-10-26T00:00:00+00:00",
         "time_mode": "strict_forward",
         "retrieval_policy_sha256": "policy-hash",
+        "principal_id": "local-public",
+        "permission_revision": 3,
+        "continuation_revision": 7,
     }
 
 
@@ -50,6 +53,7 @@ def test_run_identity_rejects_changes_to_mode_policy_time_code_source_or_release
         "implementation_sha256": {"harness.py": "code-a"},
         "source_records": [{"source_id": "source-a", "source_sha256": "source-hash-a"}],
         "release": {"release_id": "capture-1", "spec_sha256": "release-a"},
+        "access_scope": {"principal_id": "local-public", "permission_revision": 3, "continuation_revision": 7},
     }
 
     for key, changed_value in (
@@ -59,11 +63,92 @@ def test_run_identity_rejects_changes_to_mode_policy_time_code_source_or_release
         ("implementation_sha256", {"harness.py": "code-b"}),
         ("source_records", [{"source_id": "source-a", "source_sha256": "source-hash-b"}]),
         ("release", {"release_id": "capture-1", "spec_sha256": "release-b"}),
+        ("access_scope", {"principal_id": "local-public", "permission_revision": 4, "continuation_revision": 7}),
     ):
         current = dict(saved)
         current[key] = changed_value
         with pytest.raises(capture.RunIdentityError, match="run identity mismatch"):
             capture._verify_run_identity(saved, current)
+
+
+def test_run_identity_and_each_case_bind_live_permission_and_continuation_revisions(tmp_path) -> None:
+    class Store:
+        permission = 3
+        continuation = 7
+
+        def release_summaries(self):
+            return {"active_release_id": "capture-1", "releases": [{"release_id": "capture-1", "status": "published"}]}
+
+        def release_spec(self, _release_id):
+            return {}, "release-spec-hash"
+
+        def release_versions(self, _release_id):
+            return ["version-1"]
+
+        def permission_revision(self):
+            return self.permission
+
+        def continuation_revision(self):
+            return self.continuation
+
+        def read_facts(self, _version_ids):
+            return []
+
+    source_path = tmp_path / "source.pdf"
+    source_path.write_bytes(b"reviewed source")
+    manifest_path = tmp_path / "source-manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    docling_path = tmp_path / "docling-assets.json"
+    docling_path.write_text("{}", encoding="utf-8")
+    qwen_path = tmp_path / "qwen-assets.json"
+    qwen_path.write_text("{}", encoding="utf-8")
+    sources = [{
+        "case_id": "case-1",
+        "source_id": "source-1",
+        "source_sha256": capture._sha256(source_path.read_bytes()),
+        "version_id": "version-1",
+        "first_available_at_used_for_current_capture": "2026-10-26T00:00:00+00:00",
+        "source_path": str(source_path),
+    }]
+    store = Store()
+
+    def build_identity():
+        return capture._build_run_identity(
+            run_id="capture-1",
+            as_of=datetime(2026, 10, 26, tzinfo=timezone.utc),
+            use_qwen=False,
+            source_manifest_path=manifest_path,
+            docling_manifest_path=docling_path,
+            qwen_manifest_path=qwen_path,
+            source_records=sources,
+            store=store,
+        )
+
+    saved = build_identity()
+    assert saved["access_scope"] == {
+        "principal_id": "local-public",
+        "permission_revision": 3,
+        "continuation_revision": 7,
+    }
+    case = capture._case_identity_fields(
+        "run-hash",
+        {"case_id": "case-1", "security_code": "600036"},
+        sources[0],
+        as_of=datetime(2026, 10, 26, tzinfo=timezone.utc),
+        retrieval_policy_sha256="policy-hash",
+        access_scope=saved["access_scope"],
+    )
+    assert case["principal_id"] == "local-public"
+    assert case["permission_revision"] == 3
+    assert case["continuation_revision"] == 7
+
+    store.permission = 4
+    with pytest.raises(capture.RunIdentityError, match="access_scope"):
+        capture._verify_run_identity(saved, build_identity())
+    store.permission = 3
+    store.continuation = 8
+    with pytest.raises(capture.RunIdentityError, match="access_scope"):
+        capture._verify_run_identity(saved, build_identity())
 
 
 def test_query_progress_accepts_same_mode_results_and_rejects_tampering_or_model_change() -> None:
