@@ -1,0 +1,56 @@
+{
+  "schema_version": "raama.financial-rag.local-qwen-diagnostic-summary.v1",
+  "capture_classification": "current-capture-diagnostic",
+  "run_id": "current-capture-qwen-cmb-traced-20261026",
+  "case_label": "reviewed_cmb_case",
+  "run_identity_sha256": "8f14cdc0760513c125b35fb057b7ab0caa661e03f11fedc3a19ef3bd8ad89b9d",
+  "runtime_model_identity_sha256": "1a9250a6bbdbed5140e6c99868c2954bbf47d2b5390146fc85d54aeda2e6125a",
+  "local_model_identity": {
+    "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+    "embedding_revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+    "reranker_model": "Qwen/Qwen3-Reranker-0.6B",
+    "reranker_revision": "e61197ed45024b0ed8a2d74b80b4d909f1255473",
+    "inference_device": "cpu",
+    "local_files_only": true
+  },
+  "agent_protocol": {
+    "driver": "offline-scripted-tool-protocol-v1",
+    "generation_model_called": false,
+    "provider_calls": 0
+  },
+  "baseline": {
+    "status": "completed",
+    "retrieval_status": "available",
+    "dense_candidate_count": 901,
+    "dense_batch_count": 113,
+    "dense_batches_completed": 113,
+    "reranker_batches_completed": 40,
+    "source_reopens": 2,
+    "source_pages_reopened": [3, 3],
+    "claim_validation": "calculation_recomputed_decimal_50_half_even_semantics_unverified",
+    "semantic_entailment_verified": false,
+    "trace_reference_count": 337,
+    "progress_sha256": "0c317b7d7c6bc70834254391ab1cf0cd7bd8f8e1d02c9d821d8e389408038585"
+  },
+  "paired_reranker_disabled_attempt": {
+    "status": "failed",
+    "failure_type": "RuntimeError",
+    "failure_category": "both_annual_source_facts_not_returned_to_tool_driver",
+    "search_candidate_counts": [3, 0],
+    "report_validation": null,
+    "trace_reference_count": 28,
+    "progress_sha256": "954e0569447d95999a7e89dcb31b7650dbb3101af1f687728dd134af297beff3"
+  },
+  "trace_integrity": {
+    "journal_event_count": 365,
+    "baseline_and_failed_pair_references_verified": true,
+    "journal_sha256": "1e82b33c129bbd6d3897969fe4b0e1c35e92da0ba6bcaa3dc5f62199917f8512"
+  },
+  "limitations": [
+    "The paired reranker-disabled attempt is a failure record, not a completed comparison.",
+    "The tool-call sequence was scripted; this is not generation-driven LLM Agent evidence.",
+    "The numeric report validator checked the calculation, while source semantics remain unverified.",
+    "This is a manually reviewed single-case development diagnostic, not an independent benchmark or causal ablation study."
+  ],
+  "data_handling": "Contains identity and integrity hashes, event counts, and status summaries only. Raw candidate text, financial values, credentials, and provider payloads are not included. The full local trace and source bytes remain in the ignored run directory."
+}

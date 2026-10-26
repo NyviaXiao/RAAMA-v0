@@ -162,3 +162,4 @@ These are preservation checks, not newly re-certified capabilities:
 - Scoped single-case runs bind the selected case list and module-matrix setting into both initial and live identity checks. The single-case mode still runs its paired reranker-disabled comparison; it skips only the 20-module matrix.
 - Persistent vector-cache hits now pass through the same bounded LRU insertion policy as newly computed vectors.
 - Focused verification after these fixes: 68 passed in 14.21s; Python compilation and `git diff --check` passed. This is a stable engineering checkpoint, not fixed-model or LLM Agent acceptance evidence.
+- The subsequent local Qwen CMB run is summarized without raw candidate text, exact financial values, or credentials in [RAAMA_FINANCIAL_RAG_QWEN_CMB_TRACE_20261026.json](RAAMA_FINANCIAL_RAG_QWEN_CMB_TRACE_20261026.json). The baseline scripted chain completed; the reranker-disabled pair failed and remains a failure record.

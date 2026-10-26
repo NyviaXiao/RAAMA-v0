@@ -602,6 +602,58 @@ class HarnessStateStore:
             )
             connection.commit()
 
+    def fail_provider_request_quota_rejected(
+        self,
+        task_id: str,
+        request_hash: str,
+        *,
+        http_status: int,
+        provider_error_code: str,
+        provider_error_sha256: str,
+        attempt_id: str | None = None,
+    ) -> None:
+        """Resolve a reserved request after the provider returned an explicit quota rejection."""
+        now = _now()
+        with self._connection() as connection:
+            self._begin(connection)
+            row = connection.execute(
+                "SELECT status FROM provider_requests WHERE task_id=? AND request_hash=?",
+                (task_id, request_hash),
+            ).fetchone()
+            if row is None or row["status"] != "started":
+                raise StateConflict("quota rejection requires one pending provider request")
+            connection.execute(
+                "UPDATE provider_requests SET status='quota_rejected',updated_at=? WHERE task_id=? AND request_hash=?",
+                (now, task_id, request_hash),
+            )
+            if attempt_id is None:
+                connection.execute(
+                    "UPDATE provider_attempts SET status='quota_rejected',updated_at=? WHERE task_id=? AND request_hash=? AND status='started'",
+                    (now, task_id, request_hash),
+                )
+            else:
+                connection.execute(
+                    "UPDATE provider_attempts SET status='quota_rejected',updated_at=? WHERE attempt_id=? AND task_id=? AND request_hash=?",
+                    (now, attempt_id, task_id, request_hash),
+                )
+            connection.execute(
+                "INSERT INTO task_events(task_id,event_key,stage,payload_json,created_at) VALUES(?,?,?,?,?)",
+                (
+                    task_id,
+                    f"provider-quota-rejected:{request_hash}:{attempt_id or 'latest'}",
+                    "provider_quota_rejected",
+                    _json({
+                        "request_sha256": request_hash,
+                        "http_status": http_status,
+                        "provider_error_code": provider_error_code,
+                        "provider_error_sha256": provider_error_sha256,
+                        "provider_request_sent": True,
+                    }),
+                    now,
+                ),
+            )
+            connection.commit()
+
     def reconcile_request_cache(self, task_id: str, response_cache_dir: str | Path) -> list[str]:
         cache_dir = Path(response_cache_dir)
         with self._connection() as connection:

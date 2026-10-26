@@ -14,7 +14,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -86,6 +86,16 @@ class InvalidToolInput(ValueError):
     """A model supplied arguments that violate a declared tool boundary."""
 
 
+class ProviderQuotaRejected(RuntimeError):
+    """The provider explicitly rejected a request because its quota was exhausted."""
+
+    def __init__(self, status_code: int, error_code: str | None, response_sha256: str) -> None:
+        self.status_code = status_code
+        self.error_code = error_code
+        self.response_sha256 = response_sha256
+        super().__init__("provider explicitly rejected the request for quota exhaustion")
+
+
 @dataclass
 class CallBudget:
     """One shared, hard call ceiling for runtime, GEPA and its reflection model."""
@@ -106,6 +116,7 @@ class CallBudget:
     imported_scope_calls: int = 0
     package_identity_sha256: str | None = None
     package_identity_manifest: dict[str, object] | None = None
+    request_archive_dir: Path | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_calls <= MAX_CALLS_PER_EXPERIMENT:
@@ -126,7 +137,8 @@ class CallBudget:
                 if event["event"] == "request_started":
                     by_index[index] = {key: value for key, value in event.items() if key != "event"}
                 elif event["event"] in {
-                    "request_completed", "request_recovered_from_cache", "request_failed_before_connect"
+                    "request_completed", "request_recovered_from_cache", "request_failed_before_connect",
+                    "request_rejected_quota",
                 }:
                     by_index[index].update({key: value for key, value in event.items() if key not in {"event", "call_index"}})
             for index in sorted(by_index):
@@ -229,7 +241,7 @@ class CallBudget:
 
     @property
     def provider_call_count(self) -> int:
-        return sum(row.get("status") in {"started", "completed"} for row in self.calls)
+        return sum(row.get("status") in {"started", "completed", "quota_rejected"} for row in self.calls)
 
     @property
     def remaining_provider_calls(self) -> int:
@@ -278,6 +290,7 @@ class CallBudget:
         already_reserved: bool = False,
         durable_attempt_id: str | None = None,
         provider_payload_sha256: str | None = None,
+        request_archive_name: str | None = None,
     ) -> None:
         self.check_call(
             input_bytes, max_output_tokens,
@@ -292,6 +305,7 @@ class CallBudget:
             "request_sha256": request_sha256,
             "package_identity_sha256": self.package_identity_sha256,
             "provider_payload_sha256": provider_payload_sha256,
+            "request_archive_name": request_archive_name,
             "status": "started",
         }
         if self.task_id is not None:
@@ -393,6 +407,38 @@ class CallBudget:
         })
         self.unresolved_call = any(call.get("status") == "started" for call in self.calls)
 
+    def fail_call_quota_rejected(
+        self,
+        call_index: int,
+        *,
+        http_status: int,
+        provider_error_code: str | None,
+        provider_error_sha256: str,
+    ) -> None:
+        """Resolve a provider attempt only after a structured quota rejection response."""
+        row = self.calls[call_index - 1]
+        if row.get("status") != "started" or self.response_cache_dir is None:
+            raise RuntimeError("quota rejection requires one pending provider call with a response cache")
+        request_sha256 = str(row["request_sha256"])
+        cache_path = self.response_cache_dir / f"{request_sha256}.json"
+        marker_path = self.response_cache_dir / f"{request_sha256}.started"
+        if cache_path.exists() or not marker_path.is_file():
+            raise RuntimeError("quota rejection resolution requires a marker and no exact response cache")
+        marker_path.unlink()
+        row.update({
+            "status": "quota_rejected",
+            "provider_request_sent": True,
+            "http_status": http_status,
+            "provider_error_code": provider_error_code,
+            "provider_error_sha256": provider_error_sha256,
+        })
+        self._append_ledger({
+            "event": "request_rejected_quota",
+            "call_index": call_index,
+            **{key: value for key, value in row.items() if key != "call_index"},
+        })
+        self.unresolved_call = any(call.get("status") == "started" for call in self.calls)
+
     def summary(self) -> dict[str, object]:
         per_call_bound = self.cost_upper_bound_cny / self.max_calls
         unknown_count = sum(row.get("status") == "started" for row in self.calls)
@@ -420,8 +466,13 @@ class CallBudget:
                 float(row.get("actual_estimated_cost_cny", 0.0)) for row in self.calls
             ),
             "unknown_outcome_call_count": unknown_count,
+            "quota_rejection_count": sum(row.get("status") == "quota_rejected" for row in self.calls),
             "unknown_outcome_cost_upper_bound_cny": unknown_count * per_call_bound,
-            "cost_status": "unknown_outbound_outcome_present" if unknown_count else "usage_estimated_after_provider_response",
+            "cost_status": (
+                "unknown_outbound_outcome_present" if unknown_count else
+                "provider_quota_rejection_without_usage" if any(row.get("status") == "quota_rejected" for row in self.calls) else
+                "usage_estimated_after_provider_response"
+            ),
             "cost_upper_bound_cny": self.cost_upper_bound_cny,
             "price_basis": {
                 "input_cny_per_million_tokens": INPUT_PRICE_CNY_PER_MILLION,
@@ -480,6 +531,21 @@ class QwenClient:
         request_sha256 = provider_request_sha256(
             self.endpoint, serialized, budget.package_identity_sha256
         )
+        request_archive_name = None
+        if budget.request_archive_dir is not None:
+            budget.request_archive_dir.mkdir(parents=True, exist_ok=True)
+            request_archive_path = budget.request_archive_dir / f"{request_sha256}.request.json"
+            if request_archive_path.is_file():
+                if request_archive_path.read_bytes() != serialized:
+                    raise RuntimeError("provider request archive identity collision")
+            else:
+                temporary_request_path = request_archive_path.with_suffix(".pending")
+                with temporary_request_path.open("xb") as request_file:
+                    request_file.write(serialized)
+                    request_file.flush()
+                    os.fsync(request_file.fileno())
+                temporary_request_path.replace(request_archive_path)
+            request_archive_name = request_archive_path.name
         cache_path = budget.response_cache_dir / f"{request_sha256}.json"
         marker_path = budget.response_cache_dir / f"{request_sha256}.started"
         if cache_path.is_file():
@@ -533,6 +599,7 @@ class QwenClient:
             already_reserved=durable_attempt_id is not None,
             durable_attempt_id=durable_attempt_id,
             provider_payload_sha256=provider_payload_sha256,
+            request_archive_name=request_archive_name,
         )
         budget.response_cache_dir.mkdir(parents=True, exist_ok=True)
         with marker_path.open("x", encoding="utf-8") as marker:
@@ -553,6 +620,32 @@ class QwenClient:
         try:
             with urlopen(request, timeout=60) as response:
                 body = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            error_payload = exc.read()
+            try:
+                decoded_error = json.loads(error_payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                decoded_error = None
+            quota_error_code = _explicit_provider_quota_code(decoded_error)
+            if quota_error_code is not None:
+                error_sha256 = hashlib.sha256(error_payload).hexdigest()
+                budget.fail_call_quota_rejected(
+                    call_index,
+                    http_status=exc.code,
+                    provider_error_code=quota_error_code,
+                    provider_error_sha256=error_sha256,
+                )
+                if budget.state_store is not None and budget.task_id is not None:
+                    budget.state_store.fail_provider_request_quota_rejected(
+                        budget.task_id,
+                        request_sha256,
+                        http_status=exc.code,
+                        provider_error_code=quota_error_code,
+                        provider_error_sha256=error_sha256,
+                        attempt_id=durable_attempt_id,
+                    )
+                raise ProviderQuotaRejected(exc.code, quota_error_code, error_sha256) from None
+            raise
         except URLError as exc:
             reason = exc.reason
             if isinstance(reason, PermissionError) and (
@@ -581,6 +674,36 @@ class QwenClient:
         marker_path.unlink(missing_ok=True)
         budget.finish_call(call_index, body["usage"], elapsed_ms)
         return body
+
+
+def _explicit_provider_quota_code(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    error = value.get("error")
+    details = error if isinstance(error, Mapping) else value
+    code = details.get("code") or details.get("type") or value.get("code")
+    message = details.get("message") or value.get("message")
+    normalized_code = str(code).strip().casefold().replace("-", "_") if code is not None else ""
+    if normalized_code in {
+        "insufficient_quota",
+        "quota_exceeded",
+        "quota_exhausted",
+        "quota_depleted",
+        "model_quota_exceeded",
+        "throttling.allocationquota",
+    }:
+        return str(code)
+    normalized_message = str(message).casefold() if message is not None else ""
+    explicit_phrases = (
+        "insufficient quota",
+        "quota exceeded",
+        "quota exhausted",
+        "quota depleted",
+        "quota limit reached",
+    )
+    if any(phrase in normalized_message for phrase in explicit_phrases):
+        return normalized_code or "explicit_quota_rejection"
+    return None
 
 
 def _compact_tool_message(message: dict[str, object]) -> dict[str, object]:
