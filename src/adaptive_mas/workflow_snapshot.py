@@ -133,7 +133,10 @@ def materialize_workflow_snapshot(
     if final_root.exists():
         raise ValueError("workflow snapshot path already exists")
     final_root.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = final_root.parent / f".{final_root.name}.pending-{uuid.uuid4().hex}"
+    # Keep the temporary sibling name compact. Snapshot copies include nested
+    # source paths, and a descriptive suffix can push valid Windows workspace
+    # paths past the legacy MAX_PATH boundary before the final rename.
+    staging_root = final_root.parent / f".ws-{uuid.uuid4().hex[:24]}"
     staging_root.mkdir(parents=False, exist_ok=False)
     implementation_identity = source_package_identity()
     package_root = Path(__file__).resolve().parent

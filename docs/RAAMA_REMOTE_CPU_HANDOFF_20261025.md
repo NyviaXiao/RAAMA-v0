@@ -170,3 +170,8 @@ Git 仅传源码、配置模板、依赖锁、schema、测试、允许上传的�
 - systemd/cgroup 资源控制：https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html
 
 服务器 systemd/内核/扩展版本需现场核对；上述资源配置未经目标服务器验证，不能直接认定可执行或已生效。
+
+
+### 2026-10-26 F05 本地快照恢复增量核验
+
+本地 `4807a318ed10ab410de7c432b4ad6c19254f0538` 对应授权备份 `28cbf86f0eb93b98d6e421d135393d738c572a90`，tree `97ce5501ef2d19c1c5091c80e5b84493de6d55bd`；8个改动blob/ref匹配，未上传本地工件。相关归档检查48通过、1失败（17.25秒）：Windows较深根路径下长staging目录使创建源码副本失败，POST任务返回422，登记F05-P2-03待修。相同提交短目录下端到端1通过（6.84秒）。独立检查实际排队并停止服务，移走原始config后由新store、新worker及保存CLI完成合成决策；另进程确认加载保存源码；篡改保存config被拒绝。此为合成离线恢复契约，不证明真实模型效果或安装依赖已物化；当前依赖仅验证现有Python/发行包版本身份。后续e285160恢复证据与短staging修复仍需独立审查，不能把此检查点计A–G总验收。最终迁移快照和无上下文克隆自检仍待完成。

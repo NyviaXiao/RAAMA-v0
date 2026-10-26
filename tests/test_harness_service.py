@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
@@ -272,7 +273,8 @@ def test_task_submission_replays_from_the_materialized_snapshot_and_rejects_tamp
     try:
         status, submitted = _http(server, "POST", "/api/tasks", payload)
         assert status == 202, submitted
-        store = server.context["store"]
+        initial_store = server.context["store"]
+        store = HarnessServiceStore(initial_store.database_path)
         job = store.get_job("snapshot-task")
         assert job is not None
         binding = job["request"]["runtime_binding"]
@@ -316,6 +318,7 @@ def test_task_submission_replays_from_the_materialized_snapshot_and_rejects_tamp
 
         original_config = Path(request["config"])
         original_config.write_text("horizon_sessions = 99\n", encoding="utf-8")
+        Path(request["training_seed"]).unlink()
         help_result = subprocess.run(
             [
                 sys.executable,
@@ -366,6 +369,53 @@ def test_task_submission_replays_from_the_materialized_snapshot_and_rejects_tamp
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_task_submission_materializes_snapshot_below_windows_path_boundary():
+    service_artifacts = Path("service_artifacts")
+    example_snapshot_name = f"ws-{'0' * 12}"
+    legacy_staging_name = f".{example_snapshot_name}.pending-{'0' * 32}"
+    copied_schema_relative = Path("source") / "schemas" / "decision_api.v1.schema.json"
+    legacy_path_tail = (
+        len(str(service_artifacts))
+        + 1
+        + len(legacy_staging_name)
+        + 1
+        + len(str(copied_schema_relative))
+    )
+    target_project_root_length = 261 - legacy_path_tail
+
+    with tempfile.TemporaryDirectory(prefix="raama-service-") as temporary_root:
+        temporary_path = Path(temporary_root)
+        root_segment_length = target_project_root_length - len(str(temporary_path)) - 1
+        assert root_segment_length > 0
+        project_root = temporary_path / ("r" * root_segment_length)
+        project_root.mkdir()
+
+        legacy_copy_path = project_root / service_artifacts / legacy_staging_name / copied_schema_relative
+        compact_copy_path = project_root / service_artifacts / f".ws-{'0' * 24}" / copied_schema_relative
+        assert len(str(legacy_copy_path)) >= 261
+        assert len(str(compact_copy_path)) < 260
+
+        server, thread = _server(project_root)
+        request = _request(_project(project_root))
+        try:
+            status, submitted = _http(
+                server,
+                "POST",
+                "/api/tasks",
+                {"task_id": "path-boundary-task", "idempotency_key": "path-boundary", "request": request},
+            )
+            assert status == 202, submitted
+            job = server.context["store"].get_job("path-boundary-task")
+            assert job is not None
+            materialization = job["request"]["runtime_binding"]["materialization"]
+            copied_schema = Path(materialization["source_root"]) / "schemas" / "decision_api.v1.schema.json"
+            assert copied_schema.is_file()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 def test_sqlite_idempotency_concurrent_claims_and_worker_recovery(tmp_path):

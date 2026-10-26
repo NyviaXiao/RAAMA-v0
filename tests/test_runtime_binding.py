@@ -112,7 +112,7 @@ def test_workflow_file_digest_streams_without_read_bytes(tmp_path: Path, monkeyp
     assert _path_digest(target) == ("file", expected)
 
 
-def test_workflow_snapshot_restores_queued_inputs_and_rejects_snapshot_tampering(tmp_path: Path) -> None:
+def test_workflow_snapshot_restores_queued_inputs_and_rejects_snapshot_tampering(tmp_path: Path, monkeypatch) -> None:
     request, _ = _workflow_fixture(tmp_path)
     store_root = tmp_path / "harness_versions"
     release_store = HarnessReleaseStore(store_root, project_root=tmp_path)
@@ -166,6 +166,13 @@ def test_workflow_snapshot_restores_queued_inputs_and_rejects_snapshot_tampering
     assert copied_config.read_text(encoding="utf-8") == "config-fixture"
     copied_source_root = Path(snapshot["source_root"])
     assert (copied_source_root / "scripts" / "run_harness_decision.py").is_file()
+
+    monkeypatch.setattr("adaptive_mas.workflow_snapshot._runtime_environment", lambda: {})
+    with pytest.raises(ValueError, match="Python runtime environment differs"):
+        validate_workflow_runtime_binding(
+            binding, project_root=tmp_path, request_paths=snapshot_paths,
+        )
+    monkeypatch.undo()
 
     copied_config.write_text("tampered queued snapshot", encoding="utf-8")
     with pytest.raises(ValueError, match="materialized input failed integrity verification: config"):
