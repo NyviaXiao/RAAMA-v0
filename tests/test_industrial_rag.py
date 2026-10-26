@@ -574,6 +574,45 @@ def test_search_skips_persistent_cache_for_unversioned_configured_adapters(tmp_p
     assert "key_sha256" not in second["cache"]
 
 
+def test_configured_bm25_adapter_replaces_local_reference_channel(tmp_path) -> None:
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    bundle = _bundle()
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, ["version-1"], "release-1")
+
+    class Bm25Stub:
+        implementation = "test-release-bound-bm25"
+        cache_identity = {
+            "implementation": implementation,
+            "version": "v1",
+            "configuration": {"fixture": "one-source-block"},
+        }
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, plan, version_ids):
+            self.calls += 1
+            assert plan.channels == ("bm25",)
+            assert version_ids == ["version-1"]
+            return [EvidenceResult(
+                evidence_id="ev-external-bm25", channel="bm25", document_id="document-1",
+                version_id="version-1", source_id="cninfo-123456",
+                content_sha256=bundle.version.content_sha256, page_number=3,
+                block_id="version-1-block-1", fact_id=None, text="external release-bound hit",
+                score=1.0, source_time_basis="strict_forward",
+            )]
+
+    adapter = Bm25Stub()
+    service = IndustrialRagService(store, channel_adapters={"bm25": adapter})
+    result = service.search(_plan(channels=("bm25",)), use_cache=False)
+
+    assert adapter.calls == 1
+    assert result["channels"]["bm25"]["implementation"] == adapter.implementation
+    assert result["retrieved"][0]["text"] == "external release-bound hit"
+
+
 def test_strict_time_requires_capture_and_ingestion_by_cutoff_but_proxy_is_labelled(tmp_path) -> None:
     store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
     now = datetime.now(timezone.utc)

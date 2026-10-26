@@ -587,7 +587,7 @@ class IndustrialRagService:
                 if channel == "structured_facts":
                     channel_results[channel] = self._fact_results(plan, facts, version_by_id, control=control)
                     channel_status[channel] = {"status": "available", "implementation": "typed_fact_records", "candidate_count": len(channel_results[channel])}
-                elif channel == "bm25":
+                elif channel == "bm25" and channel not in self.channel_adapters:
                     channel_results[channel] = self._block_results(plan, blocks, version_by_id, control=control)
                     channel_status[channel] = {"status": "available", "implementation": "local_bm25_reference_chinese_bigram_analyzer", "candidate_count": len(channel_results[channel]), "production_opensearch": "unavailable unless explicitly configured"}
                 elif channel == "toc_page":

@@ -30,11 +30,18 @@ from adaptive_mas.industrial_rag.models import (  # noqa: E402
     DocumentBundle,
     DocumentVersion,
     FinancialFact,
+    QueryPlan,
     Span,
 )
 from adaptive_mas.industrial_rag.object_store import S3CompatibleObjectStore  # noqa: E402
+from adaptive_mas.industrial_rag.opensearch_adapter import (  # noqa: E402
+    OpenSearchBackendError,
+    OpenSearchRestClient,
+    OpenSearchTextIndexAdapter,
+)
 from adaptive_mas.industrial_rag.postgres import PostgresIndustrialRagStore  # noqa: E402
 from adaptive_mas.industrial_rag.repository import ReleaseNotReady  # noqa: E402
+from adaptive_mas.industrial_rag.retrieval import IndustrialRagService  # noqa: E402
 from adaptive_mas.research_provenance import stable_hash  # noqa: E402
 
 
@@ -344,21 +351,84 @@ def main() -> None:
     release_spec = CorpusReleaseSpec(
         release_id=release_id, source_manifest_sha256=stable_hash(source_manifest),
         parser_version="synthetic@1", chunker_version="raama-financial-chunker-v1",
-        embedding_model="none", embedding_dimension=None, required_backends=("sqlite_reference",),
+        embedding_model="none", embedding_dimension=None, required_backends=("opensearch", "sqlite_reference"),
         text_index_manifest_sha256=str(text_index["index_manifest_sha256"]),
         vector_index_manifest_sha256=vector_index_sha256,
     )
     store.create_release(release_spec, [version_id])
+    _wait_for_http(f"http://127.0.0.1:{ports['opensearch']}/")
+    opensearch_client = OpenSearchRestClient(f"http://127.0.0.1:{ports['opensearch']}")
+    opensearch_search_requests = 0
+    original_opensearch_request = opensearch_client.request
+
+    def tracked_opensearch_request(method: str, path: str, body: object | bytes | None = None) -> dict[str, Any]:
+        nonlocal opensearch_search_requests
+        if path.endswith("/_search"):
+            opensearch_search_requests += 1
+        return original_opensearch_request(method, path, body)
+
+    opensearch_client.request = tracked_opensearch_request  # type: ignore[method-assign]
+    opensearch_adapter = OpenSearchTextIndexAdapter(store, opensearch_client)
+    opensearch_ready = opensearch_adapter.mark_release_ready(release_id)
     reference_receipt = store.build_reference_index_receipt(release_id)
-    ready = store.mark_backend_ready(reference_receipt, store.verify_reference_index)
+    reference_ready = store.mark_backend_ready(reference_receipt, store.verify_reference_index)
+    query_plan = QueryPlan(
+        plan_id=f"smoke-query-{suffix}", query=text, security_code=str(fixture["security_code"]),
+        as_of=datetime.now(timezone.utc), principal_id="local-public", task_type="narrative",
+        report_periods=(str(fixture["report_period"]),), release_id=release_id,
+        channels=("bm25",), top_k=5,
+    )
     publication = store.publish_release(release_id, actor_id="integration-smoke", reason="Verify isolated PostgreSQL-backed application contract.")
-    if not ready["ready"] or publication["status"] != "published" or store.release_summaries()["active_release_id"] != release_id:
+    app_search = IndustrialRagService(
+        store, channel_adapters={"bm25": opensearch_adapter}, allow_retrospective_diagnostic=False,
+    ).search(query_plan, use_cache=False)
+    if not app_search["retrieved"] or app_search["channels"]["bm25"]["implementation"] != opensearch_adapter.implementation:
+        raise AssertionError("release-bound OpenSearch BM25 application search returned no source evidence")
+    successful_search_requests = opensearch_search_requests
+    try:
+        opensearch_adapter.search_with_control(
+            replace(query_plan, release_id=f"{release_id}-not-active"), [version_id], None,
+        )
+    except OpenSearchBackendError:
+        pass
+    else:
+        raise AssertionError("OpenSearch adapter accepted a release other than the active publication")
+    if opensearch_search_requests != successful_search_requests:
+        raise AssertionError("nonactive release rejection issued an OpenSearch query")
+    store.set_access("local-public", document_id, can_read=False)
+    try:
+        try:
+            opensearch_adapter.search_with_control(query_plan, [version_id], None)
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("OpenSearch adapter returned a source to a revoked principal")
+    finally:
+        store.set_access("local-public", document_id, can_read=True)
+    if opensearch_search_requests != successful_search_requests:
+        raise AssertionError("revoked-principal rejection issued an OpenSearch query")
+    before_available_plan = replace(query_plan, as_of=published - timedelta(seconds=1))
+    try:
+        opensearch_adapter.search_with_control(before_available_plan, [version_id], None)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("OpenSearch adapter returned a source before its recorded availability time")
+    if opensearch_search_requests != successful_search_requests:
+        raise AssertionError("pre-availability rejection issued an OpenSearch query")
+    if (
+        not opensearch_ready["ready"] or not reference_ready["ready"]
+        or not app_search["retrieved"]
+        or app_search["channels"]["bm25"]["implementation"] != opensearch_adapter.implementation
+        or publication["status"] != "published"
+        or store.release_summaries()["active_release_id"] != release_id
+    ):
         raise AssertionError("PostgreSQL reference receipt and release publication did not complete")
     missing_receipt_release_id = f"{release_id}-missing-backend"
     missing_receipt_spec = replace(
         release_spec,
         release_id=missing_receipt_release_id,
-        required_backends=("opensearch",),
+        required_backends=("qdrant",),
         text_index_manifest_sha256=str(store.preview_reference_index_manifest(missing_receipt_release_id, [version_id])["index_manifest_sha256"]),
     )
     active_before_failed_publish = store.active_release_id()
@@ -384,7 +454,10 @@ def main() -> None:
         "ingested": True, "object_reopened": True, "outbox_receipt_committed": True,
         "outbox_handler_failure_retried_once": True, "duplicate_ack_returned_false_without_mutating_receipt": True,
         "completed_event_not_claimable_again": True,
-        "reference_receipt_ready": True, "release_published": True,
+        "reference_receipt_ready": True, "opensearch_receipt_ready": True,
+        "release_bound_bm25_search": True, "nonactive_release_rejected_before_search": True,
+        "revoked_principal_rejected_before_search": True,
+        "pre_availability_query_rejected_before_search": True, "release_published": True,
     }
 
     try:
