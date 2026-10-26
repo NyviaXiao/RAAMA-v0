@@ -69,6 +69,62 @@ def test_task_request_artifact_feedback_and_execution_survive_reopen_idempotentl
         )
 
 
+def test_durable_task_lifecycle_and_dead_letter_are_audited_and_fenced(tmp_path):
+    store = HarnessStateStore(tmp_path / "lifecycle.sqlite3")
+    store.open_task("lifecycle-task", "lifecycle-key", {"operation": "local"}, max_provider_calls=0)
+
+    pause_payload = {"action": "pause", "operator_id": "operator-1", "reason": "Review checkpoint."}
+    assert store.transition_task_status(
+        "lifecycle-task", expected_statuses={"running"}, status="paused", stage="paused",
+        event_key="control-pause-1", payload=pause_payload,
+    )
+    assert store.get_task("lifecycle-task")["status"] == "paused"
+    assert store.transition_task_status(
+        "lifecycle-task", expected_statuses={"running"}, status="paused", stage="paused",
+        event_key="control-pause-1", payload=pause_payload,
+    )  # Retried activity is idempotent even after the status changed.
+
+    assert store.transition_task_status(
+        "lifecycle-task", expected_statuses={"paused"}, status="running", stage="resumed",
+        event_key="control-resume-1", payload={"action": "resume", "operator_id": "operator-1"},
+    )
+    assert store.get_task("lifecycle-task")["status"] == "running"
+    assert store.transition_task_status(
+        "lifecycle-task", expected_statuses={"running"}, status="failed", stage="failed",
+        event_key="workflow-failed", payload={"error": "synthetic failure"},
+    )
+    assert store.dead_letter_task(
+        "lifecycle-task", expected_status="failed", operator_id="operator-2",
+        reason="No safe retry remains.", event_key="dead-letter-1",
+    )
+    assert store.get_task("lifecycle-task")["status"] == "dead_letter"
+    assert store.dead_letter_task(
+        "lifecycle-task", expected_status="failed", operator_id="operator-2",
+        reason="No safe retry remains.", event_key="dead-letter-1",
+    )
+    assert len(store.list_task_events("lifecycle-task")) == 5
+    assert store.list_task_events("lifecycle-task")[-1]["payload"] == {
+        "expected_status": "failed", "operator_id": "operator-2", "reason": "No safe retry remains.",
+    }
+
+    assert not store.transition_task_status(
+        "lifecycle-task", expected_statuses={"running"}, status="cancelled", stage="cancelled",
+        event_key="late-cancel", payload={"action": "cancel"},
+    )
+    assert store.get_task("lifecycle-task")["status"] == "dead_letter"
+    assert store.list_task_events("lifecycle-task")[-1]["stage"] == "cancelled_rejected"
+    with pytest.raises(StateConflict):
+        store.transition_task_status(
+            "lifecycle-task", expected_statuses={"running"}, status="cancelled", stage="cancelled",
+            event_key="control-pause-1", payload={"action": "cancel"},
+        )
+    with pytest.raises(ValueError, match="only failed or unknown"):
+        store.dead_letter_task(
+            "lifecycle-task", expected_status="running", operator_id="operator-2",
+            reason="unsafe", event_key="dead-letter-invalid",
+        )
+
+
 def test_unknown_request_prevents_another_outbound_request_until_reconciled(tmp_path):
     store = HarnessStateStore(tmp_path / "unknown.sqlite3")
     store.open_task("task", "task", {"fixture": True}, max_provider_calls=3)
@@ -172,6 +228,59 @@ def test_qwen_client_recovers_exact_response_from_sqlite_without_resending(tmp_p
     assert len(provider_calls) == 1
     assert resumed_budget.provider_call_count == 1
     assert len(list(response_cache.glob("*.json"))) == 1
+
+
+def test_offline_only_qwen_reuses_exact_cache_and_rejects_cache_miss_before_network(tmp_path, monkeypatch):
+    response_cache = tmp_path / "offline-response-cache"
+    ledger = tmp_path / "offline-ledger.jsonl"
+    response = {
+        "choices": [{"message": {"content": "cached fixture"}}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+    }
+    calls = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(response).encode("utf-8")
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls.append(True)
+        return FakeResponse()
+
+    monkeypatch.setattr(harness_module, "urlopen", fake_urlopen)
+    online_client = QwenClient("https://fixture.invalid", "fixture-key", "fixture-model")
+    online_budget = CallBudget(max_calls=2, ledger_path=ledger, response_cache_dir=response_cache)
+    online_budget.limit_next_task(2)
+    messages = [{"role": "user", "content": "cached query"}]
+    assert online_client.complete(messages, budget=online_budget, role="market") == response
+    assert len(calls) == 1
+
+    offline_client = QwenClient(
+        "https://fixture.invalid", "fixture-key", "fixture-model", offline_only=True,
+    )
+    offline_budget = CallBudget(max_calls=2, ledger_path=ledger, response_cache_dir=response_cache)
+    offline_budget.limit_next_task(2)
+    assert offline_client.complete(messages, budget=offline_budget, role="market") == response
+    assert len(calls) == 1
+
+    uncached_budget = CallBudget(
+        max_calls=2,
+        ledger_path=tmp_path / "cache-miss-ledger.jsonl",
+        response_cache_dir=tmp_path / "empty-cache",
+    )
+    uncached_budget.limit_next_task(2)
+    with pytest.raises(RuntimeError, match="offline-only Qwen client"):
+        offline_client.complete(
+            [{"role": "user", "content": "not cached"}], budget=uncached_budget, role="market",
+        )
+    assert len(calls) == 1
+    assert uncached_budget.provider_call_count == 0
 
 
 def test_concurrent_qwen_clients_write_unique_reconstructable_ledger_entries(tmp_path, monkeypatch):

@@ -23,9 +23,13 @@ def _sha256(payload: bytes) -> str:
 
 def _read_object(path: str | Path) -> tuple[dict[str, Any], bytes]:
     raw = Path(path).read_bytes()
+    return _read_object_bytes(raw, Path(path).name)
+
+
+def _read_object_bytes(raw: bytes, name: str) -> tuple[dict[str, Any], bytes]:
     value = json.loads(raw.decode("utf-8"))
     if not isinstance(value, dict):
-        raise ValueError(f"{Path(path).name} must contain one JSON object")
+        raise ValueError(f"{name} must contain one JSON object")
     return value, raw
 
 
@@ -508,10 +512,22 @@ def evaluate_manifest(
     k_values: Sequence[int] = (1, 3, 5, 10),
 ) -> dict[str, Any]:
     """Score explicit stored predictions against a frozen manifest, never an active query."""
+    _, manifest_bytes = _read_object(manifest_path)
+    _, predictions_bytes = _read_object(predictions_path)
+    return evaluate_manifest_bytes(manifest_bytes, predictions_bytes, k_values=k_values)
+
+
+def evaluate_manifest_bytes(
+    manifest_bytes: bytes,
+    predictions_bytes: bytes,
+    *,
+    k_values: Sequence[int] = (1, 3, 5, 10),
+) -> dict[str, Any]:
+    """Score exact in-memory input bytes after callers have verified their capture hashes."""
     if not k_values or any(isinstance(k, bool) or not isinstance(k, int) or k < 1 for k in k_values) or len(set(k_values)) != len(k_values):
         raise ValueError("evaluation cutoffs must be unique positive integers")
-    manifest, manifest_bytes = _read_object(manifest_path)
-    predictions, predictions_bytes = _read_object(predictions_path)
+    manifest, manifest_bytes = _read_object_bytes(manifest_bytes, "manifest")
+    predictions, predictions_bytes = _read_object_bytes(predictions_bytes, "predictions")
     cases = manifest.get("cases")
     prediction_cases = predictions.get("cases")
     if not isinstance(cases, list) or not isinstance(prediction_cases, list):

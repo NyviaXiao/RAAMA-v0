@@ -595,14 +595,17 @@ class IndustrialRagService:
                     channel_status[channel] = {"status": "available", "implementation": "section_and_page_block_reference", "candidate_count": len(channel_results[channel])}
                 elif channel in self.channel_adapters:
                     adapter = self.channel_adapters[channel]
-                    traced_search = getattr(adapter, "search_with_trace", None)
-                    controlled_search = getattr(adapter, "search_with_control", None)
-                    if trace_callback is not None and callable(traced_search):
-                        adapted = list(traced_search(plan, version_ids, control, forward_adapter_trace))
-                    elif control is not None and callable(controlled_search):
-                        adapted = list(controlled_search(plan, version_ids, control))
+                    if not version_ids:
+                        adapted = []
                     else:
-                        adapted = list(adapter(plan, version_ids))
+                        traced_search = getattr(adapter, "search_with_trace", None)
+                        controlled_search = getattr(adapter, "search_with_control", None)
+                        if trace_callback is not None and callable(traced_search):
+                            adapted = list(traced_search(plan, version_ids, control, forward_adapter_trace))
+                        elif control is not None and callable(controlled_search):
+                            adapted = list(controlled_search(plan, version_ids, control))
+                        else:
+                            adapted = list(adapter(plan, version_ids))
                     if control is not None:
                         control.check()
                     channel_results[channel] = adapted[: plan.top_k * 5]
@@ -610,6 +613,7 @@ class IndustrialRagService:
                         "status": "available",
                         "implementation": getattr(adapter, "implementation", "configured_external_adapter"),
                         "candidate_count": len(adapted),
+                        **({"reason": "no permitted source versions"} if not version_ids else {}),
                     }
                 else:
                     channel_results[channel] = []

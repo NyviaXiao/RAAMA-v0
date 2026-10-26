@@ -496,6 +496,7 @@ class QwenClient:
     endpoint: str
     api_key: str
     model: str = DEFAULT_MODEL
+    offline_only: bool = False
 
     @classmethod
     def from_environment(cls, api_key: str | None = None) -> "QwenClient":
@@ -574,6 +575,8 @@ class QwenClient:
             return durable_response
         if marker_path.exists():
             raise RuntimeError("an identical outbound request has an unknown delivery outcome; automatic retry is disabled")
+        if self.offline_only:
+            raise RuntimeError("offline-only Qwen client has no exact cached response for this request")
         budget.assert_task_turn_available()
         budget.check_request_size(len(serialized), max_output_tokens)
         budget.check_call(len(serialized), max_output_tokens)

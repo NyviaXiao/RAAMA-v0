@@ -243,6 +243,80 @@ class HarnessStateStore:
             )
             connection.commit()
 
+    def transition_task_status(
+        self,
+        task_id: str,
+        *,
+        expected_statuses: set[str] | frozenset[str],
+        status: str,
+        stage: str,
+        event_key: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> bool:
+        allowed = {"running", "paused", "cancelled", "failed", "unknown", "dead_letter"}
+        if status not in allowed or not expected_statuses or not expected_statuses <= allowed:
+            raise ValueError("task lifecycle transition contains an unsupported status")
+        if not event_key.strip() or not stage.strip():
+            raise ValueError("event_key and stage must be nonempty")
+        payload_json = _json(dict(payload or {}))
+        now = _now()
+        with self._connection() as connection:
+            self._begin(connection)
+            row = connection.execute("SELECT status FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"unknown task_id {task_id}")
+            prior = connection.execute(
+                "SELECT stage,payload_json FROM task_events WHERE task_id=? AND event_key=?",
+                (task_id, event_key),
+            ).fetchone()
+            if prior is not None:
+                if prior["payload_json"] != payload_json:
+                    raise StateConflict("task lifecycle event key was reused with different content")
+                if prior["stage"] not in {stage, f"{stage}_rejected"}:
+                    raise StateConflict("task lifecycle event key was reused for another transition")
+                connection.commit()
+                return prior["stage"] == stage
+
+            accepted = str(row["status"]) in expected_statuses
+            event_stage = stage if accepted else f"{stage}_rejected"
+            if accepted:
+                connection.execute(
+                    "UPDATE tasks SET status=?,stage=?,updated_at=? WHERE task_id=?",
+                    (status, stage, now, task_id),
+                )
+            connection.execute(
+                "INSERT INTO task_events(task_id,event_key,stage,payload_json,created_at) VALUES(?,?,?,?,?)",
+                (task_id, event_key, event_stage, payload_json, now),
+            )
+            connection.commit()
+            return accepted
+
+    def dead_letter_task(
+        self,
+        task_id: str,
+        *,
+        expected_status: str,
+        operator_id: str,
+        reason: str,
+        event_key: str,
+    ) -> bool:
+        if expected_status not in {"failed", "unknown"}:
+            raise ValueError("only failed or unknown tasks can be dead-lettered")
+        if not operator_id.strip() or not reason.strip():
+            raise ValueError("operator identity and dead-letter reason are required")
+        return self.transition_task_status(
+            task_id,
+            expected_statuses={expected_status},
+            status="dead_letter",
+            stage="dead_letter",
+            event_key=event_key,
+            payload={
+                "expected_status": expected_status,
+                "operator_id": operator_id,
+                "reason": reason,
+            },
+        )
+
     def complete_task(
         self,
         task_id: str,
