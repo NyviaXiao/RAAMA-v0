@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -22,7 +23,9 @@ from adaptive_mas.industrial_rag.temporal_workflow import (  # noqa: E402
     IndustrialRagIngestRequest,
     IndustrialRagIngestActivityInput,
     IndustrialRagIngestWorkflow,
+    capture_ingest_request,
     ingest_document_activity,
+    read_captured_input_bytes,
 )
 
 
@@ -108,12 +111,12 @@ async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str
     metadata_path = state_dir / "synthetic-metadata.json"
     state_database_path = state_dir / "task-state.sqlite3"
     attempt_log = state_dir / "activity-attempts.txt"
-    source_path.write_text(
+    original_source_bytes = (
         "Synthetic local report. Revenue was 100 million yuan in 2026 Q3. "
-        "This text is only for the Temporal recovery smoke test.\n",
-        encoding="utf-8",
-    )
-    metadata_path.write_text(json.dumps({
+        "This text is only for the Temporal recovery smoke test.\n"
+    ).encode("utf-8")
+    source_path.write_bytes(original_source_bytes)
+    original_metadata = {
         "document_id": f"temporal-smoke-document-{run_id}",
         "version_id": f"temporal-smoke-version-{run_id}",
         "source_id": f"temporal-smoke-source-{run_id}",
@@ -129,7 +132,11 @@ async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str
         "first_available_at": "2026-01-01T00:00:00+00:00",
         "time_basis": "strict_forward",
         "read_principals": ["local-public"],
-    }, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+    }
+    original_metadata_bytes = json.dumps(
+        original_metadata, ensure_ascii=False, sort_keys=True, indent=2,
+    ).encode("utf-8")
+    metadata_path.write_bytes(original_metadata_bytes)
 
     request = IndustrialRagIngestRequest(
         task_id=f"temporal-ingest-{run_id}",
@@ -141,6 +148,19 @@ async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str
         scratch_root=str(state_dir / "parser-scratch"),
         state_database_path=str(state_database_path),
         activity_heartbeat_timeout_seconds=3,
+    )
+    request = capture_ingest_request(request)
+    # Prove the scheduled workflow consumes the captured bytes after the original paths drift.
+    source_path.write_text(
+        "Synthetic local report. Revenue was 900 million yuan in 2026 Q3. Changed after scheduling.\n",
+        encoding="utf-8",
+    )
+    changed_metadata = dict(original_metadata)
+    changed_metadata["document_id"] = f"changed-after-capture-document-{run_id}"
+    changed_metadata["version_id"] = f"changed-after-capture-version-{run_id}"
+    metadata_path.write_text(
+        json.dumps(changed_metadata, ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
     )
     client = await Client.connect(address)
     first_worker: subprocess.Popen[bytes] | None = None
@@ -174,22 +194,74 @@ async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str
         attempts = attempt_log.read_text(encoding="utf-8").splitlines()
         events = durable.list_task_events(request.task_id)
         artifact = durable.get_artifact(request.task_id, "industrial_rag_ingest_result")
+        identity = durable.get_artifact(request.task_id, "industrial_rag_ingest_identity")
         if (
             len(attempts) < 2
             or not isinstance(result, dict)
             or result.get("status") not in {"ingested", "reused"}
             or artifact != result
+            or identity is None
+            or result.get("content_sha256") != request.source_sha256
+            or result.get("version_id") != original_metadata["version_id"]
+            or result.get("document_id") != original_metadata["document_id"]
+            or identity.get("ingested_at", "") < str(request.captured_at)
+            or identity.get("source_sha256") != request.source_sha256
+            or identity.get("metadata_sha256") != request.metadata_sha256
             or state.get("status") != "completed"
             or state.get("budget") != {"provider_calls_max": 0, "provider_calls_used": 0}
             or len([event for event in events if event["event_key"] == "industrial_rag_ingest_persisted"]) != 1
         ):
             raise AssertionError("Temporal retry did not resume from the durable ingest artifact")
+        with sqlite3.connect(request.database_path) as connection:
+            persisted_version = connection.execute(
+                "SELECT content_sha256,captured_at,ingested_at FROM rag_document_versions WHERE version_id=?",
+                (original_metadata["version_id"],),
+            ).fetchone()
+        if (
+            persisted_version is None
+            or persisted_version[0] != request.source_sha256
+            or persisted_version[1] != request.captured_at
+            or persisted_version[2] != identity["ingested_at"]
+        ):
+            raise AssertionError("Temporal ingest did not persist the captured source and durable ingest identity")
+        captured_source_bytes, captured_metadata_bytes = read_captured_input_bytes(request)
+        if captured_source_bytes != original_source_bytes or captured_metadata_bytes != original_metadata_bytes:
+            raise AssertionError("source or metadata path drift changed the immutable Temporal capture")
+
+        source_capture = Path(request.source_path)
+        source_capture.write_bytes(captured_source_bytes + b"tampered")
+        try:
+            read_captured_input_bytes(request)
+        except ValueError as error:
+            if "source bytes" not in str(error):
+                raise
+        else:
+            raise AssertionError("Temporal activity input accepted a changed captured source file")
+        finally:
+            source_capture.write_bytes(captured_source_bytes)
+
+        metadata_capture = Path(request.metadata_path)
+        metadata_capture.write_bytes(captured_metadata_bytes + b" ")
+        try:
+            read_captured_input_bytes(request)
+        except ValueError as error:
+            if "metadata bytes" not in str(error):
+                raise
+        else:
+            raise AssertionError("Temporal activity input accepted changed captured metadata")
+        finally:
+            metadata_capture.write_bytes(captured_metadata_bytes)
         return {
             "schema_version": "raama.financial-rag.temporal-ingest-recovery-result.v1",
             "workflow_id": request.task_id,
             "worker_crashed_after_activity_side_effect": True,
             "activity_attempt_count": len(attempts),
             "durable_artifact_reused": True,
+            "captured_source_and_metadata_hashes_verified": True,
+            "original_paths_changed_after_capture_without_changing_ingest": True,
+            "tampered_captured_source_rejected": True,
+            "tampered_captured_metadata_rejected": True,
+            "ingested_at_frozen_after_source_capture": True,
             "task_event_count": len(events),
             "workflow_state_completed": True,
             "provider_calls": 0,

@@ -35,6 +35,8 @@ from adaptive_mas.industrial_rag.models import (  # noqa: E402
     FinancialFact,
     QueryPlan,
     Span,
+    Table,
+    TableCell,
 )
 from adaptive_mas.industrial_rag.object_store import S3CompatibleObjectStore  # noqa: E402
 from adaptive_mas.industrial_rag.opensearch_adapter import (  # noqa: E402
@@ -266,6 +268,36 @@ def main() -> None:
         block_type=str(fixture["block_type"]), page_number=1, char_start=0,
         char_end=len(text), span_id=span.span_id, parser_confidence=1.0,
     )
+    prior_table_id = f"table-prior-{suffix}"
+    child_table_id = f"table-child-{suffix}"
+    continuation_candidate = {
+        "candidate_id": f"continuation-{prior_table_id}-{child_table_id}",
+        "previous_table_id": prior_table_id,
+        "current_table_id": child_table_id,
+        "eligible_for_review": True,
+        "review_status": "proposed",
+        "checks": {
+            "adjacent_pages": True,
+            "unique_predecessor": True,
+            "matching_column_count": True,
+            "child_headers_missing": True,
+            "predecessor_headers_present": True,
+            "metadata_compatible": True,
+        },
+    }
+    tables = (
+        Table(prior_table_id, version_id, "Synthetic table", 1, page_start=1, page_end=1),
+        Table(child_table_id, version_id, None, 0, page_start=2, page_end=2,
+              continuation_candidate=continuation_candidate),
+    )
+    cells = tuple(
+        TableCell(
+            cell_id=f"{table_id}-cell-{column_index}", table_id=table_id, version_id=version_id,
+            row_index=0, column_index=column_index, raw_text=f"column-{column_index}", page_number=page,
+        )
+        for table_id, page in ((prior_table_id, 1), (child_table_id, 2))
+        for column_index in range(3)
+    )
     document = Document(
         document_id=document_id, title=str(fixture["title"]), document_type="text",
         security_code=str(fixture["security_code"]), entity_name=str(fixture["entity_name"]),
@@ -280,7 +312,9 @@ def main() -> None:
     )
     bundle = DocumentBundle(
         document=document, version=version, payload=payload, spans=(span,), blocks=(block,),
-        read_principals=tuple(str(item) for item in fixture["read_principals"]),
+        tables=tables,
+        cells=cells,
+        read_principals=tuple(sorted({str(item) for item in fixture["read_principals"]} | {"continuation-reviewer"})),
     )
     rollback_payload = payload + b" injected transaction rollback fixture"
     rollback_sha256 = hashlib.sha256(rollback_payload).hexdigest()
@@ -533,6 +567,31 @@ def main() -> None:
         or store.release_summaries()["active_release_id"] != release_id
     ):
         raise AssertionError("PostgreSQL reference receipt and release publication did not complete")
+    confirmed_continuation = store.review_table_continuation(
+        child_table_id,
+        action="confirm",
+        reviewer_id="continuation-reviewer",
+        release_id=release_id,
+        expected_content_sha256=payload_sha256,
+        note="synthetic PostgreSQL JSON-path contract probe",
+    )
+    revoked_continuation = store.review_table_continuation(
+        child_table_id,
+        action="revoke",
+        reviewer_id="continuation-reviewer",
+        release_id=release_id,
+        expected_content_sha256=payload_sha256,
+        note="synthetic PostgreSQL JSON-path contract probe cleanup",
+    )
+    if (
+        confirmed_continuation["status"] != "confirmed" or not confirmed_continuation["changed"]
+        or revoked_continuation["status"] != "revoked" or not revoked_continuation["changed"]
+        or revoked_continuation["revision"] != confirmed_continuation["revision"] + 1
+    ):
+        raise AssertionError("PostgreSQL continuation review did not confirm and revoke the synthetic candidate")
+    output["postgres_continuation_review_json_path_translation"] = {
+        "confirmed": True, "revoked": True, "revision_increased_twice": True,
+    }
     missing_receipt_release_id = f"{release_id}-missing-backend"
     missing_receipt_spec = replace(
         release_spec,

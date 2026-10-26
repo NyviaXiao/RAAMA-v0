@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from adaptive_mas.industrial_rag.models import CorpusReleaseSpec, Document, DocumentBundle, DocumentVersion
 from adaptive_mas.industrial_rag.document_ai import download_docling_assets
@@ -34,6 +34,13 @@ def _load_json(path: str | Path) -> dict[str, object]:
     return value
 
 
+def _load_json_bytes(payload: bytes) -> dict[str, object]:
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("metadata file must contain one JSON object")
+    return value
+
+
 def _store(database_path: str | Path, object_root: str | Path) -> IndustrialRagStore:
     return IndustrialRagStore(database_path, LocalContentAddressedStore(object_root))
 
@@ -49,13 +56,19 @@ def ingest_file(
     docling_artifacts_path: str | Path | None = None,
     captured_at: datetime | str | None = None,
     ingested_at: datetime | str | None = None,
+    source_bytes: bytes | None = None,
+    metadata_bytes: bytes | None = None,
+    ingested_at_factory: Callable[[], datetime | str] | None = None,
 ) -> dict[str, object]:
     source = Path(source_path).resolve()
-    if not source.is_file():
-        raise FileNotFoundError("source document does not exist")
-    payload = source.read_bytes()
+    if source_bytes is None:
+        if not source.is_file():
+            raise FileNotFoundError("source document does not exist")
+        payload = source.read_bytes()
+    else:
+        payload = bytes(source_bytes)
     digest = hashlib.sha256(payload).hexdigest()
-    metadata = _load_json(metadata_path)
+    metadata = _load_json(metadata_path) if metadata_bytes is None else _load_json_bytes(metadata_bytes)
     allowed = {
         "document_id", "version_id", "source_id", "title", "document_type", "security_code", "entity_name",
         "report_period", "accounting_basis", "aliases", "source_url", "rights_note",
@@ -76,7 +89,7 @@ def ingest_file(
         parser_timeout_seconds=300,
     )
     capture_time = captured_at or _now()
-    ingest_time = ingested_at or _now()
+    ingest_time = ingested_at_factory() if ingested_at_factory is not None else (ingested_at or _now())
     version_id = str(metadata.get("version_id") or f"v-{digest[:24]}")
     document = Document(
         document_id=str(metadata["document_id"]), title=str(metadata["title"]),

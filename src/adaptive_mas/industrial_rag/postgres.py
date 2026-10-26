@@ -9,6 +9,18 @@ from typing import Any
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore
 
 
+_SQLITE_JSON_EXTRACT = re.compile(
+    r"(?is)json_extract\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*"
+    r"'(\$\.[A-Za-z_][A-Za-z0-9_.]*)'\s*\)"
+)
+
+
+def _translate_json_extract(match: re.Match[str]) -> str:
+    column, json_path = match.groups()
+    path_parts = json_path[2:].split(".")
+    return f"({column}::jsonb #>> '{{{','.join(path_parts)}}}')"
+
+
 class _HybridRow(dict[str, Any]):
     def __init__(self, names: tuple[str, ...], values: tuple[Any, ...]) -> None:
         super().__init__(zip(names, values, strict=True))
@@ -52,6 +64,7 @@ def translate_sqlite_contract(sql: str) -> str:
         )
     else:
         stripped = re.sub(r"(?is)^INSERT\s+OR\s+REPLACE\s+INTO\s+", "INSERT INTO ", stripped)
+    stripped = _SQLITE_JSON_EXTRACT.sub(_translate_json_extract, stripped)
     return stripped.replace("?", "%s")
 
 
