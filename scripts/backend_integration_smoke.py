@@ -10,8 +10,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -417,6 +419,78 @@ def main() -> None:
         raise AssertionError("duplicate PostgreSQL outbox ack changed a committed receipt")
     if _outbox_verify_once(store) is not None:
         raise AssertionError("completed PostgreSQL outbox event was claimable a second time")
+
+    parallel_event_keys = [f"pg-outbox-parallel-{suffix}-{index}" for index in range(2)]
+    fenced_event_key = f"pg-outbox-fenced-{suffix}"
+    with store._connect() as connection:
+        connection.executemany(
+            "INSERT INTO rag_outbox(event_key,event_type,payload_json,status,attempts,created_at) VALUES(?,?,?,'pending',0,?)",
+            [
+                (event_key, "synthetic.contract_probe", "{}", now.isoformat())
+                for event_key in (*parallel_event_keys, fenced_event_key)
+            ],
+        )
+    claim_barrier = threading.Barrier(2)
+
+    def concurrent_claim(consumer_id: str) -> dict[str, object] | None:
+        claim_barrier.wait(timeout=10)
+        return store.claim_outbox(consumer_id, lease_seconds=30)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        concurrent_claims = list(executor.map(concurrent_claim, ("parallel-consumer-a", "parallel-consumer-b")))
+    if (
+        any(claim is None for claim in concurrent_claims)
+        or {str(claim["event_key"]) for claim in concurrent_claims if claim is not None} != set(parallel_event_keys)
+    ):
+        raise AssertionError("concurrent PostgreSQL outbox claims did not lease distinct pending events")
+    for claim in concurrent_claims:
+        assert claim is not None
+        if not store.finish_outbox(
+            str(claim["event_key"]), str(claim["consumer_id"]), {"parallel_claim": True},
+            lease_generation=int(claim["lease_generation"]),
+        ):
+            raise AssertionError("concurrent PostgreSQL outbox claim did not commit")
+
+    expired_claim = store.claim_outbox("lease-fence-consumer", lease_seconds=0.05)
+    if expired_claim is None or expired_claim["event_key"] != fenced_event_key:
+        raise AssertionError("PostgreSQL lease-fencing event was not claimed")
+    time.sleep(0.07)
+    current_claim = store.claim_outbox("lease-fence-consumer", lease_seconds=30)
+    if (
+        current_claim is None
+        or current_claim["event_key"] != fenced_event_key
+        or int(current_claim["lease_generation"]) != int(expired_claim["lease_generation"]) + 1
+    ):
+        raise AssertionError("expired PostgreSQL outbox lease was not issued a new generation")
+    try:
+        store.finish_outbox(
+            fenced_event_key, "lease-fence-consumer", {"stale_ack": True},
+            lease_generation=int(expired_claim["lease_generation"]),
+        )
+    except RuntimeError as error:
+        if str(error) != "consumer no longer owns this outbox lease":
+            raise
+    else:
+        raise AssertionError("PostgreSQL accepted an acknowledgement from an expired lease generation")
+    with store._connect() as connection:
+        stale_receipt = connection.execute(
+            "SELECT 1 FROM rag_consumer_receipts WHERE consumer_id=? AND event_key=?",
+            ("lease-fence-consumer", fenced_event_key),
+        ).fetchone()
+    if stale_receipt is not None:
+        raise AssertionError("stale PostgreSQL outbox acknowledgement persisted a consumer receipt")
+    if not store.finish_outbox(
+        fenced_event_key, "lease-fence-consumer", {"fresh_ack": True},
+        lease_generation=int(current_claim["lease_generation"]),
+    ):
+        raise AssertionError("current PostgreSQL lease generation failed to commit")
+    if store.claim_outbox("lease-fence-consumer") is not None:
+        raise AssertionError("completed PostgreSQL lease-fencing event was claimable again")
+    output["postgres_outbox_concurrency_and_lease_fencing"] = {
+        "two_concurrent_consumers_received_distinct_events": True,
+        "stale_generation_ack_rejected_without_receipt": True,
+        "current_generation_ack_committed": True,
+    }
 
     source_manifest = store.source_manifest([version_id])
     text_index = store.preview_reference_index_manifest(release_id, [version_id])
