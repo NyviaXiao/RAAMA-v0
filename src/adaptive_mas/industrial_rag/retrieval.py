@@ -106,15 +106,20 @@ def _decimal_value(value: object) -> Decimal | None:
     return result if result.is_finite() else None
 
 
-def _period_matches_request(requested_period: str | None, observed_period: str | None) -> bool:
+def _period_matches_request(
+    requested_period: str | None,
+    observed_period: str | None,
+    *,
+    metric: str | None = None,
+) -> bool:
     if requested_period is None:
         return True
     if observed_period == requested_period:
         return True
     return bool(
         re.fullmatch(r"(?:19|20)\d{2}", requested_period)
-        and re.fullmatch(r"(?:19|20)\d{2}-\d{2}-\d{2}", observed_period or "")
-        and observed_period.startswith(requested_period + "-")
+        and metric in {"total_assets", "debt_ratio"}
+        and observed_period == requested_period + "-12-31"
     )
 
 
@@ -891,7 +896,11 @@ class IndustrialRagService:
                 for observation in observations:
                     if observation["metric"] != metric.metric or observation["period"] is None:
                         continue
-                    if not _period_matches_request(requested_period_key, observation["period"]):
+                    if not _period_matches_request(
+                        requested_period_key,
+                        observation["period"],
+                        metric=str(observation["metric"]),
+                    ):
                         continue
                     if observation["unit_signature"] is None or observation["basis_signature"] is None:
                         continue
@@ -989,6 +998,7 @@ class IndustrialRagService:
                     and _period_matches_request(
                         normalized_period,
                         str(observation.get("report_period")) if observation.get("report_period") is not None else None,
+                        metric=metric.metric if metric is not None else None,
                     )
                 ]
                 coverage_rows.append({

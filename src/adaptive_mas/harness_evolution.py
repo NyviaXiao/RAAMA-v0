@@ -26,7 +26,7 @@ from adaptive_mas.agents.harness import (
     provider_request_sha256,
     run_research_harness,
 )
-from adaptive_mas.agents.harness_prompts import seed_candidate, validate_candidate
+from adaptive_mas.agents.harness_prompts import parse_research_policy, seed_candidate, validate_candidate
 from adaptive_mas.agents.public_experts import build_public_expert_snapshot
 from adaptive_mas.data.research import ResearchData
 from adaptive_mas.package_identity import source_package_identity
@@ -1412,6 +1412,115 @@ def _selection_summary(
     }
 
 
+_ABLATION_MODULES = (
+    (1, "layout_ocr_routing", "offline_index_rebuild_required"),
+    (2, "cross_page_table_reconstruction", "review_governed_not_candidate_tunable"),
+    (3, "semantic_row_group_chunking", "offline_index_rebuild_required"),
+    (4, "hierarchy_page_cell_linkage", "immutable_citation_contract"),
+    (5, "entity_alias_disambiguation", "immutable_metric_alias_contract"),
+    (6, "time_period_basis_extraction", "immutable_temporal_contract"),
+    (7, "constrained_query_rewrite", "bounded_policy_ablation"),
+    (8, "multi_hop_decomposition", "bounded_policy_ablation"),
+    (9, "bm25_support_channel", "bounded_policy_ablation"),
+    (10, "dense_embedding_retrieval", "conditional_policy_ablation"),
+    (11, "reciprocal_rank_fusion", "bounded_policy_ablation"),
+    (12, "independent_reranker", "bounded_policy_ablation"),
+    (13, "reviewed_parent_context", "bounded_policy_ablation"),
+    (14, "financial_fact_normalization", "immutable_parser_contract"),
+    (15, "context_allocation", "bounded_policy_ablation"),
+    (16, "evidence_coverage_budget", "bounded_policy_ablation"),
+    (17, "challenge_and_stop", "immutable_safety_policy"),
+    (18, "claim_citation_alignment", "immutable_evaluator_contract"),
+    (19, "deterministic_arithmetic_validation", "immutable_safety_policy"),
+    (20, "conflict_and_unsupported_claim_checks", "immutable_safety_policy"),
+)
+
+
+def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, object]]:
+    """Prepare one-factor policy variants and explicit non-runnable module rows."""
+    baseline = validate_candidate(candidate)
+    baseline_policy = parse_research_policy(baseline["research_policy_json"])
+    rows = []
+    for module_id, name, mode in _ABLATION_MODULES:
+        row: dict[str, object] = {
+            "module_id": module_id,
+            "module": name,
+            "mode": mode,
+            "status": "not_runnable",
+            "reason": mode,
+            "evaluation_splits": ["selection", "frozen_evaluation"],
+        }
+        policy = dict(baseline_policy)
+        changed_policy_fields: list[str] = []
+        if module_id == 7:
+            policy["max_searches"] = max(2, int(policy["max_searches"]) - 2)
+            changed_policy_fields = ["max_searches"]
+        elif module_id == 8:
+            policy["candidate_limit"] = 1
+            changed_policy_fields = ["candidate_limit"]
+        elif module_id == 9:
+            policy["channels"] = [channel for channel in policy["channels"] if channel != "bm25"]
+            if not policy["channels"] or not set(policy["channels"]).intersection({"structured_facts", "bm25"}):
+                row["reason"] = "cannot_remove_supporting_bm25_without_a_primary_channel"
+                rows.append(row)
+                continue
+            changed_policy_fields = ["channels"]
+        elif module_id == 10:
+            if "dense" not in policy["channels"]:
+                row["reason"] = "dense_channel_not_in_the_active_baseline"
+                rows.append(row)
+                continue
+            policy["channels"] = [channel for channel in policy["channels"] if channel != "dense"]
+            changed_policy_fields = ["channels"]
+        elif module_id == 11:
+            policy["rrf_rank_constant"] = 20 if int(policy["rrf_rank_constant"]) == 100 else 100
+            changed_policy_fields = ["rrf_rank_constant"]
+        elif module_id == 12:
+            if policy["reranker_profile"] == "disabled":
+                row["reason"] = "reranker_already_disabled_in_the_active_baseline"
+                rows.append(row)
+                continue
+            policy["reranker_profile"] = "disabled"
+            changed_policy_fields = ["reranker_profile"]
+        elif module_id == 13:
+            if policy["parent_context_mode"] == "source_row_only":
+                row["reason"] = "parent_context_already_disabled_in_the_active_baseline"
+                rows.append(row)
+                continue
+            policy["parent_context_mode"] = "source_row_only"
+            policy["table_expansion_limit"] = 0
+            changed_policy_fields = ["parent_context_mode", "table_expansion_limit"]
+        elif module_id == 15:
+            policy["context_char_limit"] = 400
+            changed_policy_fields = ["context_char_limit"]
+        elif module_id == 16:
+            policy["evidence_limit"] = 2
+            changed_policy_fields = ["evidence_limit"]
+        else:
+            rows.append(row)
+            continue
+
+        if all(policy[key] == baseline_policy[key] for key in changed_policy_fields):
+            row["reason"] = "active_baseline_already_uses_the_ablation_value"
+            rows.append(row)
+            continue
+        ablated_candidate = validate_candidate({
+            **baseline,
+            "research_policy_json": _json(policy),
+        })
+        row.update({
+            "status": "planned_not_executed",
+            "reason": "single_bounded_policy_factor; paired model evaluation is a separate budgeted run",
+            "changed_policy_fields": changed_policy_fields,
+            "candidate_sha256": hashlib.sha256(_json(ablated_candidate).encode("utf-8")).hexdigest(),
+            "candidate": ablated_candidate,
+        })
+        rows.append(row)
+    if [row["module_id"] for row in rows] != list(range(1, 21)):
+        raise RuntimeError("the fixed GEPA ablation catalog must contain modules 1 through 20 exactly once")
+    return rows
+
+
 def _paired_case_deltas(
     baseline_rows: list[dict[str, object]],
     comparison_rows: list[dict[str, object]],
@@ -1629,6 +1738,26 @@ def run_gepa_evolution(
             raise ValueError("run_id is already bound to a different frozen case/package manifest")
     else:
         _write_json(case_manifest_path, case_manifest)
+    ablation_rows = build_module_ablation_plan(active_candidate)
+    module_ablation_plan = {
+        "schema_version": "adaptive-mas.gepa-module-ablation-plan.v1",
+        "status": "plan_only_no_ablation_results",
+        "run_id": run_id,
+        "baseline_version_id": active_version_id,
+        "baseline_candidate_sha256": active_candidate_sha256,
+        "selection_case_set_sha256": _stable_hash([
+            row for row in case_rows if row["split"] == "selection"
+        ]),
+        "frozen_case_set_sha256": _stable_hash([
+            row for row in case_rows if row["split"] == "frozen_evaluation"
+        ]),
+        "rows": ablation_rows,
+        "planned_policy_variant_count": sum(row["status"] == "planned_not_executed" for row in ablation_rows),
+        "execution_status": "No module ablation was executed; each variant requires a separate paired run and provider-call budget.",
+        "non_causal_scope": "This schedule defines one-factor variants only; measured deltas will not prove causal module effects.",
+    }
+    module_ablation_plan_file = "module_ablation_plan.json"
+    _write_json(run_dir / module_ablation_plan_file, module_ablation_plan)
     reflection_payloads: list[dict[str, object]] = []
     evaluation_action_traces: list[dict[str, object]] = []
     action_trace_file = "evaluation_action_traces.json"
@@ -2141,6 +2270,9 @@ def run_gepa_evolution(
         "paired_evaluation_file": paired_evaluation_file,
         "candidate_diff": candidate_diff,
         "candidate_audit_file": "candidate_audit.json",
+        "module_ablation_plan_file": module_ablation_plan_file,
+        "module_ablation_plan_status": module_ablation_plan["status"],
+        "planned_policy_ablation_count": module_ablation_plan["planned_policy_variant_count"],
         "procedural_memory": {
             "active_version_before": active_version.get("procedural_memory"),
             "active_version_after": selected_version.get("procedural_memory"),
@@ -2176,3 +2308,206 @@ def run_gepa_evolution(
     _write_json(run_dir / "evolution_report.json", output)
     (run_dir / "candidate.diff").write_text(candidate_diff, encoding="utf-8")
     return output
+
+
+def run_paired_module_ablation(
+    module_id: int,
+    cases: dict[str, list[HarnessCase]],
+    *,
+    candidate: dict[str, str],
+    research: ResearchData,
+    client: QwenClient,
+    budget: CallBudget,
+    config: dict[str, object],
+    output_root: str | Path,
+    run_id: str,
+    procedural_memory: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Run one declared policy ablation against a baseline on fixed cases."""
+    if isinstance(module_id, bool) or not isinstance(module_id, int) or not 1 <= module_id <= 20:
+        raise ValueError("module_id must identify one of the fixed 20 modules")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,96}", run_id):
+        raise ValueError("run_id must be a safe immutable identifier")
+    if (
+        len(cases.get("selection", [])) != SELECTION_CASE_LIMIT
+        or len(cases.get("frozen_evaluation", [])) != FROZEN_CASE_LIMIT
+        or any(case.split != split for split in ("selection", "frozen_evaluation") for case in cases[split])
+    ):
+        raise ValueError("module ablation requires the fixed 2-case selection and 2-case frozen splits")
+    if budget.unresolved_call:
+        raise RuntimeError("the shared call ledger has an unknown outbound outcome; resolve it before evaluating")
+
+    baseline_candidate = validate_candidate(candidate)
+    matrix = build_module_ablation_plan(baseline_candidate)
+    module_row = next(row for row in matrix if row["module_id"] == module_id)
+    if module_row["status"] != "planned_not_executed":
+        raise ValueError(f"module {module_id} has no safe ablation for this active candidate: {module_row['reason']}")
+    ablated_candidate = validate_candidate(module_row["candidate"])
+    paired_cases = [*cases["selection"], *cases["frozen_evaluation"]]
+    planned_provider_call_upper_bound = 2 * len(paired_cases) * MAX_RESEARCH_CALLS_PER_CASE
+    if budget.remaining_provider_calls < planned_provider_call_upper_bound:
+        raise RuntimeError(
+            f"paired module ablation requires a reserved provider-call ceiling of {planned_provider_call_upper_bound}; "
+            f"only {budget.remaining_provider_calls} remain"
+        )
+
+    run_dir = Path(output_root) / "module_ablations" / run_id
+    if run_dir.exists():
+        raise ValueError("module ablation run_id already owns immutable or partial experiment history")
+    run_dir.mkdir(parents=True, exist_ok=False)
+    baseline_sha256 = hashlib.sha256(_json(baseline_candidate).encode("utf-8")).hexdigest()
+    ablated_sha256 = hashlib.sha256(_json(ablated_candidate).encode("utf-8")).hexdigest()
+    case_inputs = {
+        "schema_version": "adaptive-mas.gepa-module-ablation-inputs.v1",
+        "module_id": module_id,
+        "cases": [
+            {
+                "as_of": case.as_of.isoformat(),
+                "split": case.split,
+                "public_snapshot": case.public_snapshot,
+                "required_observations": case.required_observations,
+                "retrospective": case.retrospective,
+            }
+            for case in paired_cases
+        ],
+    }
+    case_inputs_sha256 = _stable_hash(case_inputs)
+    package_identity = {
+        "schema_version": "adaptive-mas.gepa-module-ablation-identity.v1",
+        "source_identity": source_package_identity(),
+        "module_id": module_id,
+        "baseline_candidate_sha256": baseline_sha256,
+        "ablated_candidate_sha256": ablated_sha256,
+        "config_sha256": _stable_hash(config),
+        "case_inputs_sha256": case_inputs_sha256,
+        "procedural_memory_sha256": _stable_hash(procedural_memory) if procedural_memory is not None else None,
+        "model": client.model,
+        "endpoint_sha256": hashlib.sha256(client.endpoint.rstrip("/").encode("utf-8")).hexdigest(),
+        "evaluator_version": EVALUATOR_VERSION,
+        "planned_provider_call_upper_bound": planned_provider_call_upper_bound,
+    }
+    package_identity_sha256 = _stable_hash(package_identity)
+    budget.package_identity_sha256 = package_identity_sha256
+    budget.package_identity_manifest = package_identity
+    case_manifest = {
+        "schema_version": "adaptive-mas.gepa-module-ablation-manifest.v1",
+        "run_id": run_id,
+        "module_id": module_id,
+        "module": module_row["module"],
+        "package_identity_sha256": package_identity_sha256,
+        "case_inputs_sha256": case_inputs_sha256,
+        "baseline_candidate_sha256": baseline_sha256,
+        "ablated_candidate_sha256": ablated_sha256,
+        "baseline_role": "held_fixed_for_each_same_case_pair",
+        "splits": {
+            name: [case.as_of.isoformat() for case in cases[name]]
+            for name in ("selection", "frozen_evaluation")
+        },
+        "changed_policy_fields": module_row["changed_policy_fields"],
+        "planned_provider_call_upper_bound": planned_provider_call_upper_bound,
+    }
+    case_manifest_sha256 = _stable_hash(case_manifest)
+    _write_json(run_dir / "case_inputs.json", case_inputs)
+    _write_json(run_dir / "case_manifest.json", case_manifest)
+    _write_json(run_dir / "module_ablation_plan.json", {
+        "schema_version": "adaptive-mas.gepa-module-ablation-plan.v1",
+        "status": "one_module_selected_for_paired_execution",
+        "baseline": baseline_candidate,
+        "module_row": module_row,
+    })
+    evaluations: list[dict[str, object]] = []
+    evaluation_trace_path = run_dir / "evaluation_action_traces.json"
+
+    def checkpoint(status: str) -> None:
+        _write_json(evaluation_trace_path, {
+            "schema_version": "adaptive-mas.gepa-module-ablation-traces.v1",
+            "case_manifest_sha256": case_manifest_sha256,
+            "checkpoint_status": status,
+            "evaluation_count": len(evaluations),
+            "evaluations": evaluations,
+        })
+
+    checkpoint("recording")
+    rows: dict[str, dict[str, list[dict[str, object]]]] = {
+        name: {"baseline": [], "ablated": []}
+        for name in ("selection", "frozen_evaluation")
+    }
+    call_start = len(budget.calls)
+    logical_start = len(budget.logical_calls)
+    candidates = (
+        ("baseline", baseline_candidate, baseline_sha256),
+        ("ablated", ablated_candidate, ablated_sha256),
+    )
+    for case in paired_cases:
+        for label, task_candidate, candidate_sha256 in candidates:
+            trace_sink: list[dict[str, object]] = []
+            try:
+                score, info = evaluate_candidate(
+                    task_candidate,
+                    case,
+                    research=research,
+                    client=client,
+                    budget=budget,
+                    config=config,
+                    candidate_version_id=f"module-{module_id}-{label}",
+                    procedural_memory=procedural_memory,
+                    trace_sink=trace_sink,
+                )
+            except Exception as exc:
+                evaluations.append({
+                    "split": case.split,
+                    "label": label,
+                    "as_of": case.as_of.isoformat(),
+                    "candidate_sha256": candidate_sha256,
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "actions": trace_sink,
+                })
+                checkpoint("failed")
+                raise
+            evaluation = {
+                "split": case.split,
+                "label": label,
+                "as_of": case.as_of.isoformat(),
+                "candidate_sha256": candidate_sha256,
+                "score": score,
+                "quality_metrics": info["quality_metrics"],
+                "task_model_usage": info["task_model_usage"],
+                "actions": trace_sink,
+            }
+            evaluations.append(evaluation)
+            checkpoint("recording")
+            rows[case.split][label].append({
+                "as_of": case.as_of.isoformat(),
+                "score": score,
+                "metrics": info["quality_metrics"],
+                "task_model_usage": info["task_model_usage"],
+            })
+
+    paired = {
+        split: _paired_case_deltas(rows[split]["baseline"], rows[split]["ablated"])
+        for split in ("selection", "frozen_evaluation")
+    }
+    logical_calls = budget.logical_calls[logical_start:]
+    report = {
+        "schema_version": "adaptive-mas.gepa-module-ablation-result.v1",
+        "status": "complete",
+        "run_id": run_id,
+        "module_id": module_id,
+        "module": module_row["module"],
+        "case_manifest_sha256": case_manifest_sha256,
+        "baseline_candidate_sha256": baseline_sha256,
+        "ablated_candidate_sha256": ablated_sha256,
+        "changed_policy_fields": module_row["changed_policy_fields"],
+        "paired_evaluation": paired,
+        "failure_attribution_scope": "observed per-metric and cost deltas on fixed cases; not causal proof of module effect",
+        "provider_call_count": sum(row.get("status") in {"started", "completed"} for row in budget.calls[call_start:]),
+        "logical_estimated_cost_cny": sum(float(row["logical_estimated_cost_cny"]) for row in logical_calls),
+        "planned_provider_call_upper_bound": planned_provider_call_upper_bound,
+        "case_inputs_file": "case_inputs.json",
+        "action_trace_file": "evaluation_action_traces.json",
+    }
+    checkpoint("complete")
+    _write_json(run_dir / "paired_evaluation.json", paired)
+    _write_json(run_dir / "result.json", report)
+    return report

@@ -40,7 +40,7 @@ from adaptive_mas.industrial_rag.parser import (
 )
 from adaptive_mas.industrial_rag.postgres import _row_factory, translate_sqlite_contract
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore, ImmutableConflict, ReleaseNotReady
-from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
+from adaptive_mas.industrial_rag.retrieval import IndustrialRagService, _period_matches_request
 from adaptive_mas.research_provenance import stable_hash
 
 
@@ -159,6 +159,71 @@ def _plan(*, as_of: datetime | None = None, principal: str = "analyst", time_mod
         report_periods=("2024",), release_id=release_id, channels=channels,
         time_mode=time_mode,  # type: ignore[arg-type]
     )
+
+
+def test_annual_period_matching_rejects_interim_dates_and_flow_date_ambiguity() -> None:
+    assert _period_matches_request("2024", "2024", metric="operating_revenue")
+    assert _period_matches_request("2024", "2024-12-31", metric="total_assets")
+    assert _period_matches_request("2024", "2024-12-31", metric="debt_ratio")
+    assert not _period_matches_request("2024", "2024-03-31", metric="total_assets")
+    assert not _period_matches_request("2024", "2024-06-30", metric="total_assets")
+    assert not _period_matches_request("2024", "2024-12-31", metric="operating_revenue")
+    assert _period_matches_request("2024-12-31", "2024-12-31", metric="operating_revenue")
+
+
+@pytest.mark.parametrize(
+    ("source_period", "prior_period"),
+    (("2024-03-31", "2023-03-31"), ("2024-06-30", "2023-06-30")),
+)
+def test_annual_flow_research_does_not_cover_an_interim_table_date(
+    tmp_path, source_period: str, prior_period: str,
+) -> None:
+    base = _bundle()
+    table_id = "version-1-revenue-period-table"
+    table = Table(
+        table_id,
+        "version-1",
+        "营业收入",
+        1,
+        unit_text="千元",
+        accounting_basis="consolidated",
+        report_period="2024",
+        page_start=3,
+        page_end=3,
+    )
+    cells = (
+        TableCell("revenue-r0-c0", table_id, "version-1", 0, 0, "项目", page_number=3),
+        TableCell("revenue-r0-c1", table_id, "version-1", 0, 1, source_period, page_number=3),
+        TableCell("revenue-r0-c2", table_id, "version-1", 0, 2, prior_period, page_number=3),
+        TableCell("revenue-r1-c0", table_id, "version-1", 1, 0, "营业收入", page_number=3),
+        TableCell(
+            "revenue-r1-c1", table_id, "version-1", 1, 1, "100", "100", "number",
+            page_number=3, unit="千元", accounting_basis="consolidated", report_period=source_period,
+        ),
+        TableCell(
+            "revenue-r1-c2", table_id, "version-1", 1, 2, "90", "90", "number",
+            page_number=3, unit="千元", accounting_basis="consolidated", report_period=prior_period,
+        ),
+    )
+    block = Block(
+        "version-1-revenue-row",
+        "version-1",
+        f"列头：项目 | {source_period} | {prior_period}\n数据行：营业收入 | 100 | 90",
+        block_type="table_row_group",
+        page_number=3,
+        table_id=table_id,
+        row_start=1,
+        row_end=1,
+    )
+    bundle = replace(base, tables=(table,), cells=cells, blocks=(block,), facts=())
+
+    result = _research_one_bundle(tmp_path, bundle, "2024年度合并营业收入是多少千元")
+
+    coverage = result["coverage"][0]
+    assert coverage["normalized_report_period"] == "2024"
+    assert coverage["status"] != "located"
+    assert coverage["observed_report_periods"] == []
+    assert result["numeric_claim_ready"] is False
 
 
 def test_sqlite_ingest_release_query_and_citation_are_source_bound(tmp_path) -> None:

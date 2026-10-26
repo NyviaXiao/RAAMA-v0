@@ -14,6 +14,7 @@ from gepa.strategies.instruction_proposal import InstructionProposalSignature
 from adaptive_mas.agents.harness import (
     CallBudget,
     FIXED_RESEARCH_POLICY,
+    InvalidToolInput,
     SUBMIT_REPORT,
     _accept_report,
     _compact_tool_message,
@@ -34,6 +35,8 @@ from adaptive_mas.agents.harness_prompts import (
 from adaptive_mas.harness_evolution import (
     HarnessCase,
     HarnessVersionStore,
+    build_module_ablation_plan,
+    run_paired_module_ablation,
     build_retrospective_cases,
     _public_tool_projection,
     _paired_case_deltas,
@@ -361,6 +364,14 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
     assert trace_payload["evaluation_count"] == len(trace_payload["evaluations"]) == 15
     input_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "case_inputs.json"
     assert len(json.loads(input_file.read_text(encoding="utf-8"))["cases"]) == 8
+    ablation_file = tmp_path / "versions" / "runs" / "offline-stage3-fixture" / "module_ablation_plan.json"
+    ablation_payload = json.loads(ablation_file.read_text(encoding="utf-8"))
+    assert result["module_ablation_plan_file"] == "module_ablation_plan.json"
+    assert ablation_payload["status"] == "plan_only_no_ablation_results"
+    assert len(ablation_payload["rows"]) == 20
+    assert ablation_payload["planned_policy_variant_count"] == 8
+    assert ablation_payload["execution_status"].startswith("No module ablation was executed")
+    assert ablation_payload["rows"][16]["mode"] == "immutable_safety_policy"
     assert {entry["phase"] for entry in trace_payload["evaluations"]} == {
         "exploration", "selection", "frozen_evaluation", "reuse_demo",
     }
@@ -413,6 +424,78 @@ def test_paired_case_deltas_name_metric_and_cost_regressions_without_claiming_ca
     assert "not causal" in result["pairs"][0]["failure_attribution_scope"]
     with pytest.raises(ValueError, match="same fixed case dates"):
         _paired_case_deltas(baseline, [{**comparison[0], "as_of": "2026-04-21"}])
+
+
+def test_module_ablation_plan_has_twenty_fixed_rows_and_only_bounded_policy_variants() -> None:
+    rows = build_module_ablation_plan(seed_candidate())
+    variants = [row for row in rows if row["status"] == "planned_not_executed"]
+
+    assert [row["module_id"] for row in rows] == list(range(1, 21))
+    assert len(variants) == 8
+    assert all(row["candidate"]["procedural_experience"] == seed_candidate()["procedural_experience"] for row in variants)
+    assert all(row["changed_policy_fields"] for row in variants)
+    assert rows[16]["reason"] == "immutable_safety_policy"
+
+
+def test_module_ablation_runner_freezes_pairs_and_preflights_provider_budget(tmp_path, monkeypatch) -> None:
+    cases = {name: [] for name in ("selection", "frozen_evaluation")}
+    for index, split in enumerate(("selection", "selection", "frozen_evaluation", "frozen_evaluation")):
+        cases[split].append(HarnessCase(
+            date(2026, 5, 1 + index),
+            {"data_mode": "retrospective_fixture", "case_index": index},
+            split,
+            required_observations=[],
+        ))
+    candidate = seed_candidate()
+
+    def fake_evaluate(task_candidate, case, *, candidate_version_id, trace_sink, **_kwargs):
+        is_ablated = candidate_version_id.endswith("ablated")
+        score = 0.7 if is_ablated else 0.8
+        usage = {
+            "logical_estimated_cost_cny": 0.02 if is_ablated else 0.01,
+            "provider_call_count": 1,
+        }
+        metrics = {"fact_accuracy": 1.0, "citation_precision": 0.9 if is_ablated else 1.0, "score": score}
+        trace_sink.append({"as_of": case.as_of.isoformat(), "task_usage": usage})
+        return score, {"quality_metrics": metrics, "task_model_usage": usage}
+
+    monkeypatch.setattr("adaptive_mas.harness_evolution.evaluate_candidate", fake_evaluate)
+    result = run_paired_module_ablation(
+        12,
+        cases,
+        candidate=candidate,
+        research=ResearchData([], [], [], [], []),
+        client=SimpleNamespace(model="fixture-model", endpoint="https://fixture.invalid"),
+        budget=CallBudget(max_calls=160),
+        config={"fixture": True},
+        output_root=tmp_path,
+        run_id="module-12-pair",
+    )
+
+    run_dir = tmp_path / "module_ablations" / "module-12-pair"
+    trace = json.loads((run_dir / "evaluation_action_traces.json").read_text(encoding="utf-8"))
+    assert result["status"] == "complete"
+    assert trace["checkpoint_status"] == "complete"
+    assert trace["evaluation_count"] == 8
+    assert result["paired_evaluation"]["selection"]["case_count"] == 2
+    assert result["paired_evaluation"]["frozen_evaluation"]["case_count"] == 2
+    assert result["paired_evaluation"]["selection"]["pairs"][0]["quality_regressions"] == [
+        "citation_precision", "score",
+    ]
+    assert result["paired_evaluation"]["selection"]["pairs"][0]["logical_cost_increased"] is True
+
+    with pytest.raises(RuntimeError, match="requires a reserved provider-call ceiling of 80"):
+        run_paired_module_ablation(
+            12,
+            cases,
+            candidate=candidate,
+            research=ResearchData([], [], [], [], []),
+            client=SimpleNamespace(model="fixture-model", endpoint="https://fixture.invalid"),
+            budget=CallBudget(max_calls=79),
+            config={"fixture": True},
+            output_root=tmp_path / "insufficient-budget",
+            run_id="must-not-start",
+        )
 
 
 def test_public_tool_projection_keeps_retrospective_capture_audit_fields() -> None:
@@ -1728,6 +1811,58 @@ def test_bounded_gepa_policy_controls_indexed_research_without_changing_hard_sea
     }
     assert result["research_policy"]["challenge_policy"] == "mandatory_correction_search"
     assert result["research_policy"]["stop_policy"] == "coverage_then_bounded_search"
+
+
+def test_indexed_search_enforces_policy_symbol_limit_and_rejects_duplicate_symbols() -> None:
+    class CapturingRagService:
+        def __init__(self) -> None:
+            self.research_calls = 0
+
+        def research(self, plan, **kwargs):
+            self.research_calls += 1
+            return {
+                "status": "no_evidence",
+                "channel_status": {},
+                "stop_policy": {},
+                "planner": {},
+                "coverage": [],
+                "warnings": [],
+                "supporting_evidence": [],
+                "candidate_evidence": [],
+                "counter_evidence": {"candidates": []},
+            }
+
+    policy = default_research_policy()
+    policy["symbol_limit"] = 1
+    service = CapturingRagService()
+    tools, handlers, _ = _fundamental_handlers(
+        {},
+        datetime.fromisoformat("2026-09-01T16:00:00+08:00"),
+        industrial_rag_service=service,
+        industrial_rag_release_id="release-fixture",
+        research_policy_json=json.dumps(policy),
+    )
+    tool = next(item for item in tools if item["function"]["name"] == "search_indexed_financial_documents")
+    assert tool["function"]["parameters"]["properties"]["symbols"]["maxItems"] == 1
+    with pytest.raises(InvalidToolInput, match="active research policy"):
+        handlers["search_indexed_financial_documents"]({
+            "question": "2024年营业收入", "symbols": ["600000", "600036"],
+        })
+    assert service.research_calls == 0
+
+    policy["symbol_limit"] = 2
+    _, duplicate_handlers, _ = _fundamental_handlers(
+        {},
+        datetime.fromisoformat("2026-09-01T16:00:00+08:00"),
+        industrial_rag_service=service,
+        industrial_rag_release_id="release-fixture",
+        research_policy_json=json.dumps(policy),
+    )
+    with pytest.raises(InvalidToolInput, match="unique six-digit codes"):
+        duplicate_handlers["search_indexed_financial_documents"]({
+            "question": "2024年营业收入", "symbols": ["600000", "600000"],
+        })
+    assert service.research_calls == 0
 
 
 def test_compaction_fallback_keeps_multi_symbol_source_identity_and_reopens_each_fact() -> None:

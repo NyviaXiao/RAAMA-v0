@@ -1605,11 +1605,11 @@ def _fundamental_handlers(
             task_type = arguments.get("task_type", "fact")
             if not isinstance(question, str) or not question.strip() or len(question) > 240:
                 raise InvalidToolInput("question must be a nonempty string up to 240 characters")
-            if not isinstance(symbols, list) or not 1 <= len(symbols) <= 4 or any(
+            if not isinstance(symbols, list) or not 1 <= len(symbols) <= int(research_policy["symbol_limit"]) or any(
                 not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isdigit()
                 for symbol in symbols
-            ):
-                raise InvalidToolInput("symbols must contain one to four six-digit security codes")
+            ) or len(set(symbols)) != len(symbols):
+                raise InvalidToolInput("symbols must contain unique six-digit codes within the active research policy")
             if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= int(research_policy["candidate_limit"]):
                 raise InvalidToolInput("indexed-document limit exceeds the active research policy")
             if not isinstance(periods, list) or len(periods) > 8 or any(
@@ -1849,7 +1849,13 @@ def _fundamental_handlers(
                 "Run bounded metric and period searches against the pinned local public financial corpus; return coverage gaps and correction/restatement candidates for review.",
                 {
                     "question": {"type": "string", "minLength": 1, "maxLength": 240},
-                    "symbols": {"type": "array", "items": {"type": "string", "pattern": "^[0-9]{6}$"}, "minItems": 1, "maxItems": 4},
+                    "symbols": {
+                        "type": "array",
+                        "items": {"type": "string", "pattern": "^[0-9]{6}$"},
+                        "minItems": 1,
+                        "maxItems": int(research_policy["symbol_limit"]),
+                        "uniqueItems": True,
+                    },
                     "report_periods": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
                     "accounting_basis": {"type": "string", "maxLength": 120},
                     "task_type": {"type": "string", "enum": ["fact", "comparison", "table", "narrative", "refutation", "unknown"]},
