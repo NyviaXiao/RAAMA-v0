@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raama.local/schemas/backend_smoke_document.v1.schema.json",
+  "title": "RAAMA synthetic backend smoke document v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document_suffix",
+    "version_suffix",
+    "source_suffix",
+    "title",
+    "security_code",
+    "entity_name",
+    "report_period",
+    "accounting_basis",
+    "source_url",
+    "rights_note",
+    "payload_utf8",
+    "block_type",
+    "read_principals",
+    "index_text",
+    "vector"
+  ],
+  "properties": {
+    "schema_version": {"const": "raama.financial-rag.backend-smoke-document.v1"},
+    "document_suffix": {"type": "string", "minLength": 1},
+    "version_suffix": {"type": "string", "minLength": 1},
+    "source_suffix": {"type": "string", "minLength": 1},
+    "title": {"type": "string", "minLength": 1},
+    "security_code": {"type": "string", "pattern": "^\\d{6}$"},
+    "entity_name": {"type": "string", "minLength": 1},
+    "report_period": {"type": "string", "minLength": 1},
+    "accounting_basis": {"type": "string", "minLength": 1},
+    "source_url": {"type": "string", "pattern": "^https://example\\.invalid/"},
+    "rights_note": {"type": "string", "minLength": 1},
+    "payload_utf8": {"type": "string", "minLength": 1},
+    "block_type": {"type": "string", "minLength": 1},
+    "read_principals": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "index_text": {"type": "string", "minLength": 1},
+    "vector": {"type": "array", "minItems": 2, "items": {"type": "number"}}
+  }
+}

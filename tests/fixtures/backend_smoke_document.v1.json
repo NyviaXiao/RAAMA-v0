@@ -1,0 +1,18 @@
+{
+  "schema_version": "raama.financial-rag.backend-smoke-document.v1",
+  "document_suffix": "synthetic-document",
+  "version_suffix": "synthetic-version",
+  "source_suffix": "synthetic-source",
+  "title": "Synthetic backend integration record",
+  "security_code": "000001",
+  "entity_name": "Synthetic Issuer",
+  "report_period": "2026Q3",
+  "accounting_basis": "consolidated",
+  "source_url": "https://example.invalid/synthetic",
+  "rights_note": "Synthetic fixture only",
+  "payload_utf8": "Synthetic local corpus text for backend integration only.",
+  "block_type": "paragraph",
+  "read_principals": ["local-public"],
+  "index_text": "synthetic local query phrase",
+  "vector": [1.0, 0.0]
+}

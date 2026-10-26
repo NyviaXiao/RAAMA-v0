@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from datetime import datetime, timezone
 
 import pytest
 
 from scripts import run_financial_rag_current_capture as capture
+from scripts import run_financial_rag_live_agent as live_agent
 
 
 def _case_identity() -> dict[str, object]:
@@ -42,6 +44,34 @@ def _query_progress(case: dict[str, object], runtime_hash: str = "runtime-hash")
         "runtime_model_identity_sha256": runtime_hash,
         "cases": [row],
     }
+
+
+def test_capture_emits_bundle_loadable_from_raw_manifest_bytes(tmp_path) -> None:
+    output_dir = tmp_path / "new-run"
+    output_dir.mkdir()
+    manifest_path = output_dir / "manifest.json"
+    manifest_bytes = b'{"fixture":"preserve-newlines"}\r\n'
+    manifest_path.write_bytes(manifest_bytes)
+    case_specs = ({"case_id": "ISSUER-2026", "source_id": "filing-2026", "security_code": "123456"},)
+
+    emitted = capture._write_live_agent_run_bundle(
+        output_dir,
+        source_run_id="capture-new-issuer-2026",
+        source_manifest_path=manifest_path,
+        case_id="ISSUER-2026",
+        case_specs=case_specs,
+        report_periods=("2023", "2024"),
+        expected_run_identity_sha256="1" * 64,
+        expected_runtime_model_identity_sha256="2" * 64,
+        expected_case_identity_sha256="3" * 64,
+    )
+
+    bundle_path = output_dir / emitted["path"]
+    assert emitted["expected_bundle_sha256"] == hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+    bundle = live_agent._load_run_bundle(bundle_path, emitted["expected_bundle_sha256"])
+    assert bundle.source_run_dir == output_dir.resolve()
+    assert bundle.source_manifest_path == manifest_path.resolve()
+    assert bundle.source_manifest_sha256 == hashlib.sha256(manifest_bytes).hexdigest()
 
 
 def test_run_identity_rejects_changes_to_mode_policy_time_code_source_or_release() -> None:

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raama.local/schemas/live_agent_run_bundle.v1.schema.json",
+  "title": "RAAMA live-agent run bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_run_id",
+    "source_run_dir",
+    "source_manifest_path",
+    "source_manifest_sha256",
+    "case_id",
+    "case_specs",
+    "report_periods",
+    "expected_run_identity_sha256",
+    "expected_runtime_model_identity_sha256",
+    "expected_case_identity_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "raama.financial-rag.live-agent-run-bundle.v1"
+    },
+    "source_run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "source_run_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path or path relative to the bundle file. Must identify the immutable run directory."
+    },
+    "source_manifest_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path or path relative to the bundle file. Its exact raw bytes are SHA-256 checked."
+    },
+    "source_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "case_specs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["case_id", "source_id", "security_code"],
+        "properties": {
+          "case_id": {"type": "string", "minLength": 1},
+          "source_id": {"type": "string", "minLength": 1},
+          "security_code": {"type": "string", "pattern": "^\\d{6}$"}
+        },
+        "additionalProperties": true
+      },
+      "description": "The full reviewed case registry whose canonical hash must match the captured run identity. The runner also rejects duplicate case_id values."
+    },
+    "report_periods": {
+      "type": "array",
+      "const": ["2023", "2024"]
+    },
+    "expected_run_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "expected_runtime_model_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "expected_case_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

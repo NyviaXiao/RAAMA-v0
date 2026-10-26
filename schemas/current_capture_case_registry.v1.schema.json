@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raama.local/schemas/current_capture_case_registry.v1.schema.json",
+  "title": "RAAMA current-capture reviewed revenue case registry v1",
+  "type": "array",
+  "minItems": 1,
+  "items": {
+    "type": "object",
+    "required": [
+      "case_id",
+      "source_id",
+      "filename",
+      "security_code",
+      "physical_page",
+      "parser_table_id",
+      "row_index",
+      "source_metric_label",
+      "expected_raw_values",
+      "source_unit",
+      "base_unit_conversion_factor",
+      "unit",
+      "manual_review_note"
+    ],
+    "properties": {
+      "case_id": {"type":"string", "pattern":"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+      "source_id": {"type":"string", "pattern":"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+      "filename": {"type":"string", "minLength":1},
+      "security_code": {"type":"string", "pattern":"^\\d{6}$"},
+      "physical_page": {"type":"integer", "minimum":1},
+      "parser_table_id": {"type":"string", "minLength":1},
+      "row_index": {"type":"integer", "minimum":0},
+      "source_metric_label": {"type":"string", "minLength":1},
+      "expected_raw_values": {
+        "type":"object",
+        "required":["2023","2024"],
+        "additionalProperties":false,
+        "properties": {
+          "2023":{"type":"string", "minLength":1},
+          "2024":{"type":"string", "minLength":1}
+        }
+      },
+      "source_unit":{"type":"string", "minLength":1},
+      "base_unit_conversion_factor":{"type":"string", "pattern":"^[0-9]+(?:\\.[0-9]+)?$"},
+      "unit":{"type":"string", "minLength":1},
+      "currency":{"type":"string"},
+      "accounting_basis":{"type":["string","null"]},
+      "accounting_basis_status":{"enum":["known","unknown"]},
+      "manual_review_note":{"type":"string", "minLength":1}
+    },
+    "additionalProperties":true
+  }
+}

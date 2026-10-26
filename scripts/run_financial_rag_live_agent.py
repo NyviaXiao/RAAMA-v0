@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,140 @@ LIVE_OUTPUT_ROOT = ROOT / ".tmp" / "industrial_rag_live_agent_20261027"
 FALLBACK_MODEL = "qwen3.7-max-preview"
 MAX_PROVIDER_CALLS = 5
 MAX_LOGICAL_TURNS = 4
+RUN_BUNDLE_SCHEMA = "raama.financial-rag.live-agent-run-bundle.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class LiveAgentRunBundle:
+    source_run_id: str
+    source_run_dir: Path
+    source_manifest_path: Path
+    source_manifest_sha256: str
+    case_id: str
+    case_specs: tuple[dict[str, Any], ...]
+    report_periods: tuple[str, ...]
+    expected_run_identity_sha256: str
+    expected_runtime_model_identity_sha256: str
+    expected_case_identity_sha256: str
+    bundle_sha256: str
+    bundle_path: Path | None = None
+
+    def verify_immutable_inputs(self) -> None:
+        if self.bundle_path is not None and capture._sha256(self.bundle_path.read_bytes()) != self.bundle_sha256:
+            raise capture.RunIdentityError("live-agent run bundle changed after its expected hash was checked")
+        if capture._sha256(self.source_manifest_path.read_bytes()) != self.source_manifest_sha256:
+            raise capture.RunIdentityError("source manifest raw bytes differ from the run-bundle hash")
+
+
+def _default_run_bundle() -> LiveAgentRunBundle:
+    manifest_sha256 = capture._sha256(capture.SOURCE_MANIFEST.read_bytes())
+    case_ids = [str(spec["case_id"]) for spec in capture.CASE_SPECS]
+    default_case_id = "current_capture_cmb_2024_revenue"
+    if default_case_id not in case_ids and len(case_ids) == 1:
+        default_case_id = case_ids[0]
+    identity_lock = {
+        "schema_version": RUN_BUNDLE_SCHEMA,
+        "source_run_id": SOURCE_RUN_ID,
+        "source_manifest_sha256": manifest_sha256,
+        "expected_run_identity_sha256": SOURCE_RUN_IDENTITY_SHA256,
+        "expected_runtime_model_identity_sha256": SOURCE_RUNTIME_MODEL_IDENTITY_SHA256,
+        "expected_case_identity_sha256": SOURCE_CASE_IDENTITY_SHA256,
+    }
+    return LiveAgentRunBundle(
+        source_run_id=SOURCE_RUN_ID,
+        source_run_dir=SOURCE_RUN_DIR,
+        source_manifest_path=capture.SOURCE_MANIFEST,
+        source_manifest_sha256=manifest_sha256,
+        case_id=default_case_id,
+        case_specs=tuple(dict(spec) for spec in capture.CASE_SPECS),
+        report_periods=("2023", "2024"),
+        expected_run_identity_sha256=SOURCE_RUN_IDENTITY_SHA256,
+        expected_runtime_model_identity_sha256=SOURCE_RUNTIME_MODEL_IDENTITY_SHA256,
+        expected_case_identity_sha256=SOURCE_CASE_IDENTITY_SHA256,
+        bundle_sha256=capture._canonical_hash(identity_lock),
+    )
+
+
+def _load_run_bundle(path: Path, expected_bundle_sha256: str) -> LiveAgentRunBundle:
+    if not capture.re.fullmatch(r"[0-9a-f]{64}", expected_bundle_sha256):
+        raise ValueError("expected bundle SHA-256 must be 64 lowercase hexadecimal characters")
+    bundle_path = path.resolve(strict=True)
+    raw_bundle = bundle_path.read_bytes()
+    bundle_sha256 = capture._sha256(raw_bundle)
+    if bundle_sha256 != expected_bundle_sha256:
+        raise capture.RunIdentityError("live-agent run bundle does not match the caller-supplied expected hash")
+    try:
+        value = json.loads(raw_bundle.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise capture.RunIdentityError("live-agent run bundle is not valid UTF-8 JSON") from error
+    required_keys = {
+        "schema_version", "source_run_id", "source_run_dir", "source_manifest_path",
+        "source_manifest_sha256", "case_id", "case_specs", "report_periods",
+        "expected_run_identity_sha256", "expected_runtime_model_identity_sha256",
+        "expected_case_identity_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != required_keys or value.get("schema_version") != RUN_BUNDLE_SCHEMA:
+        raise capture.RunIdentityError("live-agent run bundle has an unsupported schema or field set")
+    for field in ("source_run_id", "case_id"):
+        if not isinstance(value[field], str) or not capture.re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value[field]):
+            raise capture.RunIdentityError(f"live-agent run bundle {field} is not a safe identifier")
+    hashes = (
+        "source_manifest_sha256", "expected_run_identity_sha256",
+        "expected_runtime_model_identity_sha256", "expected_case_identity_sha256",
+    )
+    if any(not isinstance(value[field], str) or not capture.re.fullmatch(r"[0-9a-f]{64}", value[field]) for field in hashes):
+        raise capture.RunIdentityError("live-agent run bundle contains an invalid SHA-256 identity")
+    if not isinstance(value["source_run_dir"], str) or not value["source_run_dir"]:
+        raise capture.RunIdentityError("live-agent run bundle source_run_dir is required")
+    if not isinstance(value["source_manifest_path"], str) or not value["source_manifest_path"]:
+        raise capture.RunIdentityError("live-agent run bundle source_manifest_path is required")
+    if (
+        not isinstance(value["case_specs"], list)
+        or not value["case_specs"]
+        or any(not isinstance(spec, dict) for spec in value["case_specs"])
+        or len({str(spec.get("case_id")) for spec in value["case_specs"]}) != len(value["case_specs"])
+        or value["case_id"] not in {str(spec.get("case_id")) for spec in value["case_specs"]}
+    ):
+        raise capture.RunIdentityError("live-agent run bundle case registry is missing, duplicated, or incomplete")
+    periods = value["report_periods"]
+    if (
+        not isinstance(periods, list) or not periods
+        or any(not isinstance(period, str) or not period.strip() for period in periods)
+        or len(periods) != len(set(periods))
+    ):
+        raise capture.RunIdentityError("live-agent run bundle report periods must be unique nonempty strings")
+    if tuple(periods) != tuple(capture.REPORT_PERIODS):
+        raise capture.RunIdentityError("live-agent report validation currently requires periods 2023 and 2024")
+
+    def resolve_input(raw_path: str, label: str, *, directory: bool) -> Path:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = bundle_path.parent / candidate
+        resolved = candidate.resolve(strict=True)
+        if directory and not resolved.is_dir():
+            raise capture.RunIdentityError(f"live-agent run bundle {label} is not a directory")
+        if not directory and not resolved.is_file():
+            raise capture.RunIdentityError(f"live-agent run bundle {label} is not a file")
+        return resolved
+
+    source_run_dir = resolve_input(value["source_run_dir"], "source_run_dir", directory=True)
+    source_manifest_path = resolve_input(value["source_manifest_path"], "source_manifest_path", directory=False)
+    bundle = LiveAgentRunBundle(
+        source_run_id=value["source_run_id"],
+        source_run_dir=source_run_dir,
+        source_manifest_path=source_manifest_path,
+        source_manifest_sha256=value["source_manifest_sha256"],
+        case_id=value["case_id"],
+        case_specs=tuple(dict(spec) for spec in value["case_specs"]),
+        report_periods=tuple(periods),
+        expected_run_identity_sha256=value["expected_run_identity_sha256"],
+        expected_runtime_model_identity_sha256=value["expected_runtime_model_identity_sha256"],
+        expected_case_identity_sha256=value["expected_case_identity_sha256"],
+        bundle_sha256=bundle_sha256,
+        bundle_path=bundle_path,
+    )
+    bundle.verify_immutable_inputs()
+    return bundle
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -133,26 +268,34 @@ def _verify_capture_case_identity(
     baseline_progress: dict[str, Any],
     spec: dict[str, Any],
     store: IndustrialRagStore,
+    bundle: LiveAgentRunBundle | None = None,
 ) -> dict[str, object]:
+    bundle = bundle or _default_run_bundle()
+    bundle.verify_immutable_inputs()
     run_identity = envelope.get("run_identity")
     if (
         envelope.get("schema_version") != "raama.financial-rag.current-capture.run-identity-envelope.v1"
         or not isinstance(run_identity, dict)
         or envelope.get("run_identity_sha256") != capture._canonical_hash(run_identity)
-        or envelope.get("run_identity_sha256") != SOURCE_RUN_IDENTITY_SHA256
+        or envelope.get("run_identity_sha256") != bundle.expected_run_identity_sha256
     ):
         raise capture.RunIdentityError("source capture run identity envelope is invalid")
     run_identity_sha256 = str(envelope["run_identity_sha256"])
-    case_id = str(spec["case_id"])
+    case_id = bundle.case_id
     if (
-        run_identity.get("run_id") != SOURCE_RUN_ID
-        or run_identity.get("case_specs_sha256") != capture._canonical_hash(capture.CASE_SPECS)
-        or run_identity.get("source_manifest_sha256") != capture._sha256(capture.SOURCE_MANIFEST.read_bytes())
-        or run_identity.get("query") != capture.QUERY_TEXT
+        run_identity.get("run_id") != bundle.source_run_id
+        or run_identity.get("case_specs_sha256") != capture._canonical_hash(bundle.case_specs)
+        or run_identity.get("source_manifest_sha256") != bundle.source_manifest_sha256
+        or not isinstance(run_identity.get("query"), str)
+        or not str(run_identity["query"]).strip()
         or run_identity.get("time_mode") != "strict_forward"
         or run_identity.get("evaluation_scope") != {"case_ids": [case_id], "module_matrix_enabled": False}
+        or str(spec.get("case_id")) != case_id
     ):
         raise capture.RunIdentityError("source capture run binding differs from the reviewed case configuration")
+    expected_raw_values = spec.get("expected_raw_values")
+    if not isinstance(expected_raw_values, dict) or set(expected_raw_values) != set(bundle.report_periods):
+        raise capture.RunIdentityError("run-bundle report periods differ from the reviewed source-value registry")
 
     policy_json = run_identity.get("research_policy_json")
     policy_sha256 = run_identity.get("research_policy_sha256")
@@ -178,24 +321,24 @@ def _verify_capture_case_identity(
 
     release = run_identity.get("release")
     if not isinstance(release, dict) or (
-        release.get("release_id") != SOURCE_RUN_ID
-        or release.get("active_release_id") != SOURCE_RUN_ID
-        or store.active_release_id() != SOURCE_RUN_ID
+        release.get("release_id") != bundle.source_run_id
+        or release.get("active_release_id") != bundle.source_run_id
+        or store.active_release_id() != bundle.source_run_id
     ):
         raise capture.RunIdentityError("source capture release is not the pinned active release")
-    _release_spec, release_spec_sha256 = store.release_spec(SOURCE_RUN_ID)
+    _release_spec, release_spec_sha256 = store.release_spec(bundle.source_run_id)
     if release.get("spec_sha256") != release_spec_sha256:
         raise capture.RunIdentityError("source capture release specification hash changed")
-    release_versions = store.release_versions(SOURCE_RUN_ID)
+    release_versions = store.release_versions(bundle.source_run_id)
     if release.get("version_ids") != release_versions or version_id not in release_versions:
         raise capture.RunIdentityError("source capture release versions differ from the bound source")
     release_summary = store.release_summaries()
     published_release = next(
-        (item for item in release_summary["releases"] if item["release_id"] == SOURCE_RUN_ID),
+        (item for item in release_summary["releases"] if item["release_id"] == bundle.source_run_id),
         None,
     )
     if (
-        release_summary["active_release_id"] != SOURCE_RUN_ID
+        release_summary["active_release_id"] != bundle.source_run_id
         or published_release is None
         or published_release["status"] != "published"
     ):
@@ -236,6 +379,8 @@ def _verify_capture_case_identity(
         as_of=as_of,
         retrieval_policy_sha256=str(policy_sha256),
         access_scope=access_scope,
+        query=str(run_identity["query"]),
+        report_periods=bundle.report_periods,
     )
     permitted = store.permitted_versions(
         str(access_scope["principal_id"]),
@@ -244,7 +389,7 @@ def _verify_capture_case_identity(
         time_mode="strict_forward",
         report_periods=tuple(str(item) for item in case_identity["report_periods"]),
         accounting_basis=(str(spec["accounting_basis"]) if spec.get("accounting_basis") is not None else None),
-        release_id=SOURCE_RUN_ID,
+        release_id=bundle.source_run_id,
     )
     if (
         len(permitted) != 1
@@ -262,13 +407,13 @@ def _verify_capture_case_identity(
     if (
         not isinstance(runtime_model_identity, dict)
         or runtime_model_identity_sha256 != capture._canonical_hash(runtime_model_identity)
-        or runtime_model_identity_sha256 != SOURCE_RUNTIME_MODEL_IDENTITY_SHA256
+        or runtime_model_identity_sha256 != bundle.expected_runtime_model_identity_sha256
         or baseline_progress.get("runtime_model_identity_sha256") != runtime_model_identity_sha256
     ):
         raise capture.RunIdentityError("source capture runtime model identity is invalid")
     case_identity_sha256 = capture._canonical_hash(case_identity)
     if (
-        case_identity_sha256 != SOURCE_CASE_IDENTITY_SHA256
+        case_identity_sha256 != bundle.expected_case_identity_sha256
         or baseline_progress.get("progress_kind") != "agent"
         or baseline_progress.get("research_ablation_id") is not None
         or baseline_progress.get("case_identity_sha256") != case_identity_sha256
@@ -292,18 +437,26 @@ def _verify_runtime_access_revisions(
     return permission_revision, continuation_revision
 
 
-def _verify_capture_run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, object]]:
-    if not SOURCE_RUN_DIR.is_dir():
-        raise FileNotFoundError(f"bound source capture is missing: {SOURCE_RUN_ID}")
-    envelope = capture._read_run_identity(SOURCE_RUN_DIR / "run_identity.json")
+def _verify_capture_run(
+    bundle: LiveAgentRunBundle | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, object]]:
+    bundle = bundle or _default_run_bundle()
+    bundle.verify_immutable_inputs()
+    if not bundle.source_run_dir.is_dir():
+        raise FileNotFoundError(f"bound source capture is missing: {bundle.source_run_id}")
+    envelope = capture._read_run_identity(bundle.source_run_dir / "run_identity.json")
     run_identity = dict(envelope["run_identity"])
-    if run_identity.get("run_id") != SOURCE_RUN_ID:
+    if run_identity.get("run_id") != bundle.source_run_id:
         raise capture.RunIdentityError("source capture run identity has a different run id")
-    if run_identity.get("evaluation_scope", {}).get("case_ids") != [
-        "current_capture_cmb_2024_revenue"
-    ]:
-        raise capture.RunIdentityError("source capture is not the reviewed single-case CMB run")
-    baseline_path = SOURCE_RUN_DIR / "agent_progress_600036.json"
+    expected_case = next((item for item in bundle.case_specs if str(item["case_id"]) == bundle.case_id), None)
+    if expected_case is None:
+        raise capture.RunIdentityError("source capture case is absent from the run-bundle case registry")
+    if run_identity.get("evaluation_scope", {}).get("case_ids") != [bundle.case_id]:
+        raise capture.RunIdentityError("source capture is not bound to the run-bundle case")
+    security_code = str(expected_case["security_code"])
+    if not capture.re.fullmatch(r"\d{6}", security_code):
+        raise capture.RunIdentityError("run-bundle case has an invalid security code")
+    baseline_path = bundle.source_run_dir / f"agent_progress_{security_code}.json"
     if not baseline_path.is_file():
         raise FileNotFoundError("completed local Qwen baseline progress is missing")
     baseline_progress = json.loads(baseline_path.read_text(encoding="utf-8"))
@@ -315,7 +468,7 @@ def _verify_capture_run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any
     if baseline_progress.get("completed_result_sha256") != capture._canonical_hash(completed):
         raise capture.RunIdentityError("local Qwen baseline result failed its completion hash")
     journal = capture.RetrievalTraceJournal(
-        SOURCE_RUN_DIR / "retrieval_trace.jsonl",
+        bundle.source_run_dir / "retrieval_trace.jsonl",
         run_identity_sha256=str(envelope["run_identity_sha256"]),
         runtime_model_identity_sha256=str(envelope["runtime_model_identity_sha256"]),
     )
@@ -324,7 +477,7 @@ def _verify_capture_run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any
         raise capture.RunIdentityError("local Qwen baseline has no completed agent attempt")
     journal.verify_references(attempts[-1].get("retrieval_trace_records"), require_nonempty=True)
     journal.verify_references(completed.get("retrieval_trace_records"), require_nonempty=True)
-    paired_path = SOURCE_RUN_DIR / "agent_progress_600036_ablation12.json"
+    paired_path = bundle.source_run_dir / f"agent_progress_{security_code}_ablation12.json"
     paired_progress = json.loads(paired_path.read_text(encoding="utf-8"))
     if paired_progress.get("attempts_sha256") != capture._canonical_hash(paired_progress.get("attempts")):
         raise capture.RunIdentityError("failed paired reranker progress failed its attempt hash")
@@ -332,26 +485,28 @@ def _verify_capture_run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any
     if not isinstance(paired_attempts, list) or not paired_attempts or not isinstance(paired_attempts[-1], dict):
         raise capture.RunIdentityError("failed paired reranker attempt is missing")
     journal.verify_references(paired_attempts[-1].get("retrieval_trace_records"), require_nonempty=True)
-    case_id = str(baseline_progress.get("case_id"))
-    expected_case = next((spec for spec in capture.CASE_SPECS if str(spec["case_id"]) == case_id), None)
-    if expected_case is None:
-        raise capture.RunIdentityError("source capture case is absent from the reviewed case registry")
     source_store = IndustrialRagStore(
-        SOURCE_RUN_DIR / "industrial_rag.sqlite3",
-        LocalContentAddressedStore(SOURCE_RUN_DIR / "objects"),
+        bundle.source_run_dir / "industrial_rag.sqlite3",
+        LocalContentAddressedStore(bundle.source_run_dir / "objects"),
     )
-    case_identity = _verify_capture_case_identity(envelope, baseline_progress, dict(expected_case), source_store)
+    case_identity = _verify_capture_case_identity(envelope, baseline_progress, dict(expected_case), source_store, bundle)
     return envelope, baseline_progress, dict(expected_case), case_identity
 
 
 def _load_service(
     source_envelope: dict[str, Any],
+    bundle: LiveAgentRunBundle | None = None,
+    *,
+    qwen_assets_path: Path | None = None,
+    dense_cache_path: Path | None = None,
 ) -> tuple[IndustrialRagStore, IndustrialRagService, dict[str, object]]:
+    bundle = bundle or _default_run_bundle()
+    bundle.verify_immutable_inputs()
     store = IndustrialRagStore(
-        SOURCE_RUN_DIR / "industrial_rag.sqlite3",
-        LocalContentAddressedStore(SOURCE_RUN_DIR / "objects"),
+        bundle.source_run_dir / "industrial_rag.sqlite3",
+        LocalContentAddressedStore(bundle.source_run_dir / "objects"),
     )
-    if store.active_release_id() != SOURCE_RUN_ID:
+    if store.active_release_id() != bundle.source_run_id:
         raise capture.RunIdentityError("the bound source release is no longer active in its local store")
     source_access_scope = source_envelope["run_identity"]["access_scope"]
     if (
@@ -359,12 +514,13 @@ def _load_service(
         or store.continuation_revision() != source_access_scope["continuation_revision"]
     ):
         raise capture.RunIdentityError("source access or continuation revision changed before model loading")
-    embedding = Qwen3EmbeddingRuntime(capture.QWEN_ASSETS)
-    reranker_runtime = Qwen3RerankerRuntime(capture.QWEN_ASSETS)
+    assets_path = qwen_assets_path or capture.QWEN_ASSETS
+    embedding = Qwen3EmbeddingRuntime(assets_path)
+    reranker_runtime = Qwen3RerankerRuntime(assets_path)
     dense = LocalQwenDenseAdapter(
         store,
         embedding,
-        cache_path=ROOT / ".tmp" / "industrial_rag_dense_vector_cache.sqlite3",
+        cache_path=dense_cache_path or ROOT / ".tmp" / "industrial_rag_dense_vector_cache.sqlite3",
     )
     reranker = LocalQwenReranker(reranker_runtime)
     runtime_identity = capture._runtime_model_identity(
@@ -387,15 +543,40 @@ def _load_service(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-id", default="current-capture-qwen-cmb-live-agent-20261027")
+    parser.add_argument("--run-id")
+    parser.add_argument("--run-bundle", type=Path, help="Versioned identity-locked JSON bundle for a source capture")
+    parser.add_argument("--expected-bundle-sha256", help="Out-of-band SHA-256 pin for --run-bundle raw bytes")
+    parser.add_argument("--output-root", type=Path, help="Parent directory for a new, non-overwriting live-agent run")
+    parser.add_argument("--qwen-assets", type=Path, help="Pinned local Qwen asset directory; required with --run-bundle")
     args = parser.parse_args()
-    if not capture.re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", args.run_id):
+    if args.run_bundle is None:
+        if args.expected_bundle_sha256 is not None:
+            raise ValueError("expected-bundle-sha256 requires run-bundle")
+        bundle = _default_run_bundle()
+        run_id = args.run_id or "current-capture-qwen-cmb-live-agent-20261027"
+    else:
+        if args.expected_bundle_sha256 is None:
+            raise ValueError("run-bundle requires an out-of-band expected-bundle-sha256")
+        if args.run_id is None or args.output_root is None or args.qwen_assets is None:
+            raise ValueError("portable run-bundle mode requires run-id, output-root, and qwen-assets")
+        bundle = _load_run_bundle(args.run_bundle, args.expected_bundle_sha256)
+        run_id = args.run_id
+    if not capture.re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", run_id):
         raise ValueError("run-id must be a safe immutable identifier")
 
-    source_envelope, _baseline_progress, spec, case_identity = _verify_capture_run()
-    output_dir = LIVE_OUTPUT_ROOT / args.run_id
+    source_envelope, _baseline_progress, spec, case_identity = _verify_capture_run(bundle)
+    output_root = args.output_root.resolve() if args.output_root is not None else LIVE_OUTPUT_ROOT
+    output_dir = output_root / run_id
+    if output_dir.resolve().is_relative_to(bundle.source_run_dir.resolve()):
+        raise ValueError("live-agent output directory cannot be inside the immutable source run")
     output_dir.mkdir(parents=True, exist_ok=False)
-    store, service, runtime_identity = _load_service(source_envelope)
+    qwen_assets_path = args.qwen_assets or capture.QWEN_ASSETS
+    store, service, runtime_identity = _load_service(
+        source_envelope,
+        bundle,
+        qwen_assets_path=qwen_assets_path,
+        dense_cache_path=output_dir / "dense_vector_cache.sqlite3",
+    )
     permission_revision, continuation_revision = _verify_runtime_access_revisions(store, case_identity)
     provider_client = _load_provider_client()
     runtime_identity_sha256 = capture._canonical_hash(runtime_identity)
@@ -403,8 +584,10 @@ def main() -> None:
     implementation_hashes = _implementation_hashes()
     live_identity: dict[str, object] = {
         "schema_version": "raama.financial-rag.live-agent-identity.v1",
-        "run_id": args.run_id,
-        "source_capture_run_id": SOURCE_RUN_ID,
+        "run_id": run_id,
+        "source_capture_run_id": bundle.source_run_id,
+        "run_bundle_sha256": bundle.bundle_sha256,
+        "source_manifest_sha256": bundle.source_manifest_sha256,
         "source_run_identity_sha256": source_envelope["run_identity_sha256"],
         "source_runtime_model_identity_sha256": source_envelope["runtime_model_identity_sha256"],
         "source_implementation_sha256": source_run_identity["implementation_sha256"],
@@ -442,7 +625,7 @@ def main() -> None:
         run_identity_sha256=live_identity_sha256,
         runtime_model_identity_sha256=runtime_identity_sha256,
     )
-    release_id = SOURCE_RUN_ID
+    release_id = bundle.source_run_id
     started_at = datetime.now().astimezone().isoformat()
     progress: dict[str, Any] = {
         **live_identity,
@@ -459,6 +642,7 @@ def main() -> None:
     _write_json(progress_path, progress)
 
     def identity_check() -> None:
+        bundle.verify_immutable_inputs()
         if store.active_release_id() != release_id:
             raise capture.RunIdentityError("active source release changed during live agent run")
         if store.permission_revision() != permission_revision:
@@ -545,7 +729,7 @@ def main() -> None:
 
     case = {
         "as_of": decision_time.isoformat(),
-        "question": capture.QUERY_TEXT,
+        "question": str(source_run_identity["query"]),
         "symbol": str(spec["security_code"]),
         "allowed_data": "the pinned local strict-forward industrial RAG release only",
     }
@@ -611,7 +795,7 @@ def main() -> None:
     output_record: dict[str, object] = {
         "schema_version": "raama.financial-rag.live-agent-result.v1",
         "live_agent_identity_sha256": live_identity_sha256,
-        "source_capture_run_id": SOURCE_RUN_ID,
+        "source_capture_run_id": bundle.source_run_id,
         "source_run_identity_sha256": source_envelope["run_identity_sha256"],
         "case_identity_sha256": case_identity["case_identity_sha256"],
         "runtime_model_identity_sha256": runtime_identity_sha256,
@@ -631,7 +815,7 @@ def main() -> None:
     }
     _write_json(output_dir / "live_agent_result.json", output_record)
     summary = {
-        "run_id": args.run_id,
+        "run_id": run_id,
         "status": output_record["status"],
         "agent_driver": output_record["agent_driver"],
         "generation_model_called": output_record["generation_model_called"],

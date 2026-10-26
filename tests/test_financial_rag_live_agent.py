@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import hashlib
+import shutil
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
@@ -67,6 +68,7 @@ def _synthetic_bound_case(tmp_path, monkeypatch):
         "filename": "synthetic.pdf",
         "security_code": "123456",
         "accounting_basis": "Synthetic consolidated",
+        "expected_raw_values": {"2023": "100", "2024": "110"},
     }
     monkeypatch.setattr(capture, "CASE_SPECS", (spec,))
     monkeypatch.setattr(capture, "QUERY_TEXT", query)
@@ -205,6 +207,7 @@ def _synthetic_bound_case(tmp_path, monkeypatch):
         as_of=now,
         retrieval_policy_sha256=policy_sha256,
         access_scope=access_scope,
+        query=query,
     )
     progress = {
         **case_identity,
@@ -308,6 +311,127 @@ def test_live_capture_identity_is_reconstructed_from_source_release_and_progress
     assert verified["source_sha256"] == envelope["run_identity"]["source_records"][0]["source_sha256"]
     assert verified["principal_id"] == envelope["run_identity"]["access_scope"]["principal_id"]
     assert verified["security_code"] == spec["security_code"]
+
+
+def test_versioned_run_bundle_binds_new_issuer_and_exact_manifest_bytes(tmp_path, monkeypatch) -> None:
+    envelope, progress, spec, store = _synthetic_bound_case(tmp_path, monkeypatch)
+    bundle_dir = tmp_path / "portable-bundle"
+    source_run_dir = bundle_dir / "source-run"
+    source_run_dir.mkdir(parents=True)
+    manifest_path = bundle_dir / "seed_manifest.json"
+    manifest_bytes = b'{"synthetic_manifest":true}\r\n'
+    manifest_path.write_bytes(manifest_bytes)
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    envelope["run_identity"]["source_manifest_sha256"] = manifest_sha256
+    envelope["run_identity_sha256"] = capture._canonical_hash(envelope["run_identity"])
+    source = envelope["run_identity"]["source_records"][0]
+    access_scope = envelope["run_identity"]["access_scope"]
+    case_identity = capture._case_identity_fields(
+        envelope["run_identity_sha256"],
+        spec,
+        source,
+        as_of=datetime.fromisoformat(envelope["run_identity"]["as_of"]),
+        retrieval_policy_sha256=envelope["run_identity"]["research_policy_sha256"],
+        access_scope=access_scope,
+        query=envelope["run_identity"]["query"],
+        report_periods=("2023", "2024"),
+    )
+    case_identity_sha256 = capture._canonical_hash(case_identity)
+    progress.clear()
+    progress.update({
+        **case_identity,
+        "runtime_model_identity_sha256": envelope["runtime_model_identity_sha256"],
+        "case_identity_sha256": case_identity_sha256,
+        "progress_kind": "agent",
+        "research_ablation_id": None,
+    })
+    shutil.copy2(store.database_path, source_run_dir / "industrial_rag.sqlite3")
+    shutil.copytree(store.object_store.root, source_run_dir / "objects")
+    live_agent._write_json(source_run_dir / "run_identity.json", envelope)
+    journal = capture.RetrievalTraceJournal(
+        source_run_dir / "retrieval_trace.jsonl",
+        run_identity_sha256=envelope["run_identity_sha256"],
+        runtime_model_identity_sha256=envelope["runtime_model_identity_sha256"],
+    )
+    trace_record = journal.append({"case_id": spec["case_id"]}, {"event": "synthetic-source-reopen"})
+    trace_reference = {"sequence": trace_record["sequence"], "event_sha256": trace_record["event_sha256"]}
+    completed_result = {"retrieval_trace_records": [trace_reference]}
+    attempt = {"retrieval_trace_records": [trace_reference]}
+    progress.update({
+        "attempts": [attempt],
+        "attempts_sha256": capture._canonical_hash([attempt]),
+        "completed_result": completed_result,
+        "completed_result_sha256": capture._canonical_hash(completed_result),
+    })
+    live_agent._write_json(source_run_dir / "agent_progress_123456.json", progress)
+    paired_attempt = {"retrieval_trace_records": [trace_reference]}
+    live_agent._write_json(source_run_dir / "agent_progress_123456_ablation12.json", {
+        "attempts": [paired_attempt],
+        "attempts_sha256": capture._canonical_hash([paired_attempt]),
+    })
+    value = {
+        "schema_version": live_agent.RUN_BUNDLE_SCHEMA,
+        "source_run_id": envelope["run_identity"]["run_id"],
+        "source_run_dir": "source-run",
+        "source_manifest_path": "seed_manifest.json",
+        "source_manifest_sha256": manifest_sha256,
+        "case_id": spec["case_id"],
+        "case_specs": list(capture.CASE_SPECS),
+        "report_periods": ["2023", "2024"],
+        "expected_run_identity_sha256": envelope["run_identity_sha256"],
+        "expected_runtime_model_identity_sha256": envelope["runtime_model_identity_sha256"],
+        "expected_case_identity_sha256": case_identity_sha256,
+    }
+    bundle_path = bundle_dir / "run-bundle.json"
+    bundle_path.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    expected_bundle_sha256 = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+
+    bundle = live_agent._load_run_bundle(bundle_path, expected_bundle_sha256)
+    loaded_envelope, loaded_progress, loaded_spec, verified = live_agent._verify_capture_run(bundle)
+
+    assert bundle.source_run_id == "synthetic-live-source"
+    assert bundle.source_run_dir == source_run_dir.resolve()
+    assert verified["case_identity_sha256"] == case_identity_sha256
+    assert verified["query"] == "Synthetic filing question"
+    assert verified["report_periods"] == ["2023", "2024"]
+    assert loaded_envelope["run_identity_sha256"] == envelope["run_identity_sha256"]
+    assert loaded_progress["completed_result_sha256"] == capture._canonical_hash(loaded_progress["completed_result"])
+    assert loaded_spec["security_code"] == "123456"
+
+    manifest_path.write_bytes(manifest_bytes.replace(b"\r\n", b"\n"))
+    with pytest.raises(capture.RunIdentityError, match="raw bytes"):
+        bundle.verify_immutable_inputs()
+
+
+def test_versioned_run_bundle_requires_exact_caller_supplied_bundle_hash(tmp_path, monkeypatch) -> None:
+    envelope, _progress, spec, _store = _synthetic_bound_case(tmp_path, monkeypatch)
+    bundle_dir = tmp_path / "portable-bundle"
+    bundle_dir.mkdir()
+    source_run_dir = bundle_dir / "source-run"
+    source_run_dir.mkdir()
+    manifest_path = bundle_dir / "seed_manifest.json"
+    manifest_bytes = capture.SOURCE_MANIFEST.read_bytes()
+    manifest_path.write_bytes(manifest_bytes)
+    value = {
+        "schema_version": live_agent.RUN_BUNDLE_SCHEMA,
+        "source_run_id": envelope["run_identity"]["run_id"],
+        "source_run_dir": "source-run",
+        "source_manifest_path": "seed_manifest.json",
+        "source_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "case_id": spec["case_id"],
+        "case_specs": list(capture.CASE_SPECS),
+        "report_periods": ["2023", "2024"],
+        "expected_run_identity_sha256": envelope["run_identity_sha256"],
+        "expected_runtime_model_identity_sha256": envelope["runtime_model_identity_sha256"],
+        "expected_case_identity_sha256": "0" * 64,
+    }
+    bundle_path = bundle_dir / "run-bundle.json"
+    bundle_path.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    expected_bundle_sha256 = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+    bundle_path.write_bytes(bundle_path.read_bytes() + b" ")
+
+    with pytest.raises(capture.RunIdentityError, match="caller-supplied expected hash"):
+        live_agent._load_run_bundle(bundle_path, expected_bundle_sha256)
 
 
 @pytest.mark.parametrize(

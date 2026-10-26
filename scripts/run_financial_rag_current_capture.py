@@ -10,9 +10,9 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -61,6 +61,7 @@ DOCLING_ASSETS = SUPERVISION / "docling-models"
 QWEN_ASSETS = SUPERVISION / "qwen-models"
 OUTPUT_ROOT = ROOT / ".tmp" / "industrial_rag_current_capture_20261026"
 QUERY_TEXT = "2024年度营业收入是多少，较2023年度增长多少？"
+REPORT_PERIODS = ("2023", "2024")
 CAPTURE_PRINCIPAL_ID = "local-public"
 
 
@@ -420,6 +421,8 @@ def _case_identity_fields(
     as_of: datetime,
     retrieval_policy_sha256: str,
     access_scope: Mapping[str, object],
+    query: str = QUERY_TEXT,
+    report_periods: Sequence[str] = REPORT_PERIODS,
 ) -> dict[str, object]:
     return {
         "run_identity_sha256": run_identity_sha256,
@@ -428,8 +431,8 @@ def _case_identity_fields(
         "source_id": str(source["source_id"]),
         "source_sha256": str(source["source_sha256"]),
         "version_id": str(source["version_id"]),
-        "report_periods": ["2023", "2024"],
-        "query": QUERY_TEXT,
+        "report_periods": list(report_periods),
+        "query": query,
         "as_of": as_of.astimezone(timezone.utc).isoformat(),
         "time_mode": "strict_forward",
         "retrieval_policy_sha256": retrieval_policy_sha256,
@@ -437,6 +440,40 @@ def _case_identity_fields(
         "permission_revision": access_scope["permission_revision"],
         "continuation_revision": access_scope["continuation_revision"],
     }
+
+
+def _write_live_agent_run_bundle(
+    output_dir: Path,
+    *,
+    source_run_id: str,
+    source_manifest_path: Path,
+    case_id: str,
+    case_specs: Sequence[Mapping[str, Any]],
+    report_periods: Sequence[str],
+    expected_run_identity_sha256: str,
+    expected_runtime_model_identity_sha256: str,
+    expected_case_identity_sha256: str,
+) -> dict[str, str]:
+    try:
+        manifest_path_in_bundle = os.path.relpath(source_manifest_path.resolve(), output_dir.resolve())
+    except ValueError:
+        manifest_path_in_bundle = str(source_manifest_path.resolve())
+    value = {
+        "schema_version": "raama.financial-rag.live-agent-run-bundle.v1",
+        "source_run_id": source_run_id,
+        "source_run_dir": ".",
+        "source_manifest_path": manifest_path_in_bundle,
+        "source_manifest_sha256": _sha256(source_manifest_path.read_bytes()),
+        "case_id": case_id,
+        "case_specs": [dict(spec) for spec in case_specs],
+        "report_periods": list(report_periods),
+        "expected_run_identity_sha256": expected_run_identity_sha256,
+        "expected_runtime_model_identity_sha256": expected_runtime_model_identity_sha256,
+        "expected_case_identity_sha256": expected_case_identity_sha256,
+    }
+    path = output_dir / "live_agent_run_bundle.json"
+    _write_json(path, value)
+    return {"path": path.name, "expected_bundle_sha256": _sha256(path.read_bytes())}
 
 
 def _case_result_sha256(row: Mapping[str, Any]) -> str:
@@ -1823,21 +1860,63 @@ def _module_matrix(
 
 
 def main() -> None:
+    global CASE_SPECS, DOCLING_ASSETS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-manifest", type=Path, default=SOURCE_MANIFEST)
     parser.add_argument("--docling-assets", type=Path, default=DOCLING_ASSETS)
     parser.add_argument("--qwen-assets", type=Path, default=QWEN_ASSETS)
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
+    parser.add_argument("--case-registry", type=Path, help="JSON array of reviewed revenue case specifications")
     parser.add_argument("--run-id", help="Unique local run directory")
     parser.add_argument("--resume-existing", action="store_true", help="Reuse parsed documents and a published release in the named run directory")
     parser.add_argument("--skip-qwen", action="store_true", help="Run retrieval and claim validation without local Qwen inference")
-    parser.add_argument("--case-id", choices=[str(spec["case_id"]) for spec in CASE_SPECS], help="Restrict this diagnostic run to one reviewed issuer case")
+    parser.add_argument("--case-id", help="Restrict this diagnostic run to one reviewed issuer case")
+    parser.add_argument("--emit-live-agent-bundle", action="store_true", help="Write a versioned identity-locked input bundle for the separate live agent")
     parser.add_argument("--skip-module-matrix", action="store_true", help="Run the primary tool chain and paired reranker check without the 20-module matrix")
     args = parser.parse_args()
+    if args.case_registry is not None:
+        registry_value = json.loads(args.case_registry.read_text(encoding="utf-8"))
+        if not isinstance(registry_value, list) or not registry_value or any(not isinstance(item, dict) for item in registry_value):
+            raise ValueError("case-registry must contain a nonempty JSON array of case objects")
+        case_ids = [item.get("case_id") for item in registry_value]
+        if any(not isinstance(case_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", case_id) for case_id in case_ids):
+            raise ValueError("case-registry case_id values must be safe immutable strings")
+        required_case_fields = {
+            "case_id", "source_id", "filename", "security_code", "physical_page", "parser_table_id",
+            "row_index", "source_metric_label", "expected_raw_values", "source_unit",
+            "base_unit_conversion_factor", "unit", "manual_review_note",
+        }
+        if (
+            len(case_ids) != len(set(case_ids))
+            or any(not required_case_fields.issubset(item) for item in registry_value)
+            or any(not isinstance(item.get("source_id"), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", item["source_id"]) for item in registry_value)
+            or any(not isinstance(item.get("filename"), str) or Path(item["filename"]).name != item["filename"] for item in registry_value)
+            or any(not isinstance(item.get("security_code"), str) or not re.fullmatch(r"\d{6}", item["security_code"]) for item in registry_value)
+            or any(isinstance(item.get("physical_page"), bool) or not isinstance(item.get("physical_page"), int) or item["physical_page"] < 1 for item in registry_value)
+            or any(isinstance(item.get("row_index"), bool) or not isinstance(item.get("row_index"), int) or item["row_index"] < 0 for item in registry_value)
+            or any(not isinstance(item.get("parser_table_id"), str) or not item["parser_table_id"].strip() for item in registry_value)
+            or any(not isinstance(item.get("source_metric_label"), str) or not item["source_metric_label"].strip() for item in registry_value)
+            or any(not isinstance(item.get("expected_raw_values"), dict) or set(item["expected_raw_values"]) != set(REPORT_PERIODS) or any(not isinstance(value, str) or not value.strip() for value in item["expected_raw_values"].values()) for item in registry_value)
+            or any(not isinstance(item.get(field), str) or not item[field].strip() for field in ("source_unit", "base_unit_conversion_factor", "unit", "manual_review_note") for item in registry_value)
+        ):
+            raise ValueError("case-registry has invalid identities, source coordinates, field values, or unsupported revenue periods")
+        try:
+            if any(not Decimal(item["base_unit_conversion_factor"]).is_finite() or Decimal(item["base_unit_conversion_factor"]) <= 0 for item in registry_value):
+                raise ValueError("case-registry unit conversion factors must be finite and positive")
+        except InvalidOperation as error:
+            raise ValueError("case-registry unit conversion factors must be Decimal strings") from error
+        CASE_SPECS = tuple(dict(item) for item in registry_value)
+    DOCLING_ASSETS = args.docling_assets
+    if args.emit_live_agent_bundle and (args.resume_existing or args.skip_qwen or not args.skip_module_matrix):
+        raise ValueError("live-agent bundle export requires a fresh Qwen-enabled single-case run with the module matrix skipped")
     selected_specs = [
         spec for spec in CASE_SPECS
         if args.case_id is None or str(spec["case_id"]) == args.case_id
     ]
+    if args.case_id is not None and not selected_specs:
+        raise ValueError("case-id is absent from the selected case registry")
+    if args.emit_live_agent_bundle and len(selected_specs) != 1:
+        raise ValueError("live-agent bundle export requires exactly one selected case")
 
     run_id = args.run_id or datetime.now(timezone.utc).strftime("current-capture-%Y%m%dT%H%M%SZ")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", run_id):
@@ -1974,6 +2053,8 @@ def main() -> None:
             as_of=as_of,
             retrieval_policy_sha256=retrieval_policy_sha256,
             access_scope=run_identity["access_scope"],
+            query=QUERY_TEXT,
+            report_periods=REPORT_PERIODS,
         )
         for case_id, spec in spec_by_case_id.items()
     }
@@ -2002,7 +2083,7 @@ def main() -> None:
         dense_adapter = LocalQwenDenseAdapter(
             store,
             embedding,
-            cache_path=ROOT / ".tmp" / "industrial_rag_dense_vector_cache.sqlite3",
+            cache_path=output_dir / "dense_vector_cache.sqlite3",
         )
         reranker = LocalQwenReranker(reranker_runtime)
     runtime_model_identity = _runtime_model_identity(
@@ -2104,7 +2185,7 @@ def main() -> None:
             "case_id": source["case_id"],
             "question": QUERY_TEXT,
             "security_code": spec["security_code"],
-            "report_periods": ["2023", "2024"],
+            "report_periods": list(REPORT_PERIODS),
             "calculator_eligible": _case_calculation_eligible(spec),
             "calculation_ineligibility_reasons": _case_calculation_reasons(spec),
             "source_id": source["source_id"],
@@ -2226,8 +2307,7 @@ def main() -> None:
             "terminal_event_sha256": retrieval_trace_journal.previous_event_sha256,
         },
         "dense_vector_cache": {
-            "path": str((ROOT / ".tmp" / "industrial_rag_dense_vector_cache.sqlite3").relative_to(ROOT))
-            if use_qwen else None,
+            "path": "dense_vector_cache.sqlite3" if use_qwen else None,
             "reuse_identity": "source_id+original_sha256+block_id+block_text_sha256+model_revision+asset_manifest+instruction+dimension"
             if use_qwen else None,
         },
@@ -2260,10 +2340,27 @@ def main() -> None:
             "Retrieval ranks and exact claim validation do not establish semantic entailment or investment quality.",
         ],
     }
+    live_agent_bundle_summary = None
+    if args.emit_live_agent_bundle:
+        selected_spec = selected_specs[0]
+        case_id = str(selected_spec["case_id"])
+        live_agent_bundle_summary = _write_live_agent_run_bundle(
+            output_dir,
+            source_run_id=run_id,
+            source_manifest_path=source_manifest_path,
+            case_id=case_id,
+            case_specs=CASE_SPECS,
+            report_periods=REPORT_PERIODS,
+            expected_run_identity_sha256=run_identity_sha256,
+            expected_runtime_model_identity_sha256=runtime_model_identity_sha256,
+            expected_case_identity_sha256=_canonical_hash(case_identity_by_id[case_id]),
+        )
+        record["live_agent_run_bundle"] = live_agent_bundle_summary
     _write_json(output_dir / "current_capture_run.json", record)
     print(json.dumps({
         "run_id": run_id,
         "output_dir": str(output_dir),
+        "live_agent_run_bundle": live_agent_bundle_summary,
         "release_status": release.get("status"),
         "as_of": as_of.isoformat(),
         "time_mode": "strict_forward",
