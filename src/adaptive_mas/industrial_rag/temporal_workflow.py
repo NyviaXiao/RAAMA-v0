@@ -404,7 +404,7 @@ class TemporalTaskInitialization:
     task_id: str
     idempotency_key: str
     state_database_path: str
-    request: dict[str, object]
+    request: dict[str, Any]
     result_artifact: str = "industrial_rag_operation_result"
 
 

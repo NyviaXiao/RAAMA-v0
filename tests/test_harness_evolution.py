@@ -14,6 +14,7 @@ from gepa.strategies.instruction_proposal import InstructionProposalSignature
 from adaptive_mas.agents.harness import (
     CallBudget,
     FIXED_RESEARCH_POLICY,
+    InvalidResearchOutput,
     InvalidToolInput,
     SUBMIT_REPORT,
     _accept_report,
@@ -21,6 +22,7 @@ from adaptive_mas.agents.harness import (
     _compact_tool_message,
     _financial_calculation,
     _fundamental_handlers,
+    _materialize_report_calculations,
     _run_tool_agent,
     _numeric_unit_key,
     _validate_numeric_claim_text,
@@ -1513,6 +1515,216 @@ def test_fundamental_calculator_creates_recomputable_decimal_evidence() -> None:
                 {"evidence_id": unreviewed_ids["2026Q2"], "field": "revenue_yoy_pct"},
             ],
         })
+
+
+def test_submit_report_calculation_spec_creates_and_validates_deterministic_evidence() -> None:
+    available = "2025-03-31T18:00:00+08:00"
+    periods = (("2023", "100"), ("2024", "120"))
+    evidence = []
+    for period, value in periods:
+        evidence.append({
+            "source_record_id": f"revenue-{period}",
+            "dataset": "financial_statement",
+            "title": f"Annual revenue {period}",
+            "report_period": period,
+            "published_at": available,
+            "available_at": available,
+            "fetched_at": available,
+            "content_sha256": f"fixture-revenue-{period}",
+            "revenue_cny": value,
+            "facts_units": {"revenue_cny": "CNY"},
+            "facts_metadata": {
+                "revenue_cny": {
+                    "numeric_eligible": True,
+                    "unit": "CNY",
+                    "report_period": period,
+                    "accounting_basis": "本集团",
+                    "currency": "CNY",
+                },
+            },
+            "accounting_basis": "本集团",
+            "currency": "CNY",
+            "vintage_status": "captured_fixture",
+            "vintage_verified": True,
+        })
+    snapshot = {"p9_outputs": [{"expert": "fundamental_rule_v1", "symbol": "sh.600036", "evidence": evidence}]}
+    decision_time = datetime.fromisoformat("2026-09-01T16:00:00+08:00")
+    _, handlers, catalog = _fundamental_handlers(snapshot, decision_time)
+    searched = handlers["search_financial_facts_and_announcements"]({
+        "question": "revenue_cny growth",
+        "symbols": ["600036"],
+        "limit": 1,
+    })
+    source_ids = {
+        str(reference["report_period"]): str(reference["evidence_id"])
+        for reference in searched["evidence_refs"]
+    }
+    visible_ids = set(source_ids.values())
+    report = {
+        "summary": "The source-bound growth was 20%.",
+        "findings": [{
+            "symbol": "600036",
+            "conclusion": "Revenue grew by 20%.",
+            "claim_type": "calculation",
+            "evidence_ids": [source_ids["2023"], source_ids["2024"]],
+            "observations": [
+                {
+                    "evidence_id": source_ids[period],
+                    "field": "revenue_cny",
+                    "value": int(value),
+                    "unit": "CNY",
+                    "report_period": period,
+                    "period_start": None,
+                    "period_end": None,
+                }
+                for period, value in periods
+            ],
+            "uncertainties": [],
+            "calculation_spec": {
+                "operation": "growth_percent",
+                "operands": [
+                    {"evidence_id": source_ids["2023"], "field": "revenue_cny"},
+                    {"evidence_id": source_ids["2024"], "field": "revenue_cny"},
+                ],
+            },
+        }],
+        "unresolved_items": [],
+    }
+    original_report = json.loads(json.dumps(report))
+    prepared = _materialize_report_calculations(
+        report,
+        catalog,
+        visible_ids,
+        handlers["calculate_financial_metric"],  # type: ignore[arg-type]
+    )
+
+    assert report == original_report
+    finding = prepared["findings"][0]
+    derived_id = finding["observations"][-1]["evidence_id"]
+    assert derived_id in finding["evidence_ids"]
+    assert "calculation_spec" not in finding
+    accepted = _validate_report(
+        prepared,
+        catalog,
+        "fundamental",
+        visible_evidence_ids=visible_ids,
+        decision_time=decision_time,
+    )
+    assert accepted["findings"][0]["claim_validation"]["status"] == (
+        "calculation_recomputed_decimal_50_half_even_semantics_unverified"
+    )
+    assert accepted["findings"][0]["claim_validation"]["calculation_evidence_ids"] == [derived_id]
+
+    report_without_spec = json.loads(json.dumps(report))
+    report_without_spec["findings"][0].pop("calculation_spec")
+    with pytest.raises(InvalidResearchOutput, match="missing_calculation_evidence"):
+        _materialize_report_calculations(
+            report_without_spec,
+            catalog,
+            set(source_ids.values()),
+            handlers["calculate_financial_metric"],  # type: ignore[arg-type]
+        )
+
+    source_fact_report = {
+        "summary": "The filing reports annual revenue.",
+        "findings": [{
+            "symbol": "600036",
+            "conclusion": "Annual revenue was reported in the filing.",
+            "claim_type": "source_fact",
+            "evidence_ids": [source_ids["2024"]],
+            "observations": [{
+                "evidence_id": source_ids["2024"],
+                "field": "revenue_cny",
+                "value": 120,
+                "unit": "CNY",
+                "report_period": "2024",
+                "period_start": None,
+                "period_end": None,
+            }],
+            "uncertainties": [],
+        }],
+        "unresolved_items": [],
+    }
+    accepted_source_fact = _accept_report(
+        source_fact_report,
+        catalog,
+        "fundamental",
+        visible_evidence_ids=visible_ids,
+        decision_time=decision_time,
+    )
+    assert accepted_source_fact["accepted"] is True
+    assert accepted_source_fact["accepted_report"]["findings"][0]["claim_validation"]["status"] == (
+        "source_observations_validated_semantics_unverified"
+    )
+
+    unsupported_source_field = json.loads(json.dumps(source_fact_report))
+    unsupported_source_field["findings"][0]["observations"][0]["field"] = "营业收入"
+    with pytest.raises(InvalidResearchOutput, match="evidence_not_exposed"):
+        _accept_report(
+            unsupported_source_field,
+            catalog,
+            "fundamental",
+            visible_evidence_ids=visible_ids,
+            decision_time=decision_time,
+        )
+
+
+def test_tool_agent_reserves_a_final_validation_correction_turn() -> None:
+    class SequenceClient:
+        model = "fixture-only"
+
+        def __init__(self) -> None:
+            self.calls = []
+            self.system_prompts = []
+
+        def complete(self, messages, tools, **kwargs):
+            self.calls.append(kwargs.get("tool_choice"))
+            self.system_prompts.append(str(messages[0]["content"]))
+            turn = len(self.calls)
+            name = "lookup" if turn <= 3 else "submit_report"
+            arguments = {} if name == "lookup" else {
+                "summary": "Corrected report.",
+                "findings": [],
+                "unresolved_items": [],
+            }
+            return {"choices": [{"message": {"tool_calls": [{
+                "id": f"turn-{turn}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }]}}]}
+
+    report_attempts = 0
+
+    def submit_report(_arguments):
+        nonlocal report_attempts
+        report_attempts += 1
+        if report_attempts == 1:
+            raise InvalidResearchOutput("fundamental", "missing_calculation_evidence", "use calculation_spec")
+        return {"accepted_report": {"findings": []}, "accepted": True}
+
+    client = SequenceClient()
+    result = _run_tool_agent(
+        role_id="fundamental",
+        system_prompt="fixture prompt",
+        task={"symbol": "600036"},
+        tools=[
+            {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}},
+            SUBMIT_REPORT,
+        ],
+        handlers={"lookup": lambda _arguments: {"results": []}, "submit_report": submit_report},
+        client=client,
+        budget=CallBudget(max_calls=10),
+        max_turns=5,
+        reserve_correction_turn=True,
+    )
+
+    assert result["report"] == {"findings": []}
+    assert len(client.calls) == 5
+    assert client.calls[:3] == [None, None, None]
+    assert all(choice == {"type": "function", "function": {"name": "submit_report"}} for choice in client.calls[3:])
+    assert "Reserved submission turn (4/5)" in client.system_prompts[3]
+    retry = next(message for message in result["tool_trace"] if message.get("status") == "correctable_rejection")
+    assert retry["result"]["error_category"] == "missing_calculation_evidence"
 
 
 def test_unknown_basis_is_source_observable_but_rejected_by_every_calculation_gate() -> None:

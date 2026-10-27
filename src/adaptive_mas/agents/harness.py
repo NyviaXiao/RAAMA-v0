@@ -9,6 +9,7 @@ import os
 import re
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
@@ -29,7 +30,7 @@ from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-DEFAULT_MODEL = "qwen3.7-max-2026-06-08"
+DEFAULT_MODEL = "qwen3.8-27b"
 DEFAULT_ENDPOINT = "https://ws-e2j790x1jcafl4cu.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 INPUT_PRICE_CNY_PER_MILLION = 12.0
 OUTPUT_PRICE_CNY_PER_MILLION = 36.0
@@ -353,7 +354,14 @@ class CallBudget:
             return result
         return None
 
-    def finish_call(self, call_index: int, usage: dict[str, object], elapsed_ms: float) -> None:
+    def finish_call(
+        self,
+        call_index: int,
+        usage: dict[str, object],
+        elapsed_ms: float,
+        *,
+        provider_reported_model: str | None = None,
+    ) -> None:
         row = self.calls[call_index - 1]
         prompt_tokens = int(usage["prompt_tokens"])
         completion_tokens = int(usage["completion_tokens"])
@@ -367,6 +375,8 @@ class CallBudget:
             ) / 1_000_000,
             "elapsed_ms": elapsed_ms,
         })
+        if provider_reported_model:
+            row["provider_reported_model"] = provider_reported_model
         logical_counted = True
         if self.state_store is not None and self.task_id is not None:
             logical_counted = self.state_store.claim_logical_turn(
@@ -499,10 +509,16 @@ class QwenClient:
     offline_only: bool = False
 
     @classmethod
-    def from_environment(cls, api_key: str | None = None) -> "QwenClient":
+    def from_environment(
+        cls,
+        api_key: str | None = None,
+        model_override: str | None = None,
+    ) -> "QwenClient":
         credential = api_key if api_key is not None else os.environ["POPAGENT_LLM_KEY"]
         endpoint = os.environ.get("POPAGENT_LLM_URL", DEFAULT_ENDPOINT)
-        model = os.environ.get("POPAGENT_LLM_MODEL", DEFAULT_MODEL)
+        model = model_override if model_override is not None else os.environ.get("POPAGENT_LLM_MODEL", DEFAULT_MODEL)
+        if not isinstance(model, str) or not model.strip() or len(model) > 128:
+            raise ValueError("configured model must be a nonempty identifier up to 128 characters")
         return cls(endpoint.rstrip("/"), credential, model)
 
     def complete(
@@ -675,7 +691,13 @@ class QwenClient:
                 attempt_id=durable_attempt_id,
             )
         marker_path.unlink(missing_ok=True)
-        budget.finish_call(call_index, body["usage"], elapsed_ms)
+        reported_model = body.get("model")
+        budget.finish_call(
+            call_index,
+            body["usage"],
+            elapsed_ms,
+            provider_reported_model=reported_model if isinstance(reported_model, str) else None,
+        )
         return body
 
 
@@ -969,6 +991,31 @@ SUBMIT_REPORT = _tool(
                         },
                     },
                     "uncertainties": {"type": "array", "items": {"type": "string"}},
+                    "calculation_spec": {
+                        "type": "object",
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "enum": ["difference", "growth_percent", "margin_percent"],
+                            },
+                            "operands": {
+                                "type": "array",
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "evidence_id": {"type": "string"},
+                                        "field": {"type": "string"},
+                                    },
+                                    "required": ["evidence_id", "field"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["operation", "operands"],
+                        "additionalProperties": False,
+                    },
                 },
                 "required": ["symbol", "conclusion", "claim_type", "evidence_ids", "observations", "uncertainties"],
                 "additionalProperties": False,
@@ -991,6 +1038,7 @@ def _run_tool_agent(
     budget: CallBudget,
     max_turns: int,
     visible_evidence_ids: set[str] | None = None,
+    reserve_correction_turn: bool = False,
 ) -> dict[str, object]:
     final_tool = "finalize_research" if "finalize_research" in handlers else "submit_report"
     if final_tool not in handlers:
@@ -1002,7 +1050,11 @@ def _run_tool_agent(
             "never as a string containing JSON. Provide a complete, readable report and include every "
             "supported exact observation with the exact value, unit, source citation, and report period "
             "or market period boundaries. Classify each conclusion as source_fact, calculation, inference, or unknown. "
-            "Use calculate_financial_metric for deterministic financial arithmetic and cite both operand sources plus its derived evidence. Keep the report "
+            "For a calculation finding, cite both operand sources plus its derived calculation evidence. You may call "
+            "calculate_financial_metric, or include calculation_spec with its operation and two cited source operands; "
+            "the runtime computes the Decimal result and adds derived evidence and an observation before fixed validation. "
+            "Do not supply a calculated result yourself. Keep numeric values and units exactly as they appear in cited "
+            "source observations or calculated evidence; do not convert units. Keep the report "
             "focused; completeness, concision, and tool efficiency are evaluated as soft scores. "
             "Provide unresolved_items as a separate top-level array.",
         ))
@@ -1053,7 +1105,17 @@ def _run_tool_agent(
                 "after_bytes": after_bytes,
                 "compressed_tool_steps": summary_steps,
             })
-        if turn_index == max_turns - 1:
+        submission_turn = max_turns - 2 if reserve_correction_turn else max_turns - 1
+        if reserve_correction_turn and turn_index == submission_turn:
+            messages[0] = {
+                **messages[0],
+                "content": (
+                    str(messages[0]["content"])
+                    + f"\n\nReserved submission turn ({turn_index + 1}/{max_turns}): call {final_tool} now. "
+                    "One final validation-correction turn remains."
+                ),
+            }
+        elif turn_index == max_turns - 1:
             messages[0] = {
                 **messages[0],
                 "content": (
@@ -1063,7 +1125,7 @@ def _run_tool_agent(
             }
         final_tool_choice = (
             {"type": "function", "function": {"name": final_tool}}
-            if turn_index == max_turns - 1 else None
+            if turn_index in {submission_turn, max_turns - 1} else None
         )
         response = client.complete(
             messages, tools, budget=budget, role=role_id, tool_choice=final_tool_choice
@@ -2678,6 +2740,102 @@ def _calculate_financial_metric(
     }
 
 
+def _materialize_report_calculations(
+    report: dict[str, object],
+    catalog: dict[str, dict[str, object]],
+    visible_evidence_ids: set[str],
+    calculator: Callable[[dict[str, object]], dict[str, object]],
+    *,
+    role_id: str = "fundamental",
+) -> dict[str, object]:
+    """Build cited Decimal evidence from explicit report calculation specifications."""
+    prepared = deepcopy(report)
+    findings = prepared.get("findings")
+    if not isinstance(findings, list):
+        return prepared
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        calculation_spec = finding.pop("calculation_spec", None)
+        evidence_ids = finding.get("evidence_ids")
+        cited_calculation_ids = [
+            evidence_id
+            for evidence_id in evidence_ids
+            if isinstance(evidence_id, str)
+            and evidence_id in catalog
+            and catalog[evidence_id].get("calculation") is not None
+        ] if isinstance(evidence_ids, list) else []
+        if calculation_spec is None:
+            if finding.get("claim_type") == "calculation" and not cited_calculation_ids:
+                raise InvalidResearchOutput(
+                    role_id,
+                    "missing_calculation_evidence",
+                    "cite calculated evidence from calculate_financial_metric or provide calculation_spec with its operation and two visible source operands",
+                )
+            continue
+        if finding.get("claim_type") != "calculation":
+            raise InvalidResearchOutput(
+                role_id,
+                "calculation_spec_for_non_calculation_claim",
+                "calculation_spec is allowed only for a finding classified as calculation",
+            )
+        if not isinstance(evidence_ids, list):
+            raise InvalidResearchOutput(
+                role_id,
+                "malformed_calculation_evidence",
+                "calculation findings must cite both source operands",
+            )
+        operand_refs = calculation_spec.get("operands") if isinstance(calculation_spec, dict) else None
+        operand_ids = [
+            reference.get("evidence_id")
+            for reference in operand_refs
+            if isinstance(reference, dict)
+        ] if isinstance(operand_refs, list) else []
+        if len(operand_ids) != 2 or any(
+            not isinstance(evidence_id, str) or evidence_id not in evidence_ids
+            for evidence_id in operand_ids
+        ):
+            raise InvalidResearchOutput(
+                role_id,
+                "malformed_calculation_evidence",
+                "calculation_spec operands must be the two source evidence IDs cited by the finding",
+            )
+        try:
+            result = calculator(calculation_spec)
+        except InvalidToolInput as exc:
+            raise InvalidResearchOutput(
+                role_id,
+                "calculation_spec_rejected",
+                str(exc),
+            ) from None
+        calculation_evidence_id = str(result["evidence_id"])
+        if calculation_evidence_id not in evidence_ids:
+            evidence_ids.append(calculation_evidence_id)
+        observations = finding.get("observations")
+        if not isinstance(observations, list):
+            raise InvalidResearchOutput(
+                role_id,
+                "malformed_calculation_observations",
+                "calculation findings must provide source observations as an array",
+            )
+        if not any(
+            isinstance(observation, dict)
+            and observation.get("evidence_id") == calculation_evidence_id
+            for observation in observations
+        ):
+            observations.append({
+                "evidence_id": calculation_evidence_id,
+                "field": result["metric"],
+                "value": result["value"],
+                "unit": result["unit"],
+                "report_period": result["report_period"],
+                "period_start": None,
+                "period_end": None,
+            })
+        visible_evidence_ids.add(calculation_evidence_id)
+    return prepared
+
+
 def _recompute_calculation_record(
     source: Mapping[str, object],
     catalog: Mapping[str, Mapping[str, object]],
@@ -3792,8 +3950,14 @@ def run_research_harness(
     fundamental_visible_evidence_ids: set[str] = set()
 
     def submit_fundamental(arguments: dict[str, object]) -> dict[str, object]:
-        accepted = _accept_report(
+        prepared = _materialize_report_calculations(
             arguments,
+            fundamental_catalog,
+            fundamental_visible_evidence_ids,
+            fundamental_handlers["calculate_financial_metric"],  # type: ignore[arg-type]
+        )
+        accepted = _accept_report(
+            prepared,
             fundamental_catalog,
             "fundamental",
             visible_evidence_ids=fundamental_visible_evidence_ids,
@@ -3840,6 +4004,7 @@ def run_research_harness(
             budget=budget,
             max_turns=4,
             visible_evidence_ids=fundamental_visible_evidence_ids,
+            reserve_correction_turn=True,
         )
     except InvalidResearchOutput as exc:
         exc.partial_tool_trace = [

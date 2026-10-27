@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from adaptive_mas.agents import harness as agent_harness  # noqa: E402
 from adaptive_mas.agents.harness import (  # noqa: E402
     CallBudget,
+    DEFAULT_MODEL,
     ProviderQuotaRejected,
     QwenClient,
     _fundamental_handlers,
@@ -42,10 +43,10 @@ SOURCE_RUNTIME_MODEL_IDENTITY_SHA256 = "1a9250a6bbdbed5140e6c99868c2954bbf47d2b5
 SOURCE_CASE_IDENTITY_SHA256 = "b0e3da8fbbe19b9a90eca7969b0b18d0bb6cb46db553edd2f77778dcc65a9899"
 SOURCE_RUN_DIR = ROOT / ".tmp" / "industrial_rag_current_capture_20261026" / SOURCE_RUN_ID
 LIVE_OUTPUT_ROOT = ROOT / ".tmp" / "industrial_rag_live_agent_20261027"
-FALLBACK_MODEL = "qwen3.7-max-preview"
 MAX_PROVIDER_CALLS = 5
-MAX_LOGICAL_TURNS = 4
+MAX_LOGICAL_TURNS = 5
 RUN_BUNDLE_SCHEMA = "raama.financial-rag.live-agent-run-bundle.v1"
+DEFAULT_RUN_ID = "current-capture-qwen38-cmb-live-agent-20261027"
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +215,7 @@ def _implementation_hashes() -> dict[str, str]:
     return {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()}
 
 
-def _load_provider_client() -> QwenClient:
+def _load_provider_client(model: str = DEFAULT_MODEL) -> QwenClient:
     api_key = os.environ.get("POPAGENT_LLM_KEY")
     if not api_key:
         key_path = ROOT / "data" / "raw" / "qwen_key.txt"
@@ -223,46 +224,7 @@ def _load_provider_client() -> QwenClient:
         api_key = key_path.read_text(encoding="utf-8").strip()
     if not api_key:
         raise RuntimeError("the existing Qwen client credential is empty")
-    return QwenClient.from_environment(api_key=api_key)
-
-
-class QuotaFallbackClient:
-    """Switch to the approved preview model only after an explicit quota rejection."""
-
-    def __init__(self, primary: QwenClient, event_path: Path) -> None:
-        self.primary = primary
-        self.fallback = QwenClient(primary.endpoint, primary.api_key, FALLBACK_MODEL)
-        self.active = primary
-        self.event_path = event_path
-        self.fallback_used = False
-        self.model_events: list[dict[str, object]] = []
-
-    @property
-    def model(self) -> str:
-        return self.active.model
-
-    def complete(self, *args: Any, **kwargs: Any) -> dict[str, object]:
-        if self.fallback_used:
-            return self.active.complete(*args, **kwargs)
-        try:
-            return self.primary.complete(*args, **kwargs)
-        except ProviderQuotaRejected as error:
-            if self.primary.model == FALLBACK_MODEL:
-                raise
-            event: dict[str, object] = {
-                "event": "fallback_model_selected_after_provider_quota_rejection",
-                "primary_model": self.primary.model,
-                "fallback_model": FALLBACK_MODEL,
-                "http_status": error.status_code,
-                "provider_error_code": error.error_code,
-                "provider_error_sha256": error.response_sha256,
-                "recorded_at": datetime.now().astimezone().isoformat(),
-            }
-            _append_jsonl(self.event_path, event)
-            self.model_events.append(event)
-            self.fallback_used = True
-            self.active = self.fallback
-            return self.fallback.complete(*args, **kwargs)
+    return QwenClient.from_environment(api_key=api_key, model_override=model)
 
 
 def _verify_capture_case_identity(
@@ -556,6 +518,7 @@ def _load_service(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Exact configured Qwen model identifier")
     parser.add_argument("--run-bundle", type=Path, help="Versioned identity-locked JSON bundle for a source capture")
     parser.add_argument("--expected-bundle-sha256", help="Out-of-band SHA-256 pin for --run-bundle raw bytes")
     parser.add_argument("--output-root", type=Path, help="Parent directory for a new, non-overwriting live-agent run")
@@ -566,7 +529,7 @@ def main() -> None:
         if args.expected_bundle_sha256 is not None:
             raise ValueError("expected-bundle-sha256 requires run-bundle")
         bundle = _default_run_bundle()
-        run_id = args.run_id or "current-capture-qwen-cmb-live-agent-20261027"
+        run_id = args.run_id or DEFAULT_RUN_ID
     else:
         if args.expected_bundle_sha256 is None:
             raise ValueError("run-bundle requires an out-of-band expected-bundle-sha256")
@@ -576,6 +539,8 @@ def main() -> None:
         run_id = args.run_id
     if not capture.re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", run_id):
         raise ValueError("run-id must be a safe immutable identifier")
+    if args.model != "qwen3.8-27b":
+        raise ValueError("this approved run requires the exact model identifier qwen3.8-27b")
 
     source_envelope, _baseline_progress, spec, case_identity = _verify_capture_run(bundle)
     dense_cache_source_path = capture._resolve_dense_cache_path(
@@ -599,7 +564,8 @@ def main() -> None:
         dense_cache_path=dense_cache_path,
     )
     permission_revision, continuation_revision = _verify_runtime_access_revisions(store, case_identity)
-    provider_client = _load_provider_client()
+    model_selected_at = datetime.now().astimezone().isoformat()
+    provider_client = _load_provider_client(args.model)
     runtime_identity_sha256 = capture._canonical_hash(runtime_identity)
     source_run_identity = source_envelope["run_identity"]
     implementation_hashes = _implementation_hashes()
@@ -616,9 +582,14 @@ def main() -> None:
         "case_identity_sha256": case_identity["case_identity_sha256"],
         "runtime_model_identity_sha256": runtime_identity_sha256,
         "agent_driver": "qwen_generation_tool_calls",
-        "primary_model": provider_client.model,
-        "quota_fallback_model": FALLBACK_MODEL,
-        "quota_fallback_policy": "only on structured provider error explicitly identifying quota exhaustion",
+        "requested_model": provider_client.model,
+        "model_selection": {
+            "exact_model_identifier": args.model,
+            "selection_source": "explicit --model argument",
+            "selected_at": model_selected_at,
+            "previous_preview_quota_status": "human-reported exhausted; not retried",
+        },
+        "fallback_policy": "disabled; preserve quota or availability failures",
         "max_provider_calls": MAX_PROVIDER_CALLS,
         "max_logical_turns": MAX_LOGICAL_TURNS,
         "implementation_sha256": implementation_hashes,
@@ -629,10 +600,9 @@ def main() -> None:
         "live_agent_identity_sha256": live_identity_sha256,
     })
 
-    if provider_client.model != live_identity["primary_model"]:
+    if provider_client.model != live_identity["requested_model"]:
         raise capture.RunIdentityError("configured provider model changed after live identity was bound")
-    event_path = output_dir / "provider_model_events.jsonl"
-    client = QuotaFallbackClient(provider_client, event_path)
+    client = provider_client
     budget = CallBudget(
         max_calls=MAX_PROVIDER_CALLS,
         ledger_path=output_dir / "provider_request_ledger.jsonl",
@@ -709,13 +679,24 @@ def main() -> None:
         research_policy_json=str(source_run_identity["research_policy_json"]),
         retrieval_trace_callback=trace_callback,
     )
-    handlers["submit_report"] = lambda arguments: capture._accept_report(
-        arguments,
-        catalog,
-        "fundamental",
-        visible_evidence_ids=visible_evidence_ids,
-        decision_time=decision_time,
-    )
+    calculator = handlers["calculate_financial_metric"]
+
+    def submit_report(arguments: dict[str, object]) -> dict[str, object]:
+        prepared = agent_harness._materialize_report_calculations(
+            arguments,
+            catalog,
+            visible_evidence_ids,
+            calculator,  # type: ignore[arg-type]
+        )
+        return capture._accept_report(
+            prepared,
+            catalog,
+            "fundamental",
+            visible_evidence_ids=visible_evidence_ids,
+            decision_time=decision_time,
+        )
+
+    handlers["submit_report"] = submit_report
     for name, handler in tuple(handlers.items()):
         def traced_handler(arguments: dict[str, object], *, tool_name=name, tool_handler=handler):
             nonlocal current_tool_event
@@ -753,6 +734,10 @@ def main() -> None:
         "as_of": decision_time.isoformat(),
         "question": str(source_run_identity["query"]),
         "symbol": str(spec["security_code"]),
+        "report_periods": list(bundle.report_periods),
+        "period_instruction": (
+            "Use these exact report_periods in searches and observations. Do not convert a year label to a calendar date or infer another period."
+        ),
         "allowed_data": "the pinned local strict-forward industrial RAG release only",
     }
     final_result: dict[str, object] | None = None
@@ -761,7 +746,12 @@ def main() -> None:
         identity_check()
         final_result = _run_tool_agent(
             role_id="fundamental",
-            system_prompt="Use the indexed local financial filing and cite every source fact.",
+            system_prompt=(
+                "Use the indexed local financial filing and cite every source fact. Use the exact report_periods "
+                "provided in the task. For a calculation claim, provide calculation_spec with the operation and "
+                "two cited source operands, or cite deterministic calculator evidence. Keep every numeric literal "
+                "in the exact value and unit represented by source observations or calculated evidence."
+            ),
             task=case,
             tools=tools,
             handlers=handlers,
@@ -769,6 +759,7 @@ def main() -> None:
             budget=budget,
             max_turns=MAX_LOGICAL_TURNS,
             visible_evidence_ids=visible_evidence_ids,
+            reserve_correction_turn=True,
         )
         identity_check()
         if final_result.get("status") != "completed":
@@ -802,13 +793,22 @@ def main() -> None:
         progress["completed_at"] = datetime.now().astimezone().isoformat()
         progress["agent_tool_trace"] = final_result.get("tool_trace") if final_result else None
         progress["validated_report"] = final_result.get("report") if final_result else None
-        progress["actual_model"] = final_result.get("model") if final_result else client.model
+        reported_models = sorted({
+            str(row["provider_reported_model"])
+            for row in budget.calls if row.get("provider_reported_model")
+        })
+        progress["provider_reported_models"] = reported_models
+        progress["actual_model"] = reported_models[0] if len(reported_models) == 1 else None
     else:
         progress["status"] = "failed"
         progress["completed_at"] = datetime.now().astimezone().isoformat()
         progress["failure"] = failure
     progress["provider_budget"] = budget.summary()
-    progress["model_events"] = list(client.model_events)
+    reported_models = sorted({
+        str(row["provider_reported_model"])
+        for row in budget.calls if row.get("provider_reported_model")
+    })
+    progress["provider_reported_models"] = reported_models
     progress["tool_count"] = len(progress["tool_events"])
     progress["retrieval_trace_event_count"] = journal.sequence
     progress["retrieval_trace_sha256"] = hashlib.sha256((output_dir / "retrieval_trace.jsonl").read_bytes()).hexdigest()
@@ -823,9 +823,10 @@ def main() -> None:
         "runtime_model_identity_sha256": runtime_identity_sha256,
         "agent_driver": "qwen_generation_tool_calls",
         "generation_model_called": budget.provider_call_count > 0 or budget.cache_hits > 0,
-        "actual_model": final_result.get("model") if final_result else client.model,
-        "fallback_used": client.fallback_used,
-        "model_events": client.model_events,
+        "requested_model": client.model,
+        "actual_model": reported_models[0] if len(reported_models) == 1 else None,
+        "provider_reported_models": reported_models,
+        "fallback_used": False,
         "provider_budget": budget.summary(),
         "status": "completed" if failure is None else "failed",
         "failure": failure,
@@ -841,8 +842,10 @@ def main() -> None:
         "status": output_record["status"],
         "agent_driver": output_record["agent_driver"],
         "generation_model_called": output_record["generation_model_called"],
+        "requested_model": output_record["requested_model"],
         "actual_model": output_record["actual_model"],
-        "fallback_used": client.fallback_used,
+        "provider_reported_models": reported_models,
+        "fallback_used": False,
         "provider_call_count": budget.provider_call_count,
         "logical_inference_count": len(budget.logical_calls),
         "tool_count": len(progress["tool_events"]),
