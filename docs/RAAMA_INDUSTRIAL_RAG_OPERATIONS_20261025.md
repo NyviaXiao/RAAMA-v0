@@ -111,12 +111,14 @@ Evidence labels must identify an exact source hash, page, and original cell/tabl
 
 ## Current service boundaries
 
-- The local reference implementation uses SQLite and filesystem content storage. PostgreSQL and S3-compatible adapters are not yet verified against live services.
-- PostgreSQL row conversion, SQL translation, and migrations have code-level coverage only; live connection, migration, concurrency, isolation, CRUD, and crash-recovery checks remain pending.
-- OpenSearch, persistent Qdrant, Temporal, and external observability are not configured. Local Docling and Qwen inference are optional and require their separate fetch commands; neither proves live backend integration.
+- The local reference implementation uses SQLite and filesystem content storage. PostgreSQL metadata with RustFS-backed content storage has bounded live synthetic integration evidence, including ingest, rollback, outbox leases/concurrency, release publication, permission and continuation updates, query-cache upsert, application retrieval, and reconnect.
+- The live PostgreSQL probes are not the full cross-backend contract suite. The method-level evidence and uncovered cases are tracked in `docs/RAAMA_POSTGRES_CONTRACT_MATRIX_20261027.md`; `postgres_contract_suite_verified` remains false. PostgreSQL HA/failover and multi-node recovery have not been tested.
+- OpenSearch and Qdrant have bounded synthetic service and release-bound application checks. Temporal has a bounded synthetic local-ingest worker-restart/replay check; its index, evaluation, and research workflows have not run against a real service. These runs are not production acceptance. External observability is not configured. Local Docling and Qwen inference are optional and require their separate fetch commands.
 - The sample corpus is a viewed, single-issuer public diagnostic set, not an independent acceptance set.
 - Do not place broker credentials, account documents, private research, or restricted source bytes in the public diagnostic store.
 
 ## Shared CPU host resource template
 
 `deploy/systemd/raama.slice` caps the slice at 2000% aggregate CPU, sets `MemoryHigh=180000000000`, `MemoryMax=200000000000`, disables additional swap, and sets a separate `TasksMax=4096` process/thread budget. TasksMax is not a CPU count. The host must add an `AllowedCPUs` drop-in containing only the CPUs delegated to RAAMA; no host CPU list is assumed here. `deploy/systemd/raama-cpu.env` sets model and numerical-library threads to one per process and workbench request threads to four. These are templates only: place every RAAMA process in the same delegated slice and confirm effective `cpu.max`, `cpuset.cpus.effective`, memory, and task limits on the target host before starting heavy work. Per-process thread settings do not enforce the aggregate budget by themselves.
+
+Use `scripts/verify_cpu_handoff.py --run-offline-smoke --output .tmp/raama_cpu_handoff_20261027.json` from inside the configured slice to record the required cgroup-v2 and runtime-environment preflight before running the focused offline regression list. See `docs/RAAMA_CPU_ONLY_HANDOFF_20261027.md` for the exact host contract and the current evidence boundary. The Windows development host has not validated the Linux slice.
