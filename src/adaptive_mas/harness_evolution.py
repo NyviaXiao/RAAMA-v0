@@ -1528,8 +1528,8 @@ _ABLATION_MODULES = (
     (12, "independent_reranker", "bounded_policy_ablation"),
     (13, "reviewed_parent_context", "bounded_policy_ablation"),
     (14, "financial_fact_normalization", "immutable_parser_contract"),
-    (15, "context_allocation", "bounded_policy_ablation"),
-    (16, "evidence_coverage_budget", "bounded_policy_ablation"),
+    (15, "context_allocation", "parameter_sensitivity"),
+    (16, "evidence_coverage_budget", "parameter_sensitivity"),
     (17, "challenge_and_stop", "immutable_safety_policy"),
     (18, "claim_citation_alignment", "immutable_evaluator_contract"),
     (19, "deterministic_arithmetic_validation", "immutable_safety_policy"),
@@ -1562,10 +1562,25 @@ def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, obje
             12: "disable the configured reranker",
             13: "disable reviewed table-row expansion",
             14: "disable normalized structured-fact retrieval while retaining report validation",
-            15: "remove the candidate context cap under a fixed 16,000-character tool ceiling",
-            16: "remove the candidate evidence cap under the service 64-item ceiling",
+            15: "raise the candidate context limit to 16,000 characters within the fixed tool ceiling",
+            16: "raise the candidate evidence limit to the service ceiling of 64 items",
         }
         if module_id in descriptions:
+            if module_id in {15, 16}:
+                row.update({
+                    "status": "planned_sensitivity_not_executed",
+                    "reason": "numeric limit change; evaluate as parameter sensitivity, not module removal",
+                    "parameter_sensitivity": {
+                        "parameter": "context_char_limit" if module_id == 15 else "evidence_limit",
+                        "baseline_value": baseline_policy[
+                            "context_char_limit" if module_id == 15 else "evidence_limit"
+                        ],
+                        "comparison_value": 16000 if module_id == 15 else 64,
+                        "description": descriptions[module_id],
+                    },
+                })
+                rows.append(row)
+                continue
             reason = None
             if module_id == 9 and "bm25" not in baseline_policy["channels"]:
                 reason = "BM25 is already absent from the active supporting-channel set"
@@ -1955,7 +1970,10 @@ def run_gepa_evolution(
         ]),
         "rows": ablation_rows,
         "planned_runtime_intervention_count": sum(row["status"] == "planned_not_executed" for row in ablation_rows),
-        "execution_status": "No module intervention was executed; each row requires a separate paired run and provider-call budget.",
+        "planned_parameter_sensitivity_count": sum(
+            row["status"] == "planned_sensitivity_not_executed" for row in ablation_rows
+        ),
+        "execution_status": "No module intervention or parameter sensitivity was executed; each comparison requires a separate paired run and provider-call budget.",
         "non_causal_scope": "This schedule defines one-factor variants only; measured deltas will not prove causal module effects.",
     }
     module_ablation_plan_file = "module_ablation_plan.json"
@@ -2491,6 +2509,7 @@ def run_gepa_evolution(
         "module_ablation_plan_file": module_ablation_plan_file,
         "module_ablation_plan_status": module_ablation_plan["status"],
         "planned_runtime_intervention_count": module_ablation_plan["planned_runtime_intervention_count"],
+        "planned_parameter_sensitivity_count": module_ablation_plan["planned_parameter_sensitivity_count"],
         "procedural_memory": {
             "active_version_before": active_version.get("procedural_memory"),
             "active_version_after": selected_version.get("procedural_memory"),

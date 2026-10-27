@@ -385,8 +385,10 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
     assert result["module_ablation_plan_file"] == "module_ablation_plan.json"
     assert ablation_payload["status"] == "plan_only_no_ablation_results"
     assert len(ablation_payload["rows"]) == 20
-    assert ablation_payload["planned_runtime_intervention_count"] == 11
-    assert ablation_payload["execution_status"].startswith("No module intervention was executed")
+    assert ablation_payload["planned_runtime_intervention_count"] == 9
+    assert ablation_payload["planned_parameter_sensitivity_count"] == 2
+    assert result["planned_parameter_sensitivity_count"] == 2
+    assert ablation_payload["execution_status"].startswith("No module intervention or parameter sensitivity was executed")
     assert ablation_payload["rows"][16]["mode"] == "immutable_safety_policy"
     assert {entry["phase"] for entry in trace_payload["evaluations"]} == {
         "exploration", "selection", "frozen_evaluation", "reuse_demo",
@@ -442,17 +444,24 @@ def test_paired_case_deltas_name_metric_and_cost_regressions_without_claiming_ca
         _paired_case_deltas(baseline, [{**comparison[0], "as_of": "2026-04-21"}])
 
 
-def test_module_ablation_plan_separates_runtime_interventions_from_fixed_modules() -> None:
+def test_module_ablation_plan_separates_interventions_sensitivities_and_fixed_modules() -> None:
     rows = build_module_ablation_plan(seed_candidate())
     variants = [row for row in rows if row["status"] == "planned_not_executed"]
+    sensitivities = [row for row in rows if row["status"] == "planned_sensitivity_not_executed"]
 
     assert [row["module_id"] for row in rows] == list(range(1, 21))
-    assert len(variants) == 11
+    assert len(variants) == 9
+    assert len(sensitivities) == 2
     assert all(row["candidate"]["procedural_experience"] == seed_candidate()["procedural_experience"] for row in variants)
     assert all(row["changed_policy_fields"] == [] for row in variants)
     assert {row["runtime_intervention"]["research_ablation_id"] for row in variants} == {
-        2, 3, 7, 8, 9, 11, 12, 13, 14, 15, 16,
+        2, 3, 7, 8, 9, 11, 12, 13, 14,
     }
+    assert {row["module_id"] for row in sensitivities} == {15, 16}
+    assert all(row["mode"] == "parameter_sensitivity" for row in sensitivities)
+    assert all("runtime_intervention" not in row for row in sensitivities)
+    assert sensitivities[0]["parameter_sensitivity"]["parameter"] == "context_char_limit"
+    assert sensitivities[1]["parameter_sensitivity"]["parameter"] == "evidence_limit"
     assert rows[9]["status"] == "not_runnable"
     assert "dense is already absent" in rows[9]["reason"]
     assert "production hard guard remains immutable" in rows[16]["reason"]
