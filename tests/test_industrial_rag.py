@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
+import sqlite3
 import threading
 import time
+import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
@@ -38,10 +41,45 @@ from adaptive_mas.industrial_rag.parser import (
     records_from_parse,
     validate_cross_page_table_continuation,
 )
-from adaptive_mas.industrial_rag.postgres import _row_factory, translate_sqlite_contract
+from adaptive_mas.industrial_rag.postgres import PostgresIndustrialRagStore, _row_factory, translate_sqlite_contract
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore, ImmutableConflict, ReleaseNotReady
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService, _period_matches_request
 from adaptive_mas.research_provenance import stable_hash
+
+
+@pytest.fixture(params=("sqlite", "postgresql"), ids=("sqlite", "postgresql"))
+def shared_store_contract(request, tmp_path):
+    """Run the same metadata/read contract against SQLite and an isolated PG schema."""
+    object_store = LocalContentAddressedStore(tmp_path / "objects")
+    if request.param == "sqlite":
+        yield IndustrialRagStore(tmp_path / "rag.sqlite3", object_store)
+        return
+
+    dsn = os.environ.get("RAAMA_POSTGRES_CONTRACT_DSN")
+    if not dsn:
+        pytest.skip("set RAAMA_POSTGRES_CONTRACT_DSN to a dedicated raama_contract_test database")
+    try:
+        import psycopg
+        from psycopg import sql
+    except ImportError as error:
+        pytest.fail(f"PostgreSQL contract DSN is set but psycopg is unavailable: {error}")
+    connection_options = psycopg.conninfo.conninfo_to_dict(dsn)
+    if connection_options.get("dbname") != "raama_contract_test":
+        pytest.fail("PostgreSQL contract tests require the dedicated raama_contract_test database")
+    if connection_options.get("host") not in {"127.0.0.1", "::1"}:
+        pytest.fail("PostgreSQL contract tests require a loopback host")
+    if connection_options.get("hostaddr") not in {None, "127.0.0.1", "::1"}:
+        pytest.fail("PostgreSQL contract tests require a loopback host address")
+
+    schema = f"raama_contract_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    isolated_dsn = psycopg.conninfo.make_conninfo(dsn, options=f"-csearch_path={schema}")
+    try:
+        yield PostgresIndustrialRagStore(isolated_dsn, object_store)
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as connection:
+            connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
 def _bundle(
@@ -1455,3 +1493,138 @@ def test_harness_fundamental_tools_search_and_reopen_pinned_rag_evidence(tmp_pat
     store.set_access("analyst", "document-1", can_read=False)
     with pytest.raises(PermissionError):
         handlers["read_indexed_financial_evidence"]({"evidence_id": evidence_id})
+
+
+def _shared_contract_bundle() -> DocumentBundle:
+    base = _bundle(
+        source_id="contract-source-1",
+        version_id="contract-version-1",
+        document_id="contract-document-1",
+    )
+    table = Table(
+        "contract-table-1",
+        base.version.version_id,
+        "2024年度营业收入",
+        1,
+        unit_text="人民币百万元",
+        accounting_basis="本集团",
+        report_period="2024",
+        page_start=3,
+        page_end=3,
+    )
+    cells = (
+        TableCell("contract-cell-r0c0", table.table_id, base.version.version_id, 0, 0, "项目", page_number=3),
+        TableCell("contract-cell-r0c1", table.table_id, base.version.version_id, 0, 1, "营业收入", page_number=3),
+    )
+    return replace(base, tables=(table,), cells=cells)
+
+
+def test_shared_store_contract_ingest_reads_and_current_permission(shared_store_contract) -> None:
+    store = shared_store_contract
+    bundle = _shared_contract_bundle()
+
+    first = store.ingest_bundle(bundle)
+    repeated = store.ingest_bundle(bundle)
+    assert first["status"] == "ingested"
+    assert repeated["status"] == "reused"
+    assert repeated["ingested_at"] == first["ingested_at"]
+
+    facts = store.read_facts([bundle.version.version_id])
+    assert len(facts) == 1
+    assert facts[0]["fact_id"] == "contract-version-1-fact-1"
+    spans = store.read_spans([bundle.spans[0].span_id])
+    assert len(spans) == 1
+    assert spans[0]["text"] == bundle.spans[0].text
+    reopened_row = store._read_table_row("contract-table-1", 0, 0)
+    assert reopened_row is not None
+    assert [cell["raw_text"] for cell in reopened_row["cells"]] == ["项目", "营业收入"]
+    assert store._get_document_bytes(
+        bundle.document.document_id, bundle.version.version_id, "analyst",
+    ) == bundle.payload
+
+    before_revision = store.permission_revision()
+    after_revision = store.set_access("analyst", bundle.document.document_id, can_read=False)
+    assert after_revision > before_revision
+    with pytest.raises(PermissionError):
+        store._get_document_bytes(bundle.document.document_id, bundle.version.version_id, "analyst")
+
+    changed_fact = replace(bundle.facts[0], raw_value="337,489", normalized_value="337489")
+    with pytest.raises(ImmutableConflict, match="parsed child records"):
+        store.ingest_bundle(replace(bundle, facts=(changed_fact,)))
+
+
+def test_shared_store_contract_rolls_back_partial_child_insert(shared_store_contract) -> None:
+    store = shared_store_contract
+    bundle = _shared_contract_bundle()
+    duplicated_span = replace(bundle.spans[0], text=bundle.spans[0].text + " duplicate")
+    invalid_bundle = replace(bundle, spans=(*bundle.spans, duplicated_span))
+    integrity_errors: tuple[type[BaseException], ...] = (sqlite3.IntegrityError,)
+    if isinstance(store, PostgresIndustrialRagStore):
+        import psycopg
+
+        integrity_errors = (*integrity_errors, psycopg.IntegrityError)
+
+    with pytest.raises(integrity_errors):
+        store.ingest_bundle(invalid_bundle)
+
+    with pytest.raises(FileNotFoundError):
+        store.source_manifest([bundle.version.version_id])
+    assert store.read_facts([bundle.version.version_id]) == []
+    assert store.ingest_bundle(bundle)["status"] == "ingested"
+
+
+def test_shared_store_contract_stale_outbox_lease_cannot_ack(shared_store_contract) -> None:
+    store = shared_store_contract
+    bundle = _shared_contract_bundle()
+    store.ingest_bundle(bundle)
+
+    first = store.claim_outbox("shared-contract-worker", lease_seconds=0.01)
+    assert first is not None
+    time.sleep(0.02)
+    second = store.claim_outbox("shared-contract-worker", lease_seconds=10)
+    assert second is not None
+    assert second["event_key"] == first["event_key"]
+    assert second["lease_generation"] > first["lease_generation"]
+    with pytest.raises(RuntimeError, match="no longer owns"):
+        store.finish_outbox(
+            str(first["event_key"]),
+            "shared-contract-worker",
+            {"stale": True},
+            lease_generation=int(first["lease_generation"]),
+        )
+    assert store.finish_outbox(
+        str(second["event_key"]),
+        "shared-contract-worker",
+        {"current": True},
+        lease_generation=int(second["lease_generation"]),
+    ) is True
+    assert store.finish_outbox(
+        str(second["event_key"]),
+        "shared-contract-worker",
+        {"current": True},
+        lease_generation=int(second["lease_generation"]),
+    ) is False
+
+
+def test_shared_store_contract_release_rollback_restores_prior_snapshot(shared_store_contract) -> None:
+    store = shared_store_contract
+    first_bundle = _shared_contract_bundle()
+    store.ingest_bundle(first_bundle)
+    _consume_all(store)
+    _publish(store, [first_bundle.version.version_id], "contract-release-1")
+
+    second_bundle = _bundle(
+        source_id="contract-source-2",
+        version_id="contract-version-2",
+        document_id="contract-document-2",
+        payload=b"2024 annual revenue 337489 CNY million",
+    )
+    store.ingest_bundle(second_bundle)
+    _consume_all(store)
+    _publish(store, [second_bundle.version.version_id], "contract-release-2")
+    assert store.active_release_id() == "contract-release-2"
+
+    store.rollback_release("contract-release-1", actor_id="contract-test", reason="shared adapter contract")
+
+    assert store.active_release_id() == "contract-release-1"
+    assert store.release_versions("contract-release-1") == [first_bundle.version.version_id]

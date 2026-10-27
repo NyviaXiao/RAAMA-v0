@@ -65,6 +65,7 @@ def main() -> int:
         "provider_requests": 0,
         "network_access_requested": False,
         "gpu_inference_requested": False,
+        "project_wide_membership_verified": False,
     }
     errors: list[str] = []
     try:
