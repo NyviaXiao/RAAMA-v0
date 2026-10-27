@@ -24,7 +24,13 @@ from adaptive_mas.industrial_rag.temporal_workflow import (  # noqa: E402
     IndustrialRagIngestRequest,
     IndustrialRagIngestActivityInput,
     IndustrialRagIngestWorkflow,
+    TemporalControlActivityInput,
+    TemporalFailureActivityInput,
+    TemporalTaskInitialization,
+    apply_temporal_control_activity,
     capture_ingest_request,
+    fail_temporal_task_activity,
+    initialize_temporal_task_activity,
     ingest_document_activity,
     read_captured_input_bytes,
 )
@@ -44,13 +50,25 @@ async def _worker(args: argparse.Namespace) -> None:
             os._exit(86)
         return result
 
+    @activity.defn(name="initialize_temporal_task_activity")
+    def initialize_task(value: TemporalTaskInitialization) -> dict[str, object]:
+        return initialize_temporal_task_activity(value)
+
+    @activity.defn(name="apply_temporal_control_activity")
+    def apply_control(value: TemporalControlActivityInput) -> dict[str, object]:
+        return apply_temporal_control_activity(value)
+
+    @activity.defn(name="fail_temporal_task_activity")
+    def fail_task(value: TemporalFailureActivityInput) -> dict[str, object]:
+        return fail_temporal_task_activity(value)
+
     client = await Client.connect(args.address)
     activity_executor = ThreadPoolExecutor(max_workers=2)
     worker = Worker(
         client,
         task_queue=args.task_queue,
         workflows=[IndustrialRagIngestWorkflow],
-        activities=[tracked_ingest],
+        activities=[initialize_task, apply_control, tracked_ingest, fail_task],
         activity_executor=activity_executor,
     )
     args.ready_file.write_text("ready\n", encoding="utf-8")
