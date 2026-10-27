@@ -180,7 +180,7 @@ class IndustrialRagResearchRequest:
 @dataclass(frozen=True)
 class IndustrialRagOperationRequest:
     operation: str
-    payload: dict[str, object]
+    payload: dict[str, Any]
 
     def __post_init__(self) -> None:
         if self.operation not in {"index", "evaluate", "research"}:
@@ -444,7 +444,7 @@ class IndustrialRagIngestActivityInput:
     request: IndustrialRagIngestRequest
 
 
-def _ingest_task_request(request: IndustrialRagIngestRequest) -> dict[str, object]:
+def _ingest_task_request(request: IndustrialRagIngestRequest) -> dict[str, Any]:
     return {
         "operation": "industrial_rag.ingest.v1",
         "request": asdict(request),
@@ -513,11 +513,11 @@ def ingest_document_activity(value: IndustrialRagIngestActivityInput) -> dict[st
     return result
 
 
-def _operation_identity(operation: str, request: object) -> dict[str, object]:
+def _operation_identity(operation: str, request: object) -> dict[str, Any]:
     return {"operation": operation, "request": asdict(request)}
 
 
-def _load_operation_result(store: HarnessStateStore, task_id: str) -> dict[str, object] | None:
+def _load_operation_result(store: HarnessStateStore, task_id: str) -> dict[str, Any] | None:
     task = store.get_task(task_id)
     if task is None:
         raise KeyError(f"unknown task_id {task_id}")
@@ -538,7 +538,7 @@ def _load_operation_result(store: HarnessStateStore, task_id: str) -> dict[str, 
 
 
 @activity.defn
-def initialize_temporal_task_activity(value: TemporalTaskInitialization) -> dict[str, object]:
+def initialize_temporal_task_activity(value: TemporalTaskInitialization) -> dict[str, Any]:
     store = HarnessStateStore(value.state_database_path)
     task = store.open_task(
         value.task_id, value.idempotency_key, value.request, max_provider_calls=0,
@@ -550,7 +550,7 @@ def initialize_temporal_task_activity(value: TemporalTaskInitialization) -> dict
         raise RuntimeError("completed Temporal task has no persisted result")
     if task["status"] != "running":
         artifact = store.get_artifact(value.task_id, value.result_artifact)
-        result: dict[str, object] = {
+        result: dict[str, Any] = {
             "status": str(task["status"]),
             "result": None,
             "reconciliation_required": artifact is not None,
@@ -562,7 +562,7 @@ def initialize_temporal_task_activity(value: TemporalTaskInitialization) -> dict
 
 
 @activity.defn
-def verify_index_inputs_activity(value: IndustrialRagIndexActivityInput) -> dict[str, object]:
+def verify_index_inputs_activity(value: IndustrialRagIndexActivityInput) -> dict[str, Any]:
     request = value.request
     store = cli._store(request.database_path, request.object_root)
     manifest = store.source_manifest(list(request.version_ids))
@@ -582,7 +582,7 @@ def verify_index_inputs_activity(value: IndustrialRagIndexActivityInput) -> dict
 
 
 @activity.defn
-def build_index_activity(value: IndustrialRagIndexActivityInput) -> dict[str, object]:
+def build_index_activity(value: IndustrialRagIndexActivityInput) -> dict[str, Any]:
     request = value.request
     store = HarnessStateStore(request.state_database_path)
     task_request = _operation_identity("industrial_rag.index.v1", request)
@@ -619,7 +619,7 @@ def build_index_activity(value: IndustrialRagIndexActivityInput) -> dict[str, ob
     return result
 
 
-def _read_evaluation_objects(request: IndustrialRagEvaluationRequest) -> tuple[dict[str, object], dict[str, object]]:
+def _read_evaluation_objects(request: IndustrialRagEvaluationRequest) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest_bytes, predictions_bytes = read_captured_evaluation_bytes(request)
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
@@ -632,7 +632,7 @@ def _read_evaluation_objects(request: IndustrialRagEvaluationRequest) -> tuple[d
 
 
 @activity.defn
-def verify_evaluation_inputs_activity(value: IndustrialRagEvaluationActivityInput) -> dict[str, object]:
+def verify_evaluation_inputs_activity(value: IndustrialRagEvaluationActivityInput) -> dict[str, Any]:
     request = value.request
     manifest, predictions = _read_evaluation_objects(request)
     if not isinstance(manifest.get("cases"), list) or not isinstance(predictions.get("cases"), list):
@@ -658,7 +658,7 @@ def verify_evaluation_inputs_activity(value: IndustrialRagEvaluationActivityInpu
 
 
 @activity.defn
-def evaluate_manifest_activity(value: IndustrialRagEvaluationActivityInput) -> dict[str, object]:
+def evaluate_manifest_activity(value: IndustrialRagEvaluationActivityInput) -> dict[str, Any]:
     request = value.request
     manifest_bytes, prediction_bytes = read_captured_evaluation_bytes(request)
     store = HarnessStateStore(request.state_database_path)
@@ -711,11 +711,11 @@ def _research_bundle(payload: bytes) -> dict[str, Any]:
     if not isinstance(trading_dates, list) or not trading_dates:
         raise ValueError("research_data.trading_dates must be a nonempty array")
 
-    def bars(name: str) -> list[dict[str, object]]:
+    def bars(name: str) -> list[dict[str, Any]]:
         rows = raw_research.get(name)
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError(f"research_data.{name} must be an array of objects")
-        result: list[dict[str, object]] = []
+        result: list[dict[str, Any]] = []
         for row in rows:
             normalized = dict(row)
             for key in ("trade_date", "available_at"):
@@ -804,7 +804,7 @@ def _research_bundle(payload: bytes) -> dict[str, Any]:
 
 
 @activity.defn
-def verify_research_inputs_activity(value: IndustrialRagResearchActivityInput) -> dict[str, object]:
+def verify_research_inputs_activity(value: IndustrialRagResearchActivityInput) -> dict[str, Any]:
     request = value.request
     bundle = _research_bundle(read_captured_research_bytes(request))
     store = HarnessStateStore(request.state_database_path)
@@ -828,7 +828,7 @@ def verify_research_inputs_activity(value: IndustrialRagResearchActivityInput) -
 
 
 @activity.defn
-def run_research_activity(value: IndustrialRagResearchActivityInput) -> dict[str, object]:
+def run_research_activity(value: IndustrialRagResearchActivityInput) -> dict[str, Any]:
     request = value.request
     bundle = _research_bundle(read_captured_research_bytes(request))
     store = HarnessStateStore(request.state_database_path)
@@ -877,7 +877,7 @@ def run_research_activity(value: IndustrialRagResearchActivityInput) -> dict[str
     )
     if result.get("status") != "completed" or budget.provider_call_count != 0:
         raise RuntimeError("offline Temporal research did not complete within its zero-provider-call contract")
-    persisted: dict[str, object] = {
+    persisted: dict[str, Any] = {
         "status": "completed",
         "as_of": bundle["as_of"].isoformat(),
         "candidate_version_id": bundle["candidate_version_id"],
@@ -898,7 +898,7 @@ def run_research_activity(value: IndustrialRagResearchActivityInput) -> dict[str
 
 
 @activity.defn
-def apply_temporal_control_activity(value: TemporalControlActivityInput) -> dict[str, object]:
+def apply_temporal_control_activity(value: TemporalControlActivityInput) -> dict[str, Any]:
     store = HarnessStateStore(value.state_database_path)
     control = value.control
     if control.action == "pause":
@@ -920,7 +920,7 @@ def apply_temporal_control_activity(value: TemporalControlActivityInput) -> dict
 
 
 @activity.defn
-def fail_temporal_task_activity(value: TemporalFailureActivityInput) -> dict[str, object]:
+def fail_temporal_task_activity(value: TemporalFailureActivityInput) -> dict[str, Any]:
     store = HarnessStateStore(value.state_database_path)
     accepted = store.transition_task_status(
         value.task_id,
@@ -932,7 +932,7 @@ def fail_temporal_task_activity(value: TemporalFailureActivityInput) -> dict[str
     )
     task = store.get_task(value.task_id)
     artifact = store.get_artifact(value.task_id, value.result_artifact)
-    outcome: dict[str, object] = {
+    outcome: dict[str, Any] = {
         "accepted": accepted,
         "status": task["status"] if task else "missing",
         "reconciliation_required": artifact is not None,
@@ -952,7 +952,7 @@ def dead_letter_temporal_task(
     operator_id: str,
     reason: str,
     command_id: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     if not command_id.strip():
         raise ValueError("dead-letter command ID is required")
     store = HarnessStateStore(state_database_path)
@@ -1137,7 +1137,7 @@ class IndustrialRagIngestWorkflow:
                     "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
                     "next_step": "operator_reconcile_committed_side_effect" if reconciliation_required else None,
                 }
-                result: dict[str, object] = {"status": initialized["status"], "task_id": request.task_id}
+                result: dict[str, Any] = {"status": initialized["status"], "task_id": request.task_id}
                 if reconciliation_required:
                     result["reconciliation_required"] = True
                     result["result_artifact_name"] = artifact_name
@@ -1331,7 +1331,7 @@ class IndustrialRagOperationWorkflow:
 
     async def _mark_failed(
         self, task_id: str, state_database_path: str, error: BaseException,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         try:
             outcome = await workflow.execute_activity(
                 fail_temporal_task_activity,
@@ -1381,7 +1381,7 @@ class IndustrialRagOperationWorkflow:
         return outcome
 
     @workflow.run
-    async def run(self, operation: IndustrialRagOperationRequest) -> dict[str, object]:
+    async def run(self, operation: IndustrialRagOperationRequest) -> dict[str, Any]:
         if operation.operation == "index":
             request = IndustrialRagIndexRequest(**{
                 **operation.payload,
@@ -1470,7 +1470,7 @@ class IndustrialRagOperationWorkflow:
                     "pending_reconciliation": [artifact_name] if isinstance(artifact_name, str) else [],
                     "next_step": "operator_reconcile_committed_side_effect" if reconciliation_required else None,
                 }
-                result: dict[str, object] = {"status": initialized["status"], "task_id": task_id}
+                result: dict[str, Any] = {"status": initialized["status"], "task_id": task_id}
                 if reconciliation_required:
                     result["reconciliation_required"] = True
                     result["result_artifact_name"] = artifact_name
@@ -1642,7 +1642,7 @@ def _load_research_request(path: str | Path) -> IndustrialRagResearchRequest:
     return IndustrialRagResearchRequest(**value)
 
 
-async def _submit(address: str, task_queue: str, request: IndustrialRagIngestRequest) -> dict[str, object]:
+async def _submit(address: str, task_queue: str, request: IndustrialRagIngestRequest) -> dict[str, Any]:
     request = capture_ingest_request(request)
     client = await Client.connect(address)
     handle = await client.start_workflow(
@@ -1658,7 +1658,7 @@ async def _submit_operation(
     address: str,
     task_queue: str,
     request: IndustrialRagIndexRequest | IndustrialRagEvaluationRequest | IndustrialRagResearchRequest,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     if isinstance(request, IndustrialRagEvaluationRequest):
         request = capture_evaluation_request(request)
         operation = IndustrialRagOperationRequest("evaluate", asdict(request))
@@ -1674,7 +1674,7 @@ async def _submit_operation(
         id=str(operation.payload["task_id"]),
         task_queue=task_queue,
     )
-    result: dict[str, object] = {"workflow_id": handle.id, "run_id": handle.result_run_id}
+    result: dict[str, Any] = {"workflow_id": handle.id, "run_id": handle.result_run_id}
     if operation.operation == "evaluate":
         result["manifest_sha256"] = operation.payload["manifest_sha256"]
         result["predictions_sha256"] = operation.payload["predictions_sha256"]
@@ -1684,7 +1684,7 @@ async def _submit_operation(
     return result
 
 
-async def _query(address: str, workflow_id: str, *, workflow_kind: str = "ingest") -> dict[str, object]:
+async def _query(address: str, workflow_id: str, *, workflow_kind: str = "ingest") -> dict[str, Any]:
     client = await Client.connect(address)
     handle = client.get_workflow_handle(workflow_id)
     query = (
@@ -1700,7 +1700,7 @@ async def _control_operation(
     command: TemporalWorkflowControl,
     *,
     workflow_kind: str = "operation",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     client = await Client.connect(address)
     handle = client.get_workflow_handle(workflow_id)
     signal = IndustrialRagIngestWorkflow.control if workflow_kind == "ingest" else IndustrialRagOperationWorkflow.control

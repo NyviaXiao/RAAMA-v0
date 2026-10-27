@@ -7,10 +7,12 @@ import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, get_type_hints
 
 import pytest
 
 pytest.importorskip("temporalio")
+from temporalio.converter import DataConverter
 
 from adaptive_mas.harness_state import HarnessStateStore
 from adaptive_mas.agents.harness_prompts import seed_candidate
@@ -46,6 +48,69 @@ from adaptive_mas.industrial_rag.temporal_workflow import (
     verify_evaluation_inputs_activity,
     verify_index_inputs_activity,
 )
+
+
+def test_temporal_sdk_converter_roundtrips_json_payloads_and_rejects_object_hints(tmp_path) -> None:
+    converter = DataConverter.default
+    initialization = TemporalTaskInitialization(
+        "converter-task", "converter-key", "state.sqlite3",
+        {
+            "operation": "ingest",
+            "captured_at": "2026-10-27T00:00:00+00:00",
+            "nested": {"attempt": 1, "captured": True},
+        },
+    )
+    operation = IndustrialRagOperationRequest("index", {"nested": {"attempt": 1}})
+    state_path = tmp_path / "task-state.sqlite3"
+    request = TemporalTaskInitialization(
+        "converter-task", "converter-key", str(state_path), {"nested": {"captured": True}},
+    )
+    running_result = initialize_temporal_task_activity(request)
+    HarnessStateStore(state_path).complete_task(
+        request.task_id,
+        {"status": "ingested", "version_id": "synthetic-version", "nested": {"saved": True}},
+    )
+    completed_result = initialize_temporal_task_activity(request)
+
+    async def roundtrip() -> None:
+        initialization_payloads = await converter.encode([initialization])
+        assert await converter.decode(
+            initialization_payloads,
+            type_hints=[TemporalTaskInitialization],
+        ) == [initialization]
+
+        operation_payloads = await converter.encode([operation])
+        assert await converter.decode(
+            operation_payloads,
+            type_hints=[IndustrialRagOperationRequest],
+        ) == [operation]
+
+        for activity_result in (running_result, completed_result):
+            result_payloads = await converter.encode([activity_result])
+            assert await converter.decode(
+                result_payloads,
+                type_hints=[dict[str, Any]],
+            ) == [activity_result]
+            with pytest.raises(TypeError, match="Failed converting value for key 'result'"):
+                await converter.decode(result_payloads, type_hints=[dict[str, object]])
+
+    asyncio.run(roundtrip())
+    assert get_type_hints(TemporalTaskInitialization)["request"] == dict[str, Any]
+    assert get_type_hints(initialize_temporal_task_activity)["return"] == dict[str, Any]
+    assert get_type_hints(IndustrialRagOperationRequest)["payload"] == dict[str, Any]
+    activity_results = (
+        temporal_workflow.ingest_document_activity,
+        temporal_workflow.initialize_temporal_task_activity,
+        temporal_workflow.verify_index_inputs_activity,
+        temporal_workflow.build_index_activity,
+        temporal_workflow.verify_evaluation_inputs_activity,
+        temporal_workflow.evaluate_manifest_activity,
+        temporal_workflow.verify_research_inputs_activity,
+        temporal_workflow.run_research_activity,
+        temporal_workflow.apply_temporal_control_activity,
+        temporal_workflow.fail_temporal_task_activity,
+    )
+    assert all(get_type_hints(activity_fn)["return"] == dict[str, Any] for activity_fn in activity_results)
 
 
 def test_temporal_ingest_captures_inputs_and_reuses_first_persisted_identity(tmp_path, monkeypatch) -> None:

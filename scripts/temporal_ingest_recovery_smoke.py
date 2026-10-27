@@ -51,15 +51,15 @@ async def _worker(args: argparse.Namespace) -> None:
         return result
 
     @activity.defn(name="initialize_temporal_task_activity")
-    def initialize_task(value: TemporalTaskInitialization) -> dict[str, object]:
+    def initialize_task(value: TemporalTaskInitialization) -> dict[str, Any]:
         return initialize_temporal_task_activity(value)
 
     @activity.defn(name="apply_temporal_control_activity")
-    def apply_control(value: TemporalControlActivityInput) -> dict[str, object]:
+    def apply_control(value: TemporalControlActivityInput) -> dict[str, Any]:
         return apply_temporal_control_activity(value)
 
     @activity.defn(name="fail_temporal_task_activity")
-    def fail_task(value: TemporalFailureActivityInput) -> dict[str, object]:
+    def fail_task(value: TemporalFailureActivityInput) -> dict[str, Any]:
         return fail_temporal_task_activity(value)
 
     client = await Client.connect(args.address)
@@ -121,7 +121,7 @@ def _stop_worker(process: subprocess.Popen[bytes]) -> None:
         log_file.close()
 
 
-async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str, object]:
+async def _run_smoke(address: str, task_queue: str, state_dir: Path) -> dict[str, Any]:
     from temporalio.client import Client
 
     state_dir.mkdir(parents=True, exist_ok=False)
