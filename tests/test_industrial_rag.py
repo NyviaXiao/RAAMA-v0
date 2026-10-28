@@ -1804,6 +1804,25 @@ def test_shared_store_contract_reads_populated_quarantine_summary(shared_store_c
         store.quarantine_summary(limit=501)
 
 
+def test_shared_store_contract_concurrent_cache_writers_are_atomic(shared_store_contract) -> None:
+    store = shared_store_contract
+    cache_key = "shared-contract-concurrent-cache"
+    payloads = (
+        {"writer": "first", "values": list(range(32))},
+        {"writer": "second", "values": list(range(32, 64))},
+    )
+    start_barrier = threading.Barrier(2)
+
+    def write_cache(payload: dict[str, object]) -> None:
+        start_barrier.wait(timeout=5)
+        store.cache_put(cache_key, payload)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(write_cache, payloads))
+
+    assert store.cache_get(cache_key) in payloads
+
+
 def test_shared_store_contract_new_version_requires_immutable_document_metadata(shared_store_contract) -> None:
     store = shared_store_contract
     first = replace(
