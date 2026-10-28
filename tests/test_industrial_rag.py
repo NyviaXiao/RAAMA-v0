@@ -1532,6 +1532,8 @@ def test_shared_store_contract_ingest_reads_and_current_permission(shared_store_
     facts = store.read_facts([bundle.version.version_id])
     assert len(facts) == 1
     assert facts[0]["fact_id"] == "contract-version-1-fact-1"
+    blocks = store.read_blocks([bundle.version.version_id])
+    assert [block["block_id"] for block in blocks] == ["contract-version-1-block-1"]
     spans = store.read_spans([bundle.spans[0].span_id])
     assert len(spans) == 1
     assert spans[0]["text"] == bundle.spans[0].text
@@ -1542,9 +1544,31 @@ def test_shared_store_contract_ingest_reads_and_current_permission(shared_store_
         bundle.document.document_id, bundle.version.version_id, "analyst",
     ) == bundle.payload
 
+    _consume_all(store)
+    _publish(store, [bundle.version.version_id], "shared-read-release")
+    as_of = datetime.now(timezone.utc) + timedelta(seconds=5)
+    permitted = store.permitted_versions(
+        "analyst", "600036", as_of,
+        time_mode="strict_forward", report_periods=("2024",),
+        accounting_basis="本集团", release_id="shared-read-release",
+    )
+    assert [row["version_id"] for row in permitted] == [bundle.version.version_id]
+    assert store.quarantine_summary()["items"] == []
+    cache_payload = {"release_id": "shared-read-release", "results": [{"version_id": bundle.version.version_id}]}
+    store.cache_put("shared-contract-cache", cache_payload)
+    assert store.cache_get("shared-contract-cache") == cache_payload
+    replacement_payload = {**cache_payload, "revision": 2}
+    store.cache_put("shared-contract-cache", replacement_payload)
+    assert store.cache_get("shared-contract-cache") == replacement_payload
+
     before_revision = store.permission_revision()
     after_revision = store.set_access("analyst", bundle.document.document_id, can_read=False)
     assert after_revision > before_revision
+    assert store.permitted_versions(
+        "analyst", "600036", as_of,
+        time_mode="strict_forward", report_periods=("2024",),
+        accounting_basis="本集团", release_id="shared-read-release",
+    ) == []
     with pytest.raises(PermissionError):
         store._get_document_bytes(bundle.document.document_id, bundle.version.version_id, "analyst")
 
@@ -1628,3 +1652,58 @@ def test_shared_store_contract_release_rollback_restores_prior_snapshot(shared_s
 
     assert store.active_release_id() == "contract-release-1"
     assert store.release_versions("contract-release-1") == [first_bundle.version.version_id]
+
+
+def test_shared_store_contract_concurrent_same_version_ingest_is_idempotent(shared_store_contract) -> None:
+    store = shared_store_contract
+    bundle = _shared_contract_bundle()
+    start_barrier = threading.Barrier(2)
+
+    def ingest() -> dict[str, object]:
+        start_barrier.wait(timeout=5)
+        if isinstance(store, PostgresIndustrialRagStore):
+            return store.ingest_bundle(bundle, ingested_at_factory=lambda: bundle.version.ingested_at)
+        return store.ingest_bundle(bundle)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _index: ingest(), range(2)))
+
+    assert sorted(str(outcome["status"]) for outcome in outcomes) == ["ingested", "reused"]
+    assert len(store.read_facts([bundle.version.version_id])) == 1
+    assert store.claim_outbox("shared-concurrent-consumer") is not None
+    assert store.claim_outbox("shared-concurrent-consumer") is None
+
+
+def test_shared_store_contract_new_version_requires_immutable_document_metadata(shared_store_contract) -> None:
+    store = shared_store_contract
+    first = replace(
+        _shared_contract_bundle(),
+        sections=(), spans=(), blocks=(), tables=(), cells=(), facts=(),
+    )
+    assert store.ingest_bundle(first)["status"] == "ingested"
+    _consume_all(store)
+
+    second_payload = b"new version payload with changed document title"
+    second_version = replace(
+        first.version,
+        version_id="contract-version-2",
+        source_id="contract-source-2",
+        content_sha256=hashlib.sha256(second_payload).hexdigest(),
+    )
+    changed_document = replace(first.document, title="changed document identity title")
+    changed_second = replace(first, document=changed_document, version=second_version, payload=second_payload)
+    with pytest.raises(ImmutableConflict, match="document identity was reused with changed metadata"):
+        store.ingest_bundle(changed_second)
+
+    with pytest.raises(FileNotFoundError):
+        store.source_manifest([second_version.version_id])
+    assert store.read_blocks([second_version.version_id]) == []
+    assert store.read_facts([second_version.version_id]) == []
+    assert store.claim_outbox("metadata-contract-consumer") is None
+    # The object-store CAS write precedes the SQL transaction; a rejected
+    # metadata identity may leave this exact content-addressed orphan behind.
+    assert store.object_store.get(second_version.content_sha256) == second_payload
+
+    valid_second = replace(changed_second, document=first.document)
+    assert store.ingest_bundle(valid_second)["status"] == "ingested"
+    assert store.ingest_bundle(valid_second)["status"] == "reused"

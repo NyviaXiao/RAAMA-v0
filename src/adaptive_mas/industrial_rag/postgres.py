@@ -123,6 +123,18 @@ class PostgresIndustrialRagStore(IndustrialRagStore):
         # The row lock plus SKIP LOCKED serializes claims without SSI aborts between workers.
         connection.execute("BEGIN ISOLATION LEVEL READ COMMITTED")
 
+    def _begin_ingest_transaction(
+        self,
+        connection: _PostgresConnection,
+        document_id: str,
+        source_id: str,
+        version_id: str,
+    ) -> None:
+        connection.execute("BEGIN ISOLATION LEVEL READ COMMITTED")
+        lock_keys = sorted((f"document:{document_id}", f"source:{source_id}", f"version:{version_id}"))
+        for key in lock_keys:
+            connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(?,0))", (key,))
+
     def _migrate(self) -> None:
         path = Path(__file__).parent / "migrations" / "0001_industrial_rag.sql"
         statements = [item.strip() for item in path.read_text(encoding="utf-8").split(";") if item.strip()]

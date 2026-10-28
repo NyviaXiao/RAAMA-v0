@@ -178,6 +178,15 @@ class IndustrialRagStore:
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
+    def _begin_ingest_transaction(
+        self,
+        connection: sqlite3.Connection,
+        document_id: str,
+        source_id: str,
+        version_id: str,
+    ) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+
     def _begin_outbox_claim(self, connection: sqlite3.Connection) -> None:
         connection.execute("BEGIN IMMEDIATE")
 
@@ -235,7 +244,7 @@ class IndustrialRagStore:
         metadata = _normalise_record(document)
         version_data = _normalise_record(version)
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_ingest_transaction(connection, document.document_id, version.source_id, version.version_id)
             try:
                 existing = connection.execute(
                     "SELECT * FROM rag_document_versions WHERE source_id=? OR version_id=?",
@@ -279,8 +288,8 @@ class IndustrialRagStore:
                          document.document_type, document.report_period, document.accounting_basis,
                          _json(document.aliases), _json(metadata), now),
                     )
-                elif prior_document["security_code"] != document.security_code:
-                    raise ImmutableConflict("document identity cannot change security code")
+                elif prior_document["metadata_json"] != _json(metadata):
+                    raise ImmutableConflict("document identity was reused with changed metadata")
                 connection.execute(
                     "INSERT INTO rag_document_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (version.version_id, document.document_id, version.source_id, version.content_sha256,
