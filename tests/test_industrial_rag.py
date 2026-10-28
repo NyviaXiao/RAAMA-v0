@@ -1723,6 +1723,87 @@ def test_shared_store_contract_concurrent_same_version_ingest_is_idempotent(shar
     assert store.claim_outbox("shared-concurrent-consumer") is None
 
 
+def test_shared_store_contract_concurrent_outbox_claims_are_exclusive(shared_store_contract) -> None:
+    store = shared_store_contract
+    first_bundle = _shared_contract_bundle()
+    second_bundle = _bundle(
+        source_id="contract-outbox-source-2",
+        version_id="contract-outbox-version-2",
+        document_id="contract-outbox-document-2",
+        payload=b"second concurrent outbox event",
+    )
+    store.ingest_bundle(first_bundle)
+    store.ingest_bundle(second_bundle)
+    start_barrier = threading.Barrier(2)
+
+    def claim(worker_id: str) -> dict[str, object] | None:
+        start_barrier.wait(timeout=5)
+        return store.claim_outbox(worker_id, lease_seconds=10)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(claim, ("shared-claim-worker-1", "shared-claim-worker-2")))
+
+    assert all(claim is not None for claim in claims)
+    claimed = [claim for claim in claims if claim is not None]
+    assert len({claim["event_id"] for claim in claimed}) == 2
+    assert len({claim["event_key"] for claim in claimed}) == 2
+    for claim in claimed:
+        assert store.finish_outbox(
+            str(claim["event_key"]),
+            str(claim["consumer_id"]),
+            {"claimed_by": claim["consumer_id"]},
+            lease_generation=int(claim["lease_generation"]),
+        ) is True
+    assert store.claim_outbox("shared-claim-worker-after-ack") is None
+
+
+def test_shared_store_contract_reads_populated_quarantine_summary(shared_store_contract) -> None:
+    store = shared_store_contract
+    source = _shared_contract_bundle()
+    quarantined_version = replace(
+        source.version,
+        parser_status="quarantined",
+        parser_error_code="unsupported_format",
+        parser_error="Parser does not support this source format.",
+    )
+    bundle = replace(
+        source,
+        version=quarantined_version,
+        sections=(),
+        spans=(),
+        blocks=(),
+        tables=(),
+        cells=(),
+        facts=(),
+    )
+
+    assert store.ingest_bundle(bundle)["status"] == "ingested"
+    summary = store.quarantine_summary(limit=1)
+
+    assert summary["count"] == 1
+    assert summary["limit"] == 1
+    item = summary["items"][0]
+    assert set(item) == {
+        "quarantine_id", "version_id", "error_code", "reason", "state", "created_at",
+        "document_id", "title", "security_code", "source_id", "content_sha256", "source_url",
+    }
+    assert item["quarantine_id"] == "q-contract-version-1"
+    assert item["version_id"] == bundle.version.version_id
+    assert item["error_code"] == "unsupported_format"
+    assert item["reason"] == "Parser does not support this source format."
+    assert item["state"] == "open"
+    assert item["document_id"] == bundle.document.document_id
+    assert item["security_code"] == bundle.document.security_code
+    assert item["source_id"] == bundle.version.source_id
+    assert item["content_sha256"] == bundle.version.content_sha256
+    assert item["source_url"] == bundle.version.source_url
+    assert store.release_summaries()["open_quarantine_count"] == 1
+    with pytest.raises(ValueError, match="quarantine limit"):
+        store.quarantine_summary(limit=0)
+    with pytest.raises(ValueError, match="quarantine limit"):
+        store.quarantine_summary(limit=501)
+
+
 def test_shared_store_contract_new_version_requires_immutable_document_metadata(shared_store_contract) -> None:
     store = shared_store_contract
     first = replace(

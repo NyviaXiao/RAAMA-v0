@@ -1723,6 +1723,9 @@ def test_tool_agent_reserves_a_final_validation_correction_turn() -> None:
     assert client.calls[:3] == [None, None, None]
     assert all(choice == {"type": "function", "function": {"name": "submit_report"}} for choice in client.calls[3:])
     assert "Reserved submission turn (4/5)" in client.system_prompts[3]
+    assert "Do not restate financial amounts, percentages, ratios, or calculated quantities" in client.system_prompts[0]
+    assert "copy its returned value as a string" in client.system_prompts[0]
+    assert "leave the derived observation to the runtime" in client.system_prompts[0]
     retry = next(message for message in result["tool_trace"] if message.get("status") == "correctable_rejection")
     assert retry["result"]["error_category"] == "missing_calculation_evidence"
 

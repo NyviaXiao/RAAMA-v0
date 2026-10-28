@@ -1053,8 +1053,12 @@ def _run_tool_agent(
             "For a calculation finding, cite both operand sources plus its derived calculation evidence. You may call "
             "calculate_financial_metric, or include calculation_spec with its operation and two cited source operands; "
             "the runtime computes the Decimal result and adds derived evidence and an observation before fixed validation. "
-            "Do not supply a calculated result yourself. Keep numeric values and units exactly as they appear in cited "
-            "source observations or calculated evidence; do not convert units. Keep the report "
+            "Do not restate financial amounts, percentages, ratios, or calculated quantities in summary, conclusion, "
+            "uncertainties, or unresolved_items. Put numeric facts only in observations. Never round, approximate, "
+            "or rescale a value (including to thousands, millions, or hundred-millions). For a calculation made with "
+            "calculate_financial_metric, copy its returned value as a string with the exact returned unit; do not "
+            "convert it to a JSON float. When using calculation_spec, leave the derived observation to the runtime. "
+            "Keep source observation values and units exactly as they appear in cited evidence; do not convert units. Keep the report "
             "focused; completeness, concision, and tool efficiency are evaluated as soft scores. "
             "Provide unresolved_items as a separate top-level array.",
         ))
