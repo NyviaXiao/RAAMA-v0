@@ -43,6 +43,7 @@ from adaptive_mas.harness_evolution import (
     build_retrospective_cases,
     _public_tool_projection,
     _paired_case_deltas,
+    _rag_operation_evidence,
     _pin_industrial_rag_runtime,
     _selection_summary,
     _reflection_safe_info,
@@ -390,6 +391,16 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
     assert ablation_payload["planned_runtime_intervention_count"] == 9
     assert ablation_payload["planned_parameter_sensitivity_count"] == 2
     assert result["planned_parameter_sensitivity_count"] == 2
+    assert all(row["runtime_control"]["control_id"] for row in ablation_payload["rows"])
+    assert all(row["paired_evidence_contract"] for row in ablation_payload["rows"])
+    assert all(row["runtime_control"]["module_removal_claim_permitted"] is False for row in ablation_payload["rows"])
+    assert all(
+        ablation_payload["rows"][module_id - 1]["comparison_kind"] == "parameter_sensitivity"
+        and ablation_payload["rows"][module_id - 1]["status"] == "planned_sensitivity_not_executed"
+        for module_id in (15, 16)
+    )
+    assert "indexed row-group records stay fixed" in ablation_payload["rows"][2]["runtime_control"]["scope"]
+    assert "parser normalization" in ablation_payload["rows"][13]["runtime_control"]["scope"]
     assert ablation_payload["execution_status"].startswith("No module intervention or parameter sensitivity was executed")
     assert ablation_payload["rows"][16]["mode"] == "immutable_safety_policy"
     assert {entry["phase"] for entry in trace_payload["evaluations"]} == {
@@ -771,6 +782,280 @@ def test_paired_ablation_requires_real_local_rag_trace_and_records_fusion_differ
     ablated_step = first_pair[1]["rag_operation_evidence"]["searches"][0]["steps"][0]
     assert baseline_step["fusion"]["method"] == "reciprocal_rank_fusion"
     assert ablated_step["fusion"]["method"] == "fusion_disabled_first_available_channel"
+
+
+def _ablation_search_invocation(
+    *,
+    evaluation_ablation_id: object = 11,
+    fusion_strategy: str = "first_available_channel",
+    fusion_methods: tuple[str, ...] = ("fusion_disabled_first_available_channel",),
+    evaluation_id_present: bool = True,
+    coverage_present: bool = True,
+    planner_present: bool = True,
+    steps: list[object] | None = None,
+) -> dict[str, object]:
+    execution_steps = steps if steps is not None else [
+        {
+            "query_sha256": hashlib.sha256(f"step-{index}".encode()).hexdigest(),
+            "result_status": "available",
+            "candidate_count": 1,
+            "fusion": {"method": method},
+        }
+        for index, method in enumerate(fusion_methods)
+    ]
+    planner: dict[str, object] = {
+        "fusion_strategy": fusion_strategy,
+        "steps": execution_steps,
+    }
+    coverage_query: dict[str, object] = {}
+    if planner_present:
+        coverage_query["planner"] = planner
+    policy: dict[str, object] = {}
+    if evaluation_id_present:
+        policy["evaluation_ablation_id"] = evaluation_ablation_id
+    result: dict[str, object] = {"research_policy": policy}
+    if coverage_present:
+        result["coverage"] = [coverage_query]
+    return {
+        "tool": "search_indexed_financial_documents",
+        "result": result,
+    }
+
+
+def test_rag_operation_evidence_accepts_complete_baseline_and_intervention_searches() -> None:
+    baseline = _rag_operation_evidence(
+        [_ablation_search_invocation(
+            evaluation_ablation_id=None,
+            fusion_strategy="rrf",
+            fusion_methods=("reciprocal_rank_fusion", "reciprocal_rank_fusion"),
+        )],
+        11,
+        require_intervention=False,
+        expected_control_value="rrf",
+    )
+    intervention = _rag_operation_evidence(
+        [_ablation_search_invocation()],
+        11,
+        require_intervention=True,
+        expected_control_value="first_available_channel",
+    )
+
+    assert baseline["search_count"] == 1
+    assert baseline["control_observed"] is True
+    assert baseline["searches"][0]["valid"] is True
+    assert [step["fusion"]["method"] for step in baseline["searches"][0]["queries"][0]["steps"]] == [
+        "reciprocal_rank_fusion", "reciprocal_rank_fusion",
+    ]
+    assert intervention["search_count"] == 1
+    assert intervention["control_observed"] is True
+    assert intervention["intervention_observed"] is True
+
+
+def test_rag_operation_evidence_rejects_any_mixed_fusion_step() -> None:
+    evidence = _rag_operation_evidence(
+        [_ablation_search_invocation(
+            fusion_methods=("fusion_disabled_first_available_channel", "reciprocal_rank_fusion"),
+        )],
+        11,
+        require_intervention=True,
+        expected_control_value="first_available_channel",
+    )
+
+    assert evidence["search_count"] == 1
+    assert evidence["control_observed"] is False
+    assert evidence["searches"][0]["valid"] is False
+    assert evidence["control_observations"][0]["trace_matches"] is False
+
+
+def test_rag_operation_evidence_counts_and_rejects_wrong_id_search_invocations() -> None:
+    correct = _ablation_search_invocation()
+    wrong_id = _ablation_search_invocation(
+        evaluation_ablation_id=None,
+        fusion_strategy="rrf",
+        fusion_methods=("reciprocal_rank_fusion",),
+    )
+    evidence = _rag_operation_evidence(
+        [correct, wrong_id],
+        11,
+        require_intervention=True,
+        expected_control_value="first_available_channel",
+    )
+
+    assert evidence["search_count"] == 2
+    assert len(evidence["searches"]) == 2
+    assert evidence["searches"][0]["valid"] is True
+    assert evidence["searches"][1]["valid"] is False
+    assert "unexpected_evaluation_ablation_id" in evidence["searches"][1]["errors"]
+    assert evidence["control_observed"] is False
+
+
+@pytest.mark.parametrize(
+    "invocation",
+    (
+        {"tool": "search_indexed_financial_documents"},
+        _ablation_search_invocation(evaluation_id_present=False),
+        _ablation_search_invocation(coverage_present=False),
+        _ablation_search_invocation(planner_present=False),
+        _ablation_search_invocation(steps=[]),
+        _ablation_search_invocation(steps=[{
+            "query_sha256": "0" * 64,
+            "result_status": "available",
+            "candidate_count": True,
+            "fusion": {"method": "fusion_disabled_first_available_channel"},
+        }]),
+    ),
+    ids=("missing-result", "missing-evaluation-id", "missing-coverage", "missing-planner", "missing-steps", "malformed-step"),
+)
+def test_rag_operation_evidence_rejects_missing_or_malformed_execution_records(invocation) -> None:
+    evidence = _rag_operation_evidence(
+        [invocation],
+        11,
+        require_intervention=True,
+        expected_control_value="first_available_channel",
+    )
+
+    assert evidence["search_count"] == 1
+    assert len(evidence["searches"]) == 1
+    assert evidence["searches"][0]["valid"] is False
+    assert evidence["control_observed"] is False
+
+
+@pytest.mark.parametrize(
+    ("comparison_id", "comparison_kind", "expected_value"),
+    (
+        (2, "bounded_runtime_intervention", False),
+        (3, "bounded_runtime_intervention", False),
+        (7, "bounded_runtime_intervention", False),
+        (8, "bounded_runtime_intervention", False),
+        (9, "bounded_runtime_intervention", False),
+        (10, "bounded_runtime_intervention", False),
+        (11, "bounded_runtime_intervention", "first_available_channel"),
+        (12, "bounded_runtime_intervention", False),
+        (13, "bounded_runtime_intervention", 0),
+        (14, "bounded_runtime_intervention", False),
+        (15, "parameter_sensitivity", 16000),
+        (16, "parameter_sensitivity", 64),
+    ),
+)
+def test_paired_runtime_controls_and_parameter_sensitivities_run_offline_with_control_evidence(
+    tmp_path, monkeypatch, comparison_id: int, comparison_kind: str, expected_value: object,
+) -> None:
+    cases = {name: [] for name in ("selection", "frozen_evaluation")}
+    for index, split in enumerate(("selection", "selection", "frozen_evaluation", "frozen_evaluation")):
+        cases[split].append(HarnessCase(
+            date(2026, 5, 1 + index),
+            {"data_mode": "retrospective_fixture", "case_index": index},
+            split,
+            required_observations=[],
+        ))
+    rag_service, release_id = _module_ablation_rag_service(tmp_path)
+    class DenseAdapter:
+        cache_identity = {
+            "implementation": "synthetic-dense-adapter",
+            "revision": "fixture-v1",
+            "configuration": {"fixture": "empty-result"},
+        }
+
+        def __call__(self, _plan, _version_ids):
+            return []
+
+    class Reranker:
+        cache_identity = {
+            "implementation": "synthetic-reranker",
+            "revision": "fixture-v1",
+            "configuration": {"fixture": "preserve-order"},
+        }
+
+        def __call__(self, _plan, candidates):
+            return list(candidates)
+
+    rag_service.channel_adapters["dense"] = DenseAdapter()
+    rag_service.reranker = Reranker()
+    candidate = seed_candidate()
+    candidate_policy = parse_research_policy(candidate["research_policy_json"])
+    candidate_policy["channels"] = [*candidate_policy["channels"], "dense"]
+    candidate_policy["reranker_profile"] = "configured"
+    candidate["research_policy_json"] = json.dumps(candidate_policy, ensure_ascii=False, sort_keys=True)
+
+    def local_rag_evaluate(task_candidate, case, *, trace_sink, research_ablation_id, **_kwargs):
+        decision_time = datetime.combine(case.as_of, datetime.min.time()).replace(
+            hour=16, tzinfo=timezone(timedelta(hours=8)),
+        )
+        _, handlers, _ = _fundamental_handlers(
+            {},
+            decision_time,
+            industrial_rag_service=rag_service,
+            industrial_rag_principal_id="local-public",
+            industrial_rag_release_id=release_id,
+            research_policy_json=task_candidate["research_policy_json"],
+            research_ablation_id=research_ablation_id,
+        )
+        result = handlers["search_indexed_financial_documents"]({
+            "question": "2024年度营业收入是多少",
+            "symbols": ["600036"],
+            "report_periods": ["2024"],
+        })
+        trace_sink.append({"agents": {"fundamental": {"tool_trace": [{
+            "tool": "search_indexed_financial_documents",
+            "result": result,
+        }]}}})
+        usage = {"logical_estimated_cost_cny": 0.0, "provider_call_count": 0}
+        metrics = {"fact_accuracy": 1.0, "citation_precision": 1.0, "score": 1.0}
+        return 1.0, {"quality_metrics": metrics, "task_model_usage": usage}
+
+    monkeypatch.setattr("adaptive_mas.harness_evolution.evaluate_candidate", local_rag_evaluate)
+    result = run_paired_module_ablation(
+        comparison_id,
+        cases,
+        candidate=candidate,
+        research=ResearchData([], [], [], [], []),
+        client=SimpleNamespace(
+            model="fixture-model", endpoint="https://fixture.invalid", offline_only=True,
+        ),
+        budget=CallBudget(max_calls=1),
+        config={"fixture": True},
+        output_root=tmp_path,
+        run_id=f"paired-control-{comparison_id}",
+        industrial_rag_service=rag_service,
+        industrial_rag_release_id=release_id,
+    )
+
+    trace = json.loads((
+        tmp_path / "module_ablations" / f"paired-control-{comparison_id}" / "evaluation_action_traces.json"
+    ).read_text(encoding="utf-8"))
+    assert result["status"] == "complete"
+    assert result["comparison_kind"] == comparison_kind
+    is_sensitivity = comparison_kind == "parameter_sensitivity"
+    assert result["module_ablation_counted"] is not is_sensitivity
+    assert result["parameter_sensitivity_id"] == (comparison_id if is_sensitivity else None)
+    assert result["ablated_candidate_sha256"] is None if is_sensitivity else (
+        result["ablated_candidate_sha256"] == result["baseline_candidate_sha256"]
+    )
+    assert result["comparison_candidate_sha256"] == result["baseline_candidate_sha256"]
+    assert result["runtime_control"]["comparison_value"] == expected_value
+    assert result["runtime_control"]["module_removal_claim_permitted"] is False
+    assert result["planned_provider_call_upper_bound"] == 0
+    assert result["provider_call_count"] == 0
+    assert result["provider_execution_mode"] == "offline_cache_only"
+    assert result["blind_test_used"] is False
+    assert result["scientific_acceptance_status"] == "not_established"
+    comparison_label = "sensitivity" if is_sensitivity else "ablated"
+    assert {row["label"] for row in trace["evaluations"]} == {"baseline", comparison_label}
+    assert all(row["status"] == "completed" for row in trace["evaluations"])
+    assert all(row["runtime_control_observed"] for row in trace["evaluations"])
+    assert all(row["rag_operation_evidence"]["control_observed"] for row in trace["evaluations"])
+    assert all(
+        observation["value_matches"] and observation["trace_matches"]
+        for row in trace["evaluations"]
+        for observation in row["rag_operation_evidence"]["control_observations"]
+    )
+    assert all(
+        row["rag_operation_evidence"]["control_observations"][0]["observed_value"]
+        == (expected_value if row["label"] == comparison_label else result["runtime_control"]["baseline_value"])
+        for row in trace["evaluations"]
+    )
+    assert result["paired_evaluation"]["selection"]["case_count"] == 2
+    assert result["paired_evaluation"]["frozen_evaluation"]["case_count"] == 2
 
 
 def test_public_tool_projection_keeps_retrospective_capture_audit_fields() -> None:

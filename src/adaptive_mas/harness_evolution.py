@@ -1515,8 +1515,8 @@ def _selection_summary(
 
 _ABLATION_MODULES = (
     (1, "layout_ocr_routing", "offline_index_rebuild_required"),
-    (2, "cross_page_table_reconstruction", "review_governed_not_candidate_tunable"),
-    (3, "semantic_row_group_chunking", "offline_index_rebuild_required"),
+    (2, "cross_page_table_reconstruction", "reviewed_context_exposure_intervention"),
+    (3, "semantic_row_group_chunking", "retrieval_candidate_set_intervention"),
     (4, "hierarchy_page_cell_linkage", "immutable_citation_contract"),
     (5, "entity_alias_disambiguation", "immutable_metric_alias_contract"),
     (6, "time_period_basis_extraction", "immutable_temporal_contract"),
@@ -1527,7 +1527,7 @@ _ABLATION_MODULES = (
     (11, "reciprocal_rank_fusion", "bounded_policy_ablation"),
     (12, "independent_reranker", "bounded_policy_ablation"),
     (13, "reviewed_parent_context", "bounded_policy_ablation"),
-    (14, "financial_fact_normalization", "immutable_parser_contract"),
+    (14, "financial_fact_normalization", "structured_fact_channel_intervention"),
     (15, "context_allocation", "parameter_sensitivity"),
     (16, "evidence_coverage_budget", "parameter_sensitivity"),
     (17, "challenge_and_stop", "immutable_safety_policy"),
@@ -1535,6 +1535,117 @@ _ABLATION_MODULES = (
     (19, "deterministic_arithmetic_validation", "immutable_safety_policy"),
     (20, "conflict_and_unsupported_claim_checks", "immutable_safety_policy"),
 )
+
+_ABLATION_CONTROL_SPECS: dict[int, dict[str, object]] = {
+    1: {
+        "control_id": "parser_backend_and_layout_model",
+        "scope": "source parsing and index construction",
+        "pair_evidence": ["same captured source bytes and metadata", "parser/model fingerprints", "per-arm index receipt and source manifest"],
+        "not_runnable_reason": "requires isolated source-level parser/index rebuilds; the paired query runner does not rebuild indexes",
+    },
+    2: {
+        "control_id": "include_continuation_context",
+        "scope": "retrieval-time exposure of reviewed continuation context; reconstruction and review status stay fixed",
+        "pair_evidence": ["executed search planner include_continuation_context", "same query, release, permissions, and fixed case in both arms"],
+    },
+    3: {
+        "control_id": "row_group_chunking",
+        "scope": "retrieval-time inclusion of existing semantic row-group candidates; indexed records stay fixed",
+        "pair_evidence": ["executed search planner row_group_chunking", "same query, release, permissions, and fixed case in both arms"],
+    },
+    4: {
+        "control_id": "page_cell_citation_linkage",
+        "scope": "immutable evidence-location contract",
+        "pair_evidence": ["exact source, page, table, row, column, and cell linkage remains valid"],
+        "not_runnable_reason": "citation linkage is a fixed evidence-integrity contract and has no safe candidate-side switch",
+    },
+    5: {
+        "control_id": "entity_alias_disambiguation",
+        "scope": "immutable entity and alias identity contract",
+        "pair_evidence": ["same source-backed entity and alias resolution under all candidate variants"],
+        "not_runnable_reason": "entity identity is not candidate-tunable in the research evaluator",
+    },
+    6: {
+        "control_id": "time_period_and_accounting_basis_extraction",
+        "scope": "immutable point-in-time and accounting-basis contract",
+        "pair_evidence": ["same strict-forward eligibility and exact period/basis checks under all candidate variants"],
+        "not_runnable_reason": "temporal visibility and accounting-basis checks are fixed evaluator safeguards",
+    },
+    7: {
+        "control_id": "query_rewrite_enabled",
+        "scope": "retrieval-time constrained query rewrite; mandatory correction search stays active",
+        "pair_evidence": ["executed search planner query_rewrite_enabled", "query-step hashes and counts for both paired arms"],
+    },
+    8: {
+        "control_id": "multi_hop_enabled",
+        "scope": "retrieval-time metric-period decomposition; one supporting search remains required",
+        "pair_evidence": ["executed search planner multi_hop_enabled", "query-step hashes and counts for both paired arms"],
+    },
+    9: {
+        "control_id": "support_channel_bm25",
+        "scope": "support-search channel set; mandatory correction search behavior remains fixed",
+        "pair_evidence": ["executed search planner channels excludes bm25 in the intervention arm", "same query, release, permissions, and fixed case in both arms"],
+    },
+    10: {
+        "control_id": "support_channel_dense",
+        "scope": "support-search dense channel; requires dense in baseline and a configured adapter",
+        "pair_evidence": ["executed search planner channels excludes dense in the intervention arm", "versioned dense adapter identity pinned across both arms"],
+    },
+    11: {
+        "control_id": "fusion_strategy",
+        "scope": "retrieval fusion; first-available channel replaces reciprocal-rank fusion",
+        "pair_evidence": ["executed planner strategy and fusion trace method in the intervention arm", "same query, release, permissions, and fixed case in both arms"],
+    },
+    12: {
+        "control_id": "use_reranker",
+        "scope": "retrieval reranking; requires a configured versioned reranker in the baseline",
+        "pair_evidence": ["versioned reranker identity pinned across the pair", "intervention planner disables reranking and every executed step records disabled"],
+    },
+    13: {
+        "control_id": "table_expansion_limit",
+        "scope": "retrieval-time reviewed parent-row expansion; exact child-row evidence remains available",
+        "pair_evidence": ["executed intervention planner records table_expansion_limit zero", "same query, release, permissions, and fixed case in both arms"],
+    },
+    14: {
+        "control_id": "support_channel_structured_facts",
+        "scope": "structured-fact retrieval channel only; parser normalization and report validation remain active",
+        "pair_evidence": ["executed intervention planner channels excludes structured_facts", "same query, release, permissions, and fixed case in both arms"],
+    },
+    15: {
+        "control_id": "context_char_limit",
+        "scope": "parameter sensitivity only; no module is removed",
+        "pair_evidence": ["executed baseline and comparison searches record their context limits", "same query, release, permissions, and fixed case in both arms"],
+    },
+    16: {
+        "control_id": "evidence_limit",
+        "scope": "parameter sensitivity only; no module is removed",
+        "pair_evidence": ["executed baseline and comparison planners record their evidence limits", "same query, release, permissions, and fixed case in both arms"],
+    },
+    17: {
+        "control_id": "challenge_and_stop_policy",
+        "scope": "immutable safety policy",
+        "pair_evidence": ["negative and counter-evidence cases continue to enforce the same challenge and stop rules"],
+        "not_runnable_reason": "safety and stop behavior is fixed in the evaluator and cannot be disabled by a candidate",
+    },
+    18: {
+        "control_id": "claim_citation_alignment",
+        "scope": "immutable evaluator contract",
+        "pair_evidence": ["claim-to-citation support validation remains identical in both arms"],
+        "not_runnable_reason": "citation evaluation is fixed and is not a candidate-controlled retrieval module",
+    },
+    19: {
+        "control_id": "deterministic_arithmetic_validation",
+        "scope": "immutable calculation safety policy",
+        "pair_evidence": ["same exact Decimal recomputation and operand-evidence checks under both arms"],
+        "not_runnable_reason": "deterministic arithmetic validation is a fixed safety contract",
+    },
+    20: {
+        "control_id": "conflict_and_unsupported_claim_checks",
+        "scope": "immutable safety policy",
+        "pair_evidence": ["same conflicting-source and unsupported-number negative cases under both arms"],
+        "not_runnable_reason": "conflict and unsupported-claim checks are fixed safety contracts",
+    },
+}
 
 
 def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, object]]:
@@ -1552,8 +1663,8 @@ def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, obje
             "evaluation_splits": ["selection", "frozen_evaluation"],
         }
         descriptions = {
-            2: "disable reviewed cross-page context while retaining exact child-row evidence",
-            3: "remove semantic table-row chunks from the BM25 candidate set",
+            2: "suppress reviewed continuation context at retrieval while retaining exact child-row evidence; reconstruction and review remain fixed",
+            3: "exclude existing semantic row-group candidates at retrieval; indexed row-group records remain unchanged",
             7: "disable constrained query rewriting while retaining the mandatory correction search",
             8: "disable metric-period multi-hop decomposition while retaining one supporting query",
             9: "disable BM25 for support searches while retaining the mandatory BM25 correction search",
@@ -1561,7 +1672,7 @@ def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, obje
             11: "disable reciprocal-rank fusion and use the first available channel",
             12: "disable the configured reranker",
             13: "disable reviewed table-row expansion",
-            14: "disable normalized structured-fact retrieval while retaining report validation",
+            14: "remove the structured-fact retrieval channel; parsing normalization and report validation remain active",
             15: "raise the candidate context limit to 16,000 characters within the fixed tool ceiling",
             16: "raise the candidate evidence limit to the service ceiling of 64 items",
         }
@@ -1570,6 +1681,7 @@ def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, obje
                 row.update({
                     "status": "planned_sensitivity_not_executed",
                     "reason": "numeric limit change; evaluate as parameter sensitivity, not module removal",
+                    "changed_policy_fields": [],
                     "parameter_sensitivity": {
                         "parameter": "context_char_limit" if module_id == 15 else "evidence_limit",
                         "baseline_value": baseline_policy[
@@ -1579,6 +1691,19 @@ def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, obje
                         "description": descriptions[module_id],
                     },
                 })
+                row["comparison_kind"] = "parameter_sensitivity"
+                row["runtime_control"] = {
+                    "control_id": "context_char_limit" if module_id == 15 else "evidence_limit",
+                    "baseline_value": baseline_policy[
+                        "context_char_limit" if module_id == 15 else "evidence_limit"
+                    ],
+                    "comparison_value": 16000 if module_id == 15 else 64,
+                    "scope": "parameter sensitivity; no module removal",
+                    "available": True,
+                    "module_removal_claim_permitted": False,
+                    "not_runnable_reason": None,
+                }
+                row["paired_evidence_contract"] = _ABLATION_CONTROL_SPECS[module_id]["pair_evidence"]
                 rows.append(row)
                 continue
             reason = None
@@ -1595,25 +1720,73 @@ def build_module_ablation_plan(candidate: dict[str, str]) -> list[dict[str, obje
                 reason = "reviewed parent expansion is already disabled in the active candidate"
             if reason is not None:
                 row["reason"] = reason
-                rows.append(row)
-                continue
-            row.update({
-                "status": "planned_not_executed",
-                "reason": "isolated evaluator-only runtime intervention; production hard guards remain active",
-                "candidate": baseline,
-                "candidate_sha256": hashlib.sha256(_json(baseline).encode("utf-8")).hexdigest(),
-                "changed_policy_fields": [],
-                "runtime_intervention": {
-                    "research_ablation_id": module_id,
-                    "description": descriptions[module_id],
-                },
-            })
+            else:
+                row.update({
+                    "status": "planned_not_executed",
+                    "reason": "isolated evaluator-only runtime intervention; production hard guards remain active",
+                    "comparison_kind": "bounded_runtime_intervention",
+                    "candidate": baseline,
+                    "candidate_sha256": hashlib.sha256(_json(baseline).encode("utf-8")).hexdigest(),
+                    "changed_policy_fields": [],
+                    "runtime_intervention": {
+                        "research_ablation_id": module_id,
+                        "description": descriptions[module_id],
+                    },
+                })
         else:
             row["reason"] = (
                 "offline parser/index rebuild required for an isolated source-bound copy"
                 if module_id in {1}
                 else "review or production hard guard remains immutable in the research evaluator"
             )
+        control_spec = _ABLATION_CONTROL_SPECS[module_id]
+        baseline_control_values: dict[int, object] = {
+            2: True,
+            3: True,
+            7: True,
+            8: True,
+            9: "bm25" in baseline_policy["channels"],
+            10: "dense" in baseline_policy["channels"],
+            11: "rrf",
+            12: baseline_policy["reranker_profile"] == "configured",
+            13: int(baseline_policy["table_expansion_limit"]),
+            14: "structured_facts" in baseline_policy["channels"],
+            15: int(baseline_policy["context_char_limit"]),
+            16: int(baseline_policy["evidence_limit"]),
+        }
+        comparison_control_values: dict[int, object] = {
+            2: False,
+            3: False,
+            7: False,
+            8: False,
+            9: False,
+            10: False,
+            11: "first_available_channel",
+            12: False,
+            13: 0,
+            14: False,
+            15: 16000,
+            16: 64,
+        }
+        is_parameter_sensitivity = module_id in {15, 16}
+        row["comparison_kind"] = (
+            "parameter_sensitivity" if is_parameter_sensitivity
+            else "bounded_runtime_intervention" if module_id in descriptions
+            else "not_executable_fixed_contract_or_offline_rebuild"
+        )
+        row["runtime_control"] = {
+            "control_id": control_spec["control_id"],
+            "baseline_value": baseline_control_values.get(module_id),
+            "comparison_value": comparison_control_values.get(module_id),
+            "scope": control_spec["scope"],
+            "available": row["status"] in {"planned_not_executed", "planned_sensitivity_not_executed"},
+            "module_removal_claim_permitted": False,
+            "not_runnable_reason": (
+                control_spec.get("not_runnable_reason") or row["reason"]
+                if row["status"] == "not_runnable" else None
+            ),
+        }
+        row["paired_evidence_contract"] = control_spec["pair_evidence"]
         rows.append(row)
     if [row["module_id"] for row in rows] != list(range(1, 21)):
         raise RuntimeError("the fixed GEPA ablation catalog must contain modules 1 through 20 exactly once")
@@ -1691,106 +1864,242 @@ def _rag_operation_evidence(
     module_id: int,
     *,
     require_intervention: bool,
+    expected_control_value: object,
 ) -> dict[str, object]:
-    """Summarize executed local RAG searches and confirm the selected runtime switch."""
+    """Validate every recorded RAG search and every execution step in the pair."""
     pending = [actions]
-    search_summaries: list[dict[str, object]] = []
+    seen: set[int] = set()
+    search_invocations: list[Mapping[str, object]] = []
     while pending:
         current = pending.pop()
         if isinstance(current, Mapping):
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
             if current.get("tool") == "search_indexed_financial_documents":
-                result = current.get("result")
-                if isinstance(result, Mapping):
-                    policy = result.get("research_policy")
-                    coverage = result.get("coverage")
-                    if (
-                        isinstance(policy, Mapping)
-                        and policy.get("evaluation_ablation_id") == (module_id if require_intervention else None)
-                        and isinstance(coverage, list)
-                    ):
-                        for query in coverage:
-                            if not isinstance(query, Mapping):
-                                continue
-                            planner = query.get("planner")
-                            if not isinstance(planner, Mapping):
-                                continue
-                            steps = planner.get("steps")
-                            if not isinstance(steps, list):
-                                continue
-                            executed_steps = [
-                                dict(step) for step in steps
-                                if isinstance(step, Mapping)
-                                and isinstance(step.get("query_sha256"), str)
-                                and isinstance(step.get("result_status"), str)
-                                and isinstance(step.get("candidate_count"), int)
-                                and not isinstance(step.get("candidate_count"), bool)
-                            ]
-                            if executed_steps:
-                                search_summaries.append({
-                                    "planner": dict(planner),
-                                    "research_policy": dict(policy),
-                                    "steps": executed_steps,
-                                })
-            pending.extend(current.values())
+                search_invocations.append(current)
+            pending.extend(reversed(list(current.values())))
         elif isinstance(current, (list, tuple)):
-            pending.extend(current)
+            pending.extend(reversed(current))
 
-    def intervention_observed(summary: Mapping[str, object]) -> bool:
-        planner = summary["planner"]
-        assert isinstance(planner, Mapping)
-        policy = summary["research_policy"]
-        assert isinstance(policy, Mapping)
-        steps = summary["steps"]
-        assert isinstance(steps, list)
+    expected_ablation_id = module_id if require_intervention else None
+
+    def observed_control_value(planner: Mapping[str, object], policy: Mapping[str, object]) -> object:
         if module_id == 2:
-            return planner.get("include_continuation_context") is False
+            return planner.get("include_continuation_context")
         if module_id == 3:
-            return planner.get("row_group_chunking") is False
+            return planner.get("row_group_chunking")
         if module_id == 7:
-            return planner.get("query_rewrite_enabled") is False
+            return planner.get("query_rewrite_enabled")
         if module_id == 8:
-            return planner.get("multi_hop_enabled") is False
+            return planner.get("multi_hop_enabled")
         if module_id == 9:
             channels = planner.get("channels")
-            return isinstance(channels, list) and "bm25" not in channels
+            return "bm25" in channels if isinstance(channels, list) else None
         if module_id == 10:
             channels = planner.get("channels")
-            return isinstance(channels, list) and "dense" not in channels
+            return "dense" in channels if isinstance(channels, list) else None
         if module_id == 11:
-            return (
-                planner.get("fusion_strategy") == "first_available_channel"
-                and any(
-                    isinstance(step, Mapping)
-                    and isinstance(step.get("fusion"), Mapping)
-                    and step["fusion"].get("method") == "fusion_disabled_first_available_channel"
-                    for step in steps
-                )
-            )
+            return planner.get("fusion_strategy")
         if module_id == 12:
-            return all(
-                isinstance(step, Mapping)
-                and isinstance(step.get("reranking"), Mapping)
+            profile = planner.get("reranker_profile")
+            return profile == "configured" if profile in {"configured", "disabled"} else None
+        if module_id == 13:
+            return planner.get("table_expansion_limit")
+        if module_id == 14:
+            channels = planner.get("channels")
+            return "structured_facts" in channels if isinstance(channels, list) else None
+        if module_id == 15:
+            return policy.get("context_char_limit")
+        if module_id == 16:
+            return planner.get("evidence_limit")
+        return False
+
+    def typed_value_matches(expected: object, observed: object) -> bool:
+        if isinstance(expected, bool):
+            return type(observed) is bool and observed is expected
+        if isinstance(expected, int):
+            return type(observed) is int and observed == expected
+        if isinstance(expected, str):
+            return isinstance(observed, str) and observed == expected
+        return type(observed) is type(expected) and observed == expected
+
+    def step_trace_matches(steps: list[Mapping[str, object]]) -> bool:
+        if module_id == 11:
+            required_method = (
+                "fusion_disabled_first_available_channel"
+                if expected_control_value == "first_available_channel"
+                else "reciprocal_rank_fusion"
+            )
+            return bool(steps) and all(
+                isinstance(step.get("fusion"), Mapping)
+                and step["fusion"].get("method") == required_method
+                for step in steps
+            )
+        if module_id == 12 and expected_control_value is False:
+            return bool(steps) and all(
+                isinstance(step.get("reranking"), Mapping)
                 and step["reranking"].get("status") == "disabled"
                 for step in steps
             )
-        if module_id == 13:
-            return planner.get("table_expansion_limit") == 0
-        if module_id == 14:
-            channels = planner.get("channels")
-            return isinstance(channels, list) and "structured_facts" not in channels
-        if module_id == 15:
-            return policy.get("context_char_limit") == 16000
-        if module_id == 16:
-            return planner.get("evidence_limit") == 64
-        return False
+        return bool(steps)
+
+    search_summaries: list[dict[str, object]] = []
+    control_observations: list[dict[str, object]] = []
+    for invocation_index, invocation in enumerate(search_invocations):
+        errors: list[str] = []
+        result = invocation.get("result")
+        if not isinstance(result, Mapping):
+            search_summaries.append({
+                "invocation_index": invocation_index,
+                "valid": False,
+                "errors": ["missing_or_malformed_result"],
+                "queries": [],
+            })
+            continue
+
+        policy_value = result.get("research_policy")
+        policy = policy_value if isinstance(policy_value, Mapping) else {}
+        policy_matches = (
+            isinstance(policy_value, Mapping)
+            and "evaluation_ablation_id" in policy_value
+            and typed_value_matches(expected_ablation_id, policy_value.get("evaluation_ablation_id"))
+        )
+        if not isinstance(policy_value, Mapping):
+            errors.append("missing_or_malformed_research_policy")
+        elif "evaluation_ablation_id" not in policy_value:
+            errors.append("missing_evaluation_ablation_id")
+        elif not policy_matches:
+            errors.append("unexpected_evaluation_ablation_id")
+
+        coverage_value = result.get("coverage")
+        if not isinstance(coverage_value, list) or not coverage_value:
+            errors.append("missing_or_empty_coverage")
+            coverage_items: list[object] = []
+        else:
+            coverage_items = coverage_value
+
+        query_summaries: list[dict[str, object]] = []
+        for coverage_index, query_value in enumerate(coverage_items):
+            query_errors: list[str] = []
+            if not isinstance(query_value, Mapping):
+                query_errors.append("malformed_coverage_entry")
+                planner: Mapping[str, object] = {}
+            else:
+                planner_value = query_value.get("planner")
+                if not isinstance(planner_value, Mapping):
+                    query_errors.append("missing_or_malformed_planner")
+                    planner = {}
+                else:
+                    planner = planner_value
+
+            raw_steps = planner.get("steps")
+            if not isinstance(raw_steps, list) or not raw_steps:
+                query_errors.append("missing_or_empty_execution_steps")
+                step_summaries: list[dict[str, object]] = []
+            else:
+                step_summaries = []
+                for step_index, step_value in enumerate(raw_steps):
+                    if not isinstance(step_value, Mapping):
+                        query_errors.append(f"malformed_execution_step_{step_index}")
+                        step_summaries.append({"valid": False})
+                        continue
+                    query_sha256 = step_value.get("query_sha256")
+                    result_status = step_value.get("result_status")
+                    candidate_count = step_value.get("candidate_count")
+                    step_valid = (
+                        isinstance(query_sha256, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", query_sha256) is not None
+                        and isinstance(result_status, str)
+                        and bool(result_status.strip())
+                        and isinstance(candidate_count, int)
+                        and not isinstance(candidate_count, bool)
+                        and candidate_count >= 0
+                    )
+                    if not step_valid:
+                        query_errors.append(f"malformed_execution_step_{step_index}")
+                    step_summary: dict[str, object] = {
+                        "valid": step_valid,
+                        "query_sha256": query_sha256 if isinstance(query_sha256, str) else None,
+                        "result_status": result_status if isinstance(result_status, str) else None,
+                        "candidate_count": candidate_count if isinstance(candidate_count, int) and not isinstance(candidate_count, bool) else None,
+                    }
+                    for trace_field in ("fusion", "reranking"):
+                        trace_value = step_value.get(trace_field)
+                        step_summary[trace_field] = dict(trace_value) if isinstance(trace_value, Mapping) else None
+                    step_summaries.append(step_summary)
+
+            valid_steps = all(step.get("valid") is True for step in step_summaries)
+            if step_summaries and valid_steps:
+                trace_matches = step_trace_matches(step_summaries)
+            else:
+                trace_matches = False
+            observed = observed_control_value(planner, policy)
+            value_matches = typed_value_matches(expected_control_value, observed)
+            observation = {
+                "invocation_index": invocation_index,
+                "coverage_index": coverage_index,
+                "expected_value": expected_control_value,
+                "observed_value": observed,
+                "value_matches": value_matches,
+                "policy_matches": policy_matches,
+                "trace_matches": trace_matches,
+                "structure_valid": not query_errors,
+            }
+            control_observations.append(observation)
+            if not value_matches:
+                query_errors.append("runtime_control_value_mismatch")
+            if not trace_matches:
+                query_errors.append("execution_trace_mismatch")
+            query_valid = policy_matches and not query_errors and value_matches and trace_matches
+            errors.extend(f"coverage_{coverage_index}:{error}" for error in query_errors)
+            query_summaries.append({
+                "coverage_index": coverage_index,
+                "planner": dict(planner),
+                "research_policy": dict(policy),
+                "steps": step_summaries,
+                "valid": query_valid,
+                "errors": query_errors,
+            })
+
+        invocation_valid = policy_matches and bool(query_summaries) and all(
+            query.get("valid") is True for query in query_summaries
+        ) and not errors
+        search_summary: dict[str, object] = {
+            "invocation_index": invocation_index,
+            "research_policy": dict(policy),
+            "policy_matches": policy_matches,
+            "valid": invocation_valid,
+            "errors": errors,
+            "queries": query_summaries,
+            "steps": [
+                step
+                for query in query_summaries if isinstance(query.get("steps"), list)
+                for step in query["steps"]
+            ],
+        }
+        if len(query_summaries) == 1:
+            search_summary["planner"] = query_summaries[0]["planner"]
+        search_summaries.append(search_summary)
+
+    control_observed = bool(search_invocations) and len(search_summaries) == len(search_invocations) and all(
+        summary.get("valid") is True for summary in search_summaries
+    ) and bool(control_observations) and all(
+        row["value_matches"] is True
+        and row["policy_matches"] is True
+        and row["trace_matches"] is True
+        and row["structure_valid"] is True
+        for row in control_observations
+    )
 
     return {
-        "search_count": len(search_summaries),
+        "search_count": len(search_invocations),
         "searches": search_summaries,
-        "intervention_observed": (
-            any(intervention_observed(row) for row in search_summaries)
-            if require_intervention else None
-        ),
+        "expected_control_value": expected_control_value,
+        "control_observations": control_observations,
+        "control_observed": control_observed,
+        "intervention_observed": control_observed if require_intervention else None,
     }
 
 
@@ -2577,10 +2886,13 @@ def run_paired_module_ablation(
     if budget.unresolved_call:
         raise RuntimeError("the shared call ledger has an unknown outbound outcome; resolve it before evaluating")
     paired_cases = [*cases["selection"], *cases["frozen_evaluation"]]
-    planned_provider_call_upper_bound = 2 * len(paired_cases) * MAX_RESEARCH_CALLS_PER_CASE
+    offline_only = bool(getattr(client, "offline_only", False))
+    planned_provider_call_upper_bound = (
+        0 if offline_only else 2 * len(paired_cases) * MAX_RESEARCH_CALLS_PER_CASE
+    )
     if budget.remaining_provider_calls < planned_provider_call_upper_bound:
         raise RuntimeError(
-            f"paired module ablation requires a reserved provider-call ceiling of {planned_provider_call_upper_bound}; "
+            f"paired RAG comparison requires a reserved provider-call ceiling of {planned_provider_call_upper_bound}; "
             f"only {budget.remaining_provider_calls} remain"
         )
     if industrial_rag_service is None:
@@ -2608,16 +2920,27 @@ def run_paired_module_ablation(
     baseline_candidate = validate_candidate(candidate)
     matrix = build_module_ablation_plan(baseline_candidate)
     module_row = next(row for row in matrix if row["module_id"] == module_id)
-    if module_row["status"] != "planned_not_executed":
-        raise ValueError(f"module {module_id} has no safe ablation for this active candidate: {module_row['reason']}")
-    ablated_candidate = validate_candidate(module_row["candidate"])
+    is_parameter_sensitivity = module_row["comparison_kind"] == "parameter_sensitivity"
+    if module_row["status"] != "planned_not_executed" and not (
+        is_parameter_sensitivity and module_row["status"] == "planned_sensitivity_not_executed"
+    ):
+            raise ValueError(
+                f"catalog row {module_id} has no safe paired intervention for this active candidate: "
+                f"{module_row['reason']}"
+            )
+    comparison_candidate = (
+        baseline_candidate
+        if is_parameter_sensitivity
+        else validate_candidate(module_row["candidate"])
+    )
+    comparison_label = "sensitivity" if is_parameter_sensitivity else "ablated"
 
     run_dir = Path(output_root) / "module_ablations" / run_id
     if run_dir.exists():
-        raise ValueError("module ablation run_id already owns immutable or partial experiment history")
+        raise ValueError("paired comparison run_id already owns immutable or partial experiment history")
     run_dir.mkdir(parents=True, exist_ok=False)
     baseline_sha256 = hashlib.sha256(_json(baseline_candidate).encode("utf-8")).hexdigest()
-    ablated_sha256 = hashlib.sha256(_json(ablated_candidate).encode("utf-8")).hexdigest()
+    comparison_sha256 = hashlib.sha256(_json(comparison_candidate).encode("utf-8")).hexdigest()
     case_inputs = {
         "schema_version": "adaptive-mas.gepa-module-ablation-inputs.v1",
         "module_id": module_id,
@@ -2637,14 +2960,18 @@ def run_paired_module_ablation(
         "schema_version": "adaptive-mas.gepa-module-ablation-identity.v1",
         "source_identity": source_package_identity(),
         "module_id": module_id,
+        "comparison_kind": module_row["comparison_kind"],
         "baseline_candidate_sha256": baseline_sha256,
-        "ablated_candidate_sha256": ablated_sha256,
+        "comparison_candidate_sha256": comparison_sha256,
         "config_sha256": _stable_hash(config),
+        "runtime_control": module_row["runtime_control"],
+        "paired_evidence_contract": module_row["paired_evidence_contract"],
         "industrial_rag_runtime": rag_runtime_identity,
         "case_inputs_sha256": case_inputs_sha256,
         "procedural_memory_sha256": _stable_hash(procedural_memory) if procedural_memory is not None else None,
         "model": client.model,
         "endpoint_sha256": hashlib.sha256(client.endpoint.rstrip("/").encode("utf-8")).hexdigest(),
+        "provider_execution_mode": "offline_cache_only" if offline_only else "provider_enabled",
         "evaluator_version": EVALUATOR_VERSION,
         "planned_provider_call_upper_bound": planned_provider_call_upper_bound,
     }
@@ -2656,10 +2983,12 @@ def run_paired_module_ablation(
         "run_id": run_id,
         "module_id": module_id,
         "module": module_row["module"],
+        "comparison_kind": module_row["comparison_kind"],
         "package_identity_sha256": package_identity_sha256,
         "case_inputs_sha256": case_inputs_sha256,
         "baseline_candidate_sha256": baseline_sha256,
-        "ablated_candidate_sha256": ablated_sha256,
+        "comparison_candidate_sha256": comparison_sha256,
+        "ablated_candidate_sha256": None if is_parameter_sensitivity else comparison_sha256,
         "baseline_role": "held_fixed_for_each_same_case_pair",
         "industrial_rag_runtime": rag_runtime_identity,
         "splits": {
@@ -2667,7 +2996,11 @@ def run_paired_module_ablation(
             for name in ("selection", "frozen_evaluation")
         },
         "changed_policy_fields": module_row["changed_policy_fields"],
-        "runtime_intervention": module_row.get("runtime_intervention"),
+        "runtime_control": module_row["runtime_control"],
+        "paired_evidence_contract": module_row["paired_evidence_contract"],
+        "runtime_intervention": None if is_parameter_sensitivity else module_row.get("runtime_intervention"),
+        "parameter_sensitivity": module_row.get("parameter_sensitivity"),
+        "pair_labels": {"baseline": "baseline", "comparison": comparison_label},
         "planned_provider_call_upper_bound": planned_provider_call_upper_bound,
     }
     case_manifest_sha256 = _stable_hash(case_manifest)
@@ -2675,7 +3008,12 @@ def run_paired_module_ablation(
     _write_json(run_dir / "case_manifest.json", case_manifest)
     _write_json(run_dir / "module_ablation_plan.json", {
         "schema_version": "adaptive-mas.gepa-module-ablation-plan.v1",
-        "status": "one_module_selected_for_paired_execution",
+        "status": (
+            "one_parameter_sensitivity_selected_for_paired_execution"
+            if is_parameter_sensitivity else "one_runtime_intervention_selected_for_paired_execution"
+        ),
+        "comparison_kind": module_row["comparison_kind"],
+        "module_ablation_counted": not is_parameter_sensitivity,
         "baseline": baseline_candidate,
         "module_row": module_row,
     })
@@ -2693,14 +3031,15 @@ def run_paired_module_ablation(
 
     checkpoint("recording")
     rows: dict[str, dict[str, list[dict[str, object]]]] = {
-        name: {"baseline": [], "ablated": []}
+        name: {"baseline": [], "comparison": []}
         for name in ("selection", "frozen_evaluation")
     }
     call_start = len(budget.calls)
     logical_start = len(budget.logical_calls)
+    cache_hit_start = budget.cache_hits
     candidates = (
         ("baseline", baseline_candidate, baseline_sha256),
-        ("ablated", ablated_candidate, ablated_sha256),
+        (comparison_label, comparison_candidate, comparison_sha256),
     )
     for case in paired_cases:
         for label, task_candidate, candidate_sha256 in candidates:
@@ -2725,7 +3064,7 @@ def run_paired_module_ablation(
                     industrial_rag_service=industrial_rag_service,
                     industrial_rag_principal_id=industrial_rag_principal_id,
                     industrial_rag_release_id=pinned_release_id,
-                    research_ablation_id=module_id if label == "ablated" else None,
+                    research_ablation_id=module_id if label != "baseline" else None,
                     industrial_rag_runtime_identity=rag_runtime_identity,
                 )
                 _assert_pinned_industrial_rag_runtime(
@@ -2741,23 +3080,30 @@ def run_paired_module_ablation(
                     "as_of": case.as_of.isoformat(),
                     "candidate_sha256": candidate_sha256,
                     "research_ablation_id": module_id if label == "ablated" else None,
+                    "parameter_sensitivity_id": module_id if label == "sensitivity" else None,
                     "status": "failed",
                     "error_type": type(exc).__name__,
                     "actions": trace_sink,
                 })
                 checkpoint("failed")
                 raise
+            expected_control_value = (
+                module_row["runtime_control"]["baseline_value"]
+                if label == "baseline"
+                else module_row["runtime_control"]["comparison_value"]
+            )
             rag_evidence = _rag_operation_evidence(
-                trace_sink, module_id, require_intervention=(label == "ablated"),
+                trace_sink,
+                module_id,
+                require_intervention=(label != "baseline"),
+                expected_control_value=expected_control_value,
             )
             rag_execution_observed = int(rag_evidence["search_count"]) > 0
-            rag_intervention_observed = (
-                rag_execution_observed and rag_evidence["intervention_observed"] is True
-                if label == "ablated" else None
-            )
+            control_observed = rag_execution_observed and rag_evidence["control_observed"] is True
+            rag_intervention_observed = control_observed if label != "baseline" else None
             evaluation_status = (
                 "completed"
-                if rag_execution_observed and (label == "baseline" or rag_intervention_observed is True)
+                if control_observed and (label == "baseline" or rag_intervention_observed is True)
                 else "incomplete_no_rag_execution"
             )
             evaluation = {
@@ -2766,18 +3112,20 @@ def run_paired_module_ablation(
                 "as_of": case.as_of.isoformat(),
                 "candidate_sha256": candidate_sha256,
                 "research_ablation_id": module_id if label == "ablated" else None,
+                "parameter_sensitivity_id": module_id if label == "sensitivity" else None,
                 "score": score,
                 "quality_metrics": info["quality_metrics"],
                 "task_model_usage": info["task_model_usage"],
                 "status": evaluation_status,
                 "rag_execution_observed": rag_execution_observed,
+                "runtime_control_observed": control_observed,
                 "rag_intervention_observed": rag_intervention_observed,
                 "rag_operation_evidence": rag_evidence,
                 "actions": trace_sink,
             }
             evaluations.append(evaluation)
             checkpoint("recording")
-            rows[case.split][label].append({
+            rows[case.split]["baseline" if label == "baseline" else "comparison"].append({
                 "as_of": case.as_of.isoformat(),
                 "score": score,
                 "metrics": info["quality_metrics"],
@@ -2796,7 +3144,7 @@ def run_paired_module_ablation(
         else "incomplete_no_rag_execution"
     )
     paired = {
-        split: _paired_case_deltas(rows[split]["baseline"], rows[split]["ablated"])
+        split: _paired_case_deltas(rows[split]["baseline"], rows[split]["comparison"])
         for split in ("selection", "frozen_evaluation")
     }
     logical_calls = budget.logical_calls[logical_start:]
@@ -2806,11 +3154,18 @@ def run_paired_module_ablation(
         "run_id": run_id,
         "module_id": module_id,
         "module": module_row["module"],
+        "comparison_kind": module_row["comparison_kind"],
+        "module_ablation_counted": not is_parameter_sensitivity,
+        "parameter_sensitivity_id": module_id if is_parameter_sensitivity else None,
         "case_manifest_sha256": case_manifest_sha256,
         "baseline_candidate_sha256": baseline_sha256,
-        "ablated_candidate_sha256": ablated_sha256,
+        "comparison_candidate_sha256": comparison_sha256,
+        "ablated_candidate_sha256": None if is_parameter_sensitivity else comparison_sha256,
         "changed_policy_fields": module_row["changed_policy_fields"],
-        "runtime_intervention": module_row.get("runtime_intervention"),
+        "runtime_control": module_row["runtime_control"],
+        "paired_evidence_contract": module_row["paired_evidence_contract"],
+        "runtime_intervention": None if is_parameter_sensitivity else module_row.get("runtime_intervention"),
+        "parameter_sensitivity": module_row.get("parameter_sensitivity"),
         "industrial_rag_runtime": rag_runtime_identity,
         "incomplete_reason": (
             None if run_status == "complete"
@@ -2818,7 +3173,11 @@ def run_paired_module_ablation(
         ),
         "paired_evaluation": paired,
         "failure_attribution_scope": "observed per-metric and cost deltas on fixed cases; not causal proof of module effect",
+        "scientific_acceptance_status": "not_established",
+        "blind_test_used": False,
         "provider_call_count": sum(row.get("status") in {"started", "completed"} for row in budget.calls[call_start:]),
+        "cache_hit_count": budget.cache_hits - cache_hit_start,
+        "provider_execution_mode": "offline_cache_only" if offline_only else "provider_enabled",
         "logical_estimated_cost_cny": sum(float(row["logical_estimated_cost_cny"]) for row in logical_calls),
         "planned_provider_call_upper_bound": planned_provider_call_upper_bound,
         "case_inputs_file": "case_inputs.json",
