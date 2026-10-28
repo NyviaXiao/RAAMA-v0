@@ -748,9 +748,15 @@ def main() -> None:
             role_id="fundamental",
             system_prompt=(
                 "Use the indexed local financial filing and cite every source fact. Use the exact report_periods "
-                "provided in the task. For a calculation claim, provide calculation_spec with the operation and "
-                "two cited source operands, or cite deterministic calculator evidence. Keep every numeric literal "
-                "in the exact value and unit represented by source observations or calculated evidence."
+                "provided in the task. Each numeric source observation must cite a structured fact returned by "
+                "the indexed search whose report_period, field, value, unit and accounting basis match exactly. "
+                "A table row or text excerpt without a structured numeric fact is only a candidate and cannot "
+                "support a numeric observation. If a requested period is missing from the structured results, "
+                "search that exact period within the bounded tool budget; if it remains missing, leave the "
+                "comparison unresolved and do not estimate it. For any arithmetic or comparison claim, call "
+                "calculate_financial_metric on the two visible, eligible source facts, or provide calculation_spec "
+                "with those same two exact source evidence IDs and fields; do not calculate in prose. Keep every "
+                "numeric literal in the exact value and unit represented by source observations or calculated evidence."
             ),
             task=case,
             tools=tools,

@@ -871,15 +871,22 @@ class IndustrialRagService:
             raise ReleaseNotReady("no published corpus release is active")
         # Freeze the release at task start; all subqueries and reopen actions use it.
         pinned_plan = replace(plan, release_id=release_id)
+        metric_specs = requested_metric_specs(plan.query)
+        metrics = tuple(dict.fromkeys(item.metric for item in metric_specs))
+        periods = requested_periods(plan.query, plan.report_periods)
+        dimension_count = max(1, len(metrics)) * max(1, len(periods))
+        if dimension_count > evidence_limit:
+            raise ValueError(
+                "evidence limit cannot expose every requested metric-period dimension"
+            )
+        candidate_depth = min(10, max(pinned_plan.top_k, dimension_count + 1))
+        planning_plan = replace(pinned_plan, top_k=candidate_depth)
         searches = plan_research(
-            pinned_plan,
+            planning_plan,
             max_searches=max_searches,
             query_rewrite_enabled=query_rewrite_enabled,
             multi_hop_enabled=multi_hop_enabled,
         )
-        metric_specs = requested_metric_specs(plan.query)
-        metrics = tuple(dict.fromkeys(item.metric for item in metric_specs))
-        periods = requested_periods(plan.query, plan.report_periods)
         requested_unit_label = requested_unit(plan.query)
         requested_unit_key = unit_signature(requested_unit_label) if requested_unit_label else None
         requested_basis_label = requested_accounting_basis(plan.query, plan.accounting_basis)
@@ -922,12 +929,14 @@ class IndustrialRagService:
                 query=step.query,
                 task_type="refutation" if counter else plan.task_type,
                 report_periods=(
-                    (step.report_period,)
+                    step.report_periods
+                    if step.report_periods is not None
+                    else (step.report_period,)
                     if step.report_period is not None and plan.report_periods
                     else pinned_plan.report_periods
                 ),
                 channels=channels,
-                top_k=min(pinned_plan.top_k, 10),
+                top_k=candidate_depth,
             )
             try:
                 search_options = {
@@ -1324,6 +1333,8 @@ class IndustrialRagService:
                 "implementation": "fixed_metric_alias_period_templates",
                 "max_searches": max_searches,
                 "evidence_limit": evidence_limit,
+                "requested_result_limit": pinned_plan.top_k,
+                "candidate_depth_per_search": candidate_depth,
                 "table_expansion_limit": table_expansion_limit,
                 "rrf_rank_constant": rrf_rank_constant,
                 "reranker_profile": "configured" if use_reranker else "disabled",

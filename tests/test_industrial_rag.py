@@ -197,6 +197,55 @@ def test_research_trace_emits_ranked_channel_candidates_before_result_validation
     assert any(event.get("stage") == "search_completed" for event in events)
 
 
+def test_research_candidate_depth_preserves_each_requested_fact_period(tmp_path) -> None:
+    base = _bundle(
+        payload="2023年度营业收入339,123；2024年度营业收入337,488".encode(),
+        raw_value="337,488",
+        normalized_value="337488",
+    )
+    fact_2024 = base.facts[0]
+    fact_2023 = replace(
+        fact_2024,
+        fact_id="version-1-fact-2023",
+        raw_value="339,123",
+        normalized_value="339123",
+        report_period="2023",
+    )
+    bundle = replace(base, facts=(fact_2023, fact_2024))
+    store = IndustrialRagStore(tmp_path / "rag.sqlite3", LocalContentAddressedStore(tmp_path / "objects"))
+    store.ingest_bundle(bundle)
+    _consume_all(store)
+    _publish(store, [bundle.version.version_id], "release-1")
+    plan = replace(
+        _plan(),
+        query="2024年度营业收入是多少，和2023年度相比如何？",
+        report_periods=("2023", "2024"),
+        task_type="comparison",
+        top_k=2,
+    )
+
+    result = IndustrialRagService(store).research(
+        plan,
+        max_searches=2,
+        evidence_limit=8,
+        table_expansion_limit=0,
+        use_reranker=False,
+    )
+
+    coverage = result["coverage"]
+    by_period = {str(row["report_period"]): row for row in coverage}
+    assert set(by_period) == {"2023", "2024"}
+    assert all(row["numeric_claim_ready"] is True for row in by_period.values())
+    fact_ids = {
+        str(item["citation"]["fact_id"])
+        for item in result["supporting_evidence"]
+        if item.get("citation", {}).get("fact_id")
+    }
+    assert fact_ids == {"version-1-fact-2023", "version-1-fact-1"}
+    assert result["planner"]["requested_result_limit"] == 2
+    assert result["planner"]["candidate_depth_per_search"] == 3
+
+
 def _research_one_bundle(
     tmp_path,
     bundle: DocumentBundle,

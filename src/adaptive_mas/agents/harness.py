@@ -2088,7 +2088,7 @@ def _fundamental_handlers(
         tools.extend([
             _tool(
                 "search_indexed_financial_documents",
-                "Run bounded metric and period searches against the pinned local public financial corpus; return coverage gaps and correction/restatement candidates for review.",
+                "Run bounded metric and period searches against the pinned local public financial corpus; return structured facts with exact periods plus coverage gaps and correction/restatement candidates. Table rows and text excerpts without structured numeric facts are candidate-only.",
                 {
                     "question": {"type": "string", "minLength": 1, "maxLength": 240},
                     "symbols": {

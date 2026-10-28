@@ -93,6 +93,7 @@ class PlannedSearch:
     requested_metric: str | None = None
     metric_match_status: str = "exact"
     report_period: str | None = None
+    report_periods: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,7 +291,7 @@ def plan_research(
     query_rewrite_enabled: bool = True,
     multi_hop_enabled: bool = True,
 ) -> tuple[PlannedSearch, ...]:
-    """Build at most eight fixed-template searches, reserving one for counter evidence."""
+    """Build bounded searches without silently dropping requested metric-period coverage."""
     if isinstance(max_searches, bool) or not 2 <= max_searches <= MAX_RESEARCH_SEARCHES:
         raise ValueError(f"max_searches must be between 2 and {MAX_RESEARCH_SEARCHES}")
     if not isinstance(query_rewrite_enabled, bool) or not isinstance(multi_hop_enabled, bool):
@@ -304,24 +305,72 @@ def plan_research(
     if not multi_hop_enabled:
         dimensions = dimensions[:1]
     positive_limit = max_searches - 1
+    if len(dimensions) <= positive_limit:
+        dimension_groups = [[dimension] for dimension in dimensions]
+    else:
+        candidate_capacity = min(plan.top_k, 10)
+        metrics_in_order = list(dict.fromkeys(metric.metric if metric is not None else None for metric, _ in dimensions))
+        periods_in_order = list(dict.fromkeys(period for _, period in dimensions))
+        grouping_candidates = ([[list(dimensions)]] if len(dimensions) <= candidate_capacity else []) + [
+            [
+                [dimension for dimension in dimensions if (dimension[0].metric if dimension[0] is not None else None) == metric]
+                for metric in metrics_in_order
+            ],
+            [
+                [dimension for dimension in dimensions if dimension[1] == period]
+                for period in periods_in_order
+            ],
+        ]
+        grouping_candidates = [
+            groups for groups in grouping_candidates
+            if groups
+            and len(groups) <= positive_limit
+            and all(0 < len(group) <= candidate_capacity for group in groups)
+            and sum(len(group) for group in groups) == len(dimensions)
+        ]
+        if not grouping_candidates:
+            raise ValueError(
+                "research search and candidate budgets cannot cover every requested metric-period dimension "
+                "while reserving a counter-evidence search"
+            )
+        dimension_groups = min(
+            grouping_candidates,
+            key=lambda groups: (len(groups), max(len(group) for group in groups)),
+        )
+
     searches: list[PlannedSearch] = []
-    for metric, period in dimensions[:positive_limit]:
+    for group in dimension_groups:
+        metric_values = list(dict.fromkeys(metric for metric, _ in group))
+        period_values = list(dict.fromkeys(period for _, period in group if period is not None))
+        metric = metric_values[0] if len(metric_values) == 1 else None
+        period = period_values[0] if len(period_values) == 1 else None
+        if len(group) == 1:
+            metric = group[0][0]
+            period = group[0][1]
         metric_key = metric.metric if metric is not None else None
-        terms = metric_terms(metric_key) if metric_key else ()
         query_parts = [plan.query]
         if query_rewrite_enabled:
-            if terms:
-                query_parts.append(" ".join(terms))
-            if period:
-                query_parts.append(_period_query_terms(period))
+            for value in metric_values:
+                terms = metric_terms(value.metric) if value is not None else ()
+                if terms:
+                    query_parts.append(" ".join(terms))
+            query_parts.extend(_period_query_terms(value) for value in period_values)
+        requested_metric = metric.label if metric is not None else None
+        metric_match_status = (
+            metric.match_status
+            if metric is not None else
+            "unspecified" if len(metric_values) == 1 and metric_values[0] is None else
+            "multi_dimension"
+        )
         searches.append(PlannedSearch(
             step_id=f"search-{len(searches) + 1}",
             kind="supporting_evidence",
             query=" ".join(query_parts)[:2000],
             metric=metric_key,
-            requested_metric=metric.label if metric is not None else None,
-            metric_match_status=metric.match_status if metric is not None else "unspecified",
+            requested_metric=requested_metric,
+            metric_match_status=metric_match_status,
             report_period=period,
+            report_periods=tuple(period_values) if len(group) > 1 and period_values else None,
         ))
 
     # This result is intentionally labeled as a candidate. A lexical hit does

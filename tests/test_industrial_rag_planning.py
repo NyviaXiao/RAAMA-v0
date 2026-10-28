@@ -8,7 +8,7 @@ from adaptive_mas.industrial_rag.models import QueryPlan
 from adaptive_mas.industrial_rag.planning import normalize_period, plan_research, requested_metrics, requested_periods
 
 
-def _plan(query: str, *, report_periods: tuple[str, ...] = ()) -> QueryPlan:
+def _plan(query: str, *, report_periods: tuple[str, ...] = (), top_k: int = 20) -> QueryPlan:
     return QueryPlan(
         plan_id="planning-case",
         query=query,
@@ -17,6 +17,7 @@ def _plan(query: str, *, report_periods: tuple[str, ...] = ()) -> QueryPlan:
         principal_id="local-public",
         task_type="comparison",
         report_periods=report_periods,
+        top_k=top_k,
     )
 
 
@@ -36,10 +37,53 @@ def test_financial_query_is_split_into_metric_period_dimensions_and_counter_sear
 
 
 def test_planner_keeps_a_counter_search_inside_the_fixed_eight_search_budget() -> None:
-    searches = plan_research(_plan("比较2022年至2025年收入、净利润、经营现金流和资产负债率"))
-    assert len(searches) == 8
+    query = "比较2022年至2025年收入、净利润、经营现金流和资产负债率"
+    searches = plan_research(_plan(query))
+    expected_dimensions = {
+        (metric, period)
+        for metric in requested_metrics(query)
+        for period in requested_periods(query, ())
+    }
+    covered_dimensions = set()
+    for search in searches:
+        if search.kind != "supporting_evidence":
+            continue
+        metrics = (search.metric,) if search.metric is not None else requested_metrics(query)
+        periods = (
+            search.report_periods
+            if search.report_periods is not None
+            else (search.report_period,) if search.report_period is not None
+            else requested_periods(query, ())
+        )
+        covered_dimensions.update((metric, period) for metric in metrics for period in periods)
+    assert len(searches) <= 8
     assert searches[-1].kind == "counter_evidence_candidate"
-    assert sum(search.kind == "supporting_evidence" for search in searches) == 7
+    assert sum(search.kind == "supporting_evidence" for search in searches) <= 7
+    assert covered_dimensions == expected_dimensions
+
+
+def test_two_period_comparison_stays_visible_when_one_support_search_is_budgeted() -> None:
+    query = "2024年度营业收入是多少，和2023年度相比如何？"
+    plan = _plan(query, report_periods=("2023", "2024"))
+    searches = plan_research(plan, max_searches=2)
+    supporting = [search for search in searches if search.kind == "supporting_evidence"]
+
+    assert len(searches) == 2
+    assert len(supporting) == 1
+    assert supporting[0].metric == "operating_revenue"
+    assert supporting[0].report_period is None
+    assert supporting[0].report_periods == ("2023", "2024")
+    assert "2023" in supporting[0].query
+    assert "2024" in supporting[0].query
+    assert searches[-1].kind == "counter_evidence_candidate"
+
+
+def test_planner_fails_closed_when_search_and_candidate_budgets_cannot_cover_dimensions() -> None:
+    query = "对比营业收入、净利润和经营现金流的2022、2023、2024年数据"
+    plan = _plan(query, report_periods=("2022", "2023", "2024"), top_k=2)
+
+    with pytest.raises(ValueError, match="cannot cover every requested metric-period dimension"):
+        plan_research(plan, max_searches=2)
 
 
 def test_evaluation_planner_switches_remove_rewrite_and_multi_hop_but_keep_counter_search() -> None:
