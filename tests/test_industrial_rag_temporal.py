@@ -531,7 +531,7 @@ def _research_bundle_fixture() -> dict[str, object]:
     }
 
 
-def test_temporal_research_captures_bundle_and_replays_manager_result_offline(tmp_path, monkeypatch) -> None:
+def test_temporal_research_recovers_saved_manager_result_after_task_ack_loss_offline(tmp_path, monkeypatch) -> None:
     bundle_path = tmp_path / "research-bundle.json"
     original_bundle = _research_bundle_fixture()
     original_bytes = json.dumps(original_bundle, sort_keys=True).encode("utf-8")
@@ -570,13 +570,31 @@ def test_temporal_research_captures_bundle_and_replays_manager_result_offline(tm
         return {"status": "completed", "tool_trace": [{"role": "manager", "status": "completed"}]}
 
     monkeypatch.setattr(temporal_workflow, "run_research_harness", fake_research_runner)
-    first = run_research_activity(activity_input)
+    real_complete_task = HarnessStateStore.complete_task
+
+    def lose_task_ack_after_manager_artifact(self, task_id, result, **kwargs):
+        if task_id == captured.task_id and self.get_artifact(task_id, "industrial_rag_operation_result") is not None:
+            raise RuntimeError("injected worker loss after manager artifact persistence")
+        return real_complete_task(self, task_id, result, **kwargs)
+
+    monkeypatch.setattr(HarnessStateStore, "complete_task", lose_task_ack_after_manager_artifact)
+    with pytest.raises(RuntimeError, match="after manager artifact persistence"):
+        run_research_activity(activity_input)
+    saved = state.get_artifact(captured.task_id, "industrial_rag_operation_result")
+    assert saved is not None
+    assert state.get_task(captured.task_id)["status"] == "running"
+
+    monkeypatch.setattr(HarnessStateStore, "complete_task", real_complete_task)
     retry = run_research_activity(activity_input)
-    assert first == retry
-    assert first["provider_calls"] == 0
-    assert first["research_result"]["status"] == "completed"
+    assert retry == saved
+    assert retry["provider_calls"] == 0
+    assert retry["research_result"]["status"] == "completed"
     assert runner_calls == [((date(2026, 1, 2),), date(2026, 1, 2), True, 0)]
     assert state.get_task(captured.task_id)["status"] == "completed"
+    assert state.get_task(captured.task_id)["result"] == retry
+    assert [event["stage"] for event in state.list_task_events(captured.task_id)] == [
+        "created", "research_inputs_verified", "research_started", "research_persisted", "completed",
+    ]
 
     capture_path = Path(captured.bundle_path)
     good_bytes = capture_path.read_bytes()

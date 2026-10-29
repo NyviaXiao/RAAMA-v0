@@ -35,6 +35,7 @@ from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore
 from adaptive_mas.industrial_rag.parser import (
     ParseError,
     UnsupportedFormat,
+    _parse_bytes,
     normalize_financial_cell,
     annotate_table_continuation_candidates,
     parse_isolated,
@@ -943,6 +944,78 @@ def test_isolated_parser_supports_safe_text_csv_and_rejects_unsupported_or_entit
     blocked_xml = parse_isolated(b"<!DOCTYPE x [<!ENTITY e SYSTEM 'file:///x'>]><x>&e;</x>", "source.xbrl", scratch_root=scratch)
     assert blocked_xml["status"] == "quarantined"
     assert "prohibited DTD/entity" in blocked_xml["error"]
+
+
+def test_docling_image_bridge_preserves_single_page_geometry_and_parser_identity(tmp_path, monkeypatch) -> None:
+    Image = pytest.importorskip("PIL.Image")
+    from pypdf import PdfReader
+
+    from adaptive_mas.industrial_rag import document_ai
+
+    source = io.BytesIO()
+    Image.new("RGBA", (12, 8), (40, 80, 120, 128)).save(source, format="PNG")
+    observed = {}
+
+    def parse_pdf(payload, *, asset_dir, max_pages, timeout_seconds):
+        page = PdfReader(io.BytesIO(payload)).pages[0]
+        observed.update({
+            "asset_dir": asset_dir,
+            "max_pages": max_pages,
+            "timeout_seconds": timeout_seconds,
+            "page_width": float(page.mediabox.width),
+            "page_height": float(page.mediabox.height),
+        })
+        return {
+            "status": "parsed",
+            "parser_name": "docling_rapidocr_tableformer",
+            "parser_version": "docling-test",
+            "pages": [{"page_number": 1, "kind": "pdf_docling"}],
+            "blocks": [{"page_number": 1, "page_kind": "pdf_docling"}],
+            "quality": {"source_page_count": 1},
+        }
+
+    monkeypatch.setattr(document_ai, "parse_pdf_with_docling", parse_pdf)
+    parsed = _parse_bytes(
+        source.getvalue(),
+        "source.png",
+        pdf_backend="docling",
+        docling_artifacts_path=tmp_path / "assets",
+        parser_timeout_seconds=23,
+    )
+
+    assert observed == {
+        "asset_dir": tmp_path / "assets",
+        "max_pages": 1,
+        "timeout_seconds": 23,
+        "page_width": 12.0,
+        "page_height": 8.0,
+    }
+    assert parsed["parser_name"] == "docling_rapidocr_tableformer_image_pdf_bridge"
+    assert parsed["parser_version"].startswith("docling-test+pillow-")
+    assert parsed["pages"][0]["kind"] == "image_docling"
+    assert parsed["blocks"][0]["page_kind"] == "image_docling"
+    assert parsed["quality"]["source_image_size_px"] == [12, 8]
+
+
+def test_docling_image_bridge_rejects_filename_format_mismatch_before_model_load(tmp_path, monkeypatch) -> None:
+    Image = pytest.importorskip("PIL.Image")
+
+    from adaptive_mas.industrial_rag import document_ai
+
+    source = io.BytesIO()
+    Image.new("RGB", (4, 3), "white").save(source, format="JPEG")
+
+    def unexpected_model_call(*_args, **_kwargs):
+        raise AssertionError("format mismatch must be rejected before Docling starts")
+
+    monkeypatch.setattr(document_ai, "parse_pdf_with_docling", unexpected_model_call)
+    with pytest.raises(ParseError, match="filename extension"):
+        _parse_bytes(
+            source.getvalue(),
+            "mislabelled.png",
+            pdf_backend="docling",
+            docling_artifacts_path=tmp_path / "assets",
+        )
 
 
 def test_table_row_groups_keep_headers_cells_and_exact_source_spans_distinct(tmp_path) -> None:

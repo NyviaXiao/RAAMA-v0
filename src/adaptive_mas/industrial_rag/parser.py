@@ -27,6 +27,7 @@ apply_thread_limits()
 
 
 MAX_INPUT_BYTES = 100 * 1024 * 1024
+MAX_IMAGE_PIXELS = 50_000_000
 MAX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
 MAX_PDF_PAGES = 500
 MAX_BLOCK_CHARS = 1200
@@ -41,6 +42,68 @@ class ParseError(RuntimeError):
 
 class UnsupportedFormat(ParseError):
     pass
+
+
+def _parse_image_with_docling(
+    payload: bytes,
+    filename: str,
+    *,
+    docling_artifacts_path: str | Path | None,
+    parser_timeout_seconds: float,
+) -> dict[str, Any]:
+    if docling_artifacts_path is None:
+        raise ParseError("Docling model asset directory is required for image OCR")
+
+    from PIL import Image, ImageOps
+    from adaptive_mas.industrial_rag.document_ai import parse_pdf_with_docling
+
+    expected_format = "PNG" if Path(filename).suffix.lower() == ".png" else "JPEG"
+    with Image.open(io.BytesIO(payload)) as source:
+        if source.format != expected_format:
+            raise ParseError("image bytes do not match the declared filename extension")
+        if getattr(source, "n_frames", 1) != 1:
+            raise ParseError("animated images are unsupported")
+        if source.width * source.height > MAX_IMAGE_PIXELS:
+            raise ParseError("image exceeds the configured 50 megapixel limit")
+        oriented = ImageOps.exif_transpose(source)
+        oriented.load()
+        size = oriented.size
+        rgba = oriented.convert("RGBA")
+        background = Image.new("RGB", size, "white")
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        converted = io.BytesIO()
+        background.save(converted, format="PDF", resolution=72.0)
+
+    pdf_payload = converted.getvalue()
+    if len(pdf_payload) > MAX_INPUT_BYTES:
+        raise ParseError("converted image exceeds the configured 100 MiB parser input limit")
+    parsed = parse_pdf_with_docling(
+        pdf_payload,
+        asset_dir=docling_artifacts_path,
+        max_pages=1,
+        timeout_seconds=parser_timeout_seconds,
+    )
+    if parsed.get("status") != "parsed":
+        return parsed
+
+    from PIL import __version__ as pillow_version
+
+    parsed["parser_name"] = "docling_rapidocr_tableformer_image_pdf_bridge"
+    parsed["parser_version"] = f"{parsed['parser_version']}+pillow-{pillow_version}-pdf72dpi"
+    for page in parsed.get("pages", []):
+        if page.get("kind") == "pdf_docling":
+            page["kind"] = "image_docling"
+    for block in parsed.get("blocks", []):
+        if block.get("page_kind") == "pdf_docling":
+            block["page_kind"] = "image_docling"
+    quality = dict(parsed.get("quality", {}))
+    quality.update({
+        "source_format": expected_format.lower(),
+        "source_image_size_px": list(size),
+        "image_to_pdf_mapping": "pillow-pdf-72dpi; one source pixel maps to one PDF point",
+    })
+    parsed["quality"] = quality
+    return parsed
 
 
 class _TextOnlyHTML(html.parser.HTMLParser):
@@ -506,7 +569,14 @@ def _parse_bytes(
             return {"status": "quarantined", "error_code": "ocr_unavailable", "error": "PDF has no readable text layer; OCR adapter is not configured", "pages": [], "blocks": [], "tables": [], "cells": [], "parser_name": parser_name, "parser_version": parser_version, "parser_confidence": 0.0, "quality": {"source_page_count": source_page_count, "extracted_page_count": 0, "signal": "structural_text_coverage_heuristic_not_accuracy"}}
         parser_confidence = len(pages) / source_page_count if source_page_count else 0.0
     elif suffix in {".png", ".jpg", ".jpeg"}:
-        return {"status": "quarantined", "error_code": "ocr_unavailable", "error": "image-only source requires an installed OCR adapter", "pages": [], "blocks": [], "tables": [], "cells": [], "parser_name": "unavailable", "parser_version": "unavailable"}
+        if pdf_backend != "docling":
+            return {"status": "quarantined", "error_code": "ocr_unavailable", "error": "image-only source requires the local Docling OCR/layout backend", "pages": [], "blocks": [], "tables": [], "cells": [], "parser_name": "unavailable", "parser_version": "unavailable"}
+        return _parse_image_with_docling(
+            payload,
+            filename,
+            docling_artifacts_path=docling_artifacts_path,
+            parser_timeout_seconds=parser_timeout_seconds,
+        )
     elif suffix in {".txt", ".md", ".markdown"}:
         text = _decode(payload)
         pages.append((1, text, "markdown" if suffix != ".txt" else "text"))
