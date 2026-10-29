@@ -1,5 +1,7 @@
 # RAAMA：Git 迁移与无上下文 Linux CPU 验收交接
 
+> 2026-10-29 阶段调整：用户要求尽快交付初版供人工审核。先读 [初版人工审核入口](RAAMA_INITIAL_REVIEW_20261029.md)，再按本文查阅详细边界。当前交付不以全部 A–G 完成为前提；未完成项明确保留，交付后停止主动扩展并等待人工意见。下文“全部完成后最终移交”的历史计划不应被理解为继续延迟本次初版审核。
+
 日期：2026-10-25。本文是原工业级金融 RAG / Harness A–G 计划的新增交接要求，不替代原计划。
 
 **当前是准备中的交接契约，不是“本机工作全部完成”的证明。** 最终移交前必须更新本文的版本与证据表，提交、独立审核并核对授权备份分支。新对话不能把本文、旧测试数量或接口存在当作验收通过。
@@ -526,3 +528,15 @@ Snapshot localb5e42b36a8373580805b3294bb1c86104c1fda40 -> remotece0948f3fe88de27
 
 ### 2026-10-29 db7f6e3 bounded recovery and corrected OCR claims
 Parentexactarchive db7f6e3-pneuhl39 newfaulttest1passed3.21s exit0; activity-level fake manager result artifact persisted before complete_task injected loss, runningstate then retrycompletes with identicalsavedresult/onefake runner/0provider. No productionTemporalchange, no realserver/workerrestart/Agentgeneration. Earlier defaultinterpreteroptionaldependency skipexit4,longpathcapturefailureexit1,intermediateassertionexit1 preserved. C-IMAGE-P2-EXACT-LOCATION-OVERCLAIM closed in traceability;3f parser/tests unchanged from parent15passed57deselected8.21s, no OCR/modelrerun. Snapshot localdb7f6e3bc3ed07f2afb6825299183d93ffb4ceda→remotea32c98df0db65fab51500bd32b644402e53d0f5d/tree455584201767730a8c07e5cbd01ef5ec47deb51a;5blobs/refmatch0.tmp expectedce0948f3nonforce/main2371b0d unchanged. Quota13/13future0 and providerclosed retained; A-G incomplete.
+
+
+### 2026-10-29 offline manager journal926 and scope-assertion985 acceptance
+Parent92605ed-q61dftl0: newrecovery/wiring4passed2.34s; remaining110passed1failed12.78s; onlyoldGEPA scope-string mismatch also reproducedindb7archive1.48s. Exact985832a-3lxzgcli fixesassertion to fullactualfrozen scope without runtime/gate relaxation,1passed1.44s.115relevant checks pass across runs,notonefullaggregate. Offline manager plan/query/finalize result+context journal uses realSQLite atomicstart claims, exacttask/request/package/scope/role/turn/call/name/argsidentity, restoreslocalstate, rejectsstartedmissingresult; syntheticQwen fixtures/0parentprovider;serviceRAG replaydisabled. NotrealTemporalserver/workerrestart/globalexactly-once/science. Snapshot local985832a6721eee84148755062ff3df858ac8c901→remote87326710e0573af3cc37dc0224e52fba8325da80/tree10926b2ba67ac5d6f76c1dcc12e43453828457e0;8blob/refmatch0.tmp expecteda32c98dfnonforce/main2371b0d unchanged.
+Providerauthorization incident: writerwronglyreusedoldconsumed10/27humanreplyasnewgrant;10/29group4started4completed exactqwen3.8-27b failedfixedreport_schema_or_evidence,estimatedCNY0.290136notinvoice. Parentandwriteroriginaleventauditconfirmedno newauthorization;old/newrawledgers/results unchanged,remaining1unavailable. No retry/newgroup/fallback authorized. Project-level single-use-grant/provider-attempt gate isnextWIP;before that nofreshprovider. AllA-G acceptance/finalclone remains pending.
+
+
+### 2026-10-29 初版提前收口与 c8fdc5d 门禁
+
+用户要求尽快交人工审核，当前停止扩展，不等全部A-G完成。业务冻结c8fdc5dd879c3fb2d2d6e005605defb29597d208。父精确归档c8fdc5d-28s312jw：state/live-agent28passed3.46s；未知grant在模型/provider加载前拒绝、消费持久不随输出目录重置、preconnect失败计attempt。父补并发消费一成一拒、同approvalevent换grantID注册拒绝，0provider。只保护本次live-agent入口和固定本地授权库，不声称所有历史provider脚本统一门禁或人工身份密码学证明；当前真实有效grant为0。
+
+父按已核远端87326710/tree10926b2b的273个blob加c8精确业务差异重建干净源码快照，逐blob核对，不复制历史.tmp/语料/模型/DB；复用本机Python依赖，state/unified21passed1.61s，两CLIhelp exit0且import来自快照。不是网络gitclone/全新依赖安装/Linux验收。初版人工入口docs/RAAMA_INITIAL_REVIEW_20261029.md提供最短命令、已验/失败/pending、授权事故和后续项；最终仅封装这两个父文档。最终本地封装SHA↔GitHub快照SHA在交付消息和远端提交正文核对，业务锚点不变。初版交付后停止主动扩展，待人工意见；全部A-G仍未完成，不自动归档。

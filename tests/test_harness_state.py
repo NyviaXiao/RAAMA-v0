@@ -1,20 +1,158 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
+import sqlite3
 from threading import Barrier
 from concurrent.futures import ThreadPoolExecutor
+from urllib.error import URLError
 
 import pytest
 
 from adaptive_mas.harness_state import (
     HarnessStateStore,
+    PROVIDER_RUN_GRANT_SCHEMA,
+    PROVIDER_RUN_GRANT_SCOPE_FIELDS,
     StateBudgetExhausted,
     StateConflict,
     UnknownOutboundOutcome,
 )
 from adaptive_mas.agents.harness import CallBudget, QwenClient
 import adaptive_mas.agents.harness as harness_module
+
+
+def _synthetic_provider_grant(grant_id: str = "synthetic-grant") -> dict[str, object]:
+    scope = {
+        "project_id": "synthetic/project",
+        "run_id": "synthetic-run",
+        "model": "synthetic-model",
+        "endpoint_hostname": "provider.invalid",
+        "source_run_id": "synthetic-source",
+        "source_run_identity_sha256": "1" * 64,
+        "source_manifest_sha256": "2" * 64,
+        "source_retrieval_trace_sha256": "3" * 64,
+        "run_bundle_sha256": "4" * 64,
+        "case_id": "synthetic-case",
+        "case_identity_sha256": "5" * 64,
+        "question_sha256": hashlib.sha256(b"synthetic question").hexdigest(),
+    }
+    assert set(scope) == PROVIDER_RUN_GRANT_SCOPE_FIELDS
+    return {
+        "schema_version": PROVIDER_RUN_GRANT_SCHEMA,
+        "grant_id": grant_id,
+        "approval_event_id": f"synthetic-approval:{grant_id}",
+        "max_provider_calls": 5,
+        **scope,
+    }
+
+
+def test_provider_run_grant_is_exact_scope_single_use_and_persistent(tmp_path):
+    db_path = tmp_path / "authorization.sqlite3"
+    store = HarnessStateStore(db_path)
+    grant = _synthetic_provider_grant()
+    scope = {key: grant[key] for key in PROVIDER_RUN_GRANT_SCOPE_FIELDS}
+    registered = store.register_provider_run_grant(grant)
+    assert registered["status"] == "granted"
+
+    wrong_run_scope = {**scope, "run_id": "different-run"}
+    with pytest.raises(PermissionError, match="exact run scope"):
+        store.consume_provider_run_grant("synthetic-grant", wrong_run_scope, task_id="task")
+    with pytest.raises(ValueError, match="field set"):
+        store.consume_provider_run_grant(
+            "synthetic-grant", {**scope, "output_root": str(tmp_path)}, task_id="task",
+        )
+
+    consumed = store.consume_provider_run_grant(
+        "synthetic-grant", scope, task_id="provider-run-synthetic",
+    )
+    assert consumed["status"] == "consumed"
+    assert consumed["max_provider_calls"] == 5
+    reopened = HarnessStateStore(db_path)
+    with pytest.raises(StateConflict, match="already been consumed"):
+        reopened.consume_provider_run_grant(
+            "synthetic-grant", scope, task_id="provider-run-synthetic-new-output-root",
+        )
+    with pytest.raises(PermissionError, match="exact run scope"):
+        reopened.consume_provider_run_grant(
+            "synthetic-grant", wrong_run_scope, task_id="provider-run-different-run",
+        )
+
+
+def test_grant_mode_preconnect_failures_are_durably_charged_to_the_attempt_cap(tmp_path, monkeypatch):
+    store = HarnessStateStore(tmp_path / "grant-runtime.sqlite3")
+    store.open_task("grant-task", "grant-task", {"fixture": "synthetic"}, max_provider_calls=5)
+    calls = []
+
+    def fail_before_connect(*_args, **_kwargs):
+        calls.append(True)
+        denied = PermissionError("synthetic local socket denial")
+        denied.winerror = 10013
+        raise URLError(denied)
+
+    monkeypatch.setattr(harness_module, "urlopen", fail_before_connect)
+    client = QwenClient("https://provider.invalid/v1", "synthetic-key", "synthetic-model")
+    budget = CallBudget(
+        max_calls=5,
+        ledger_path=tmp_path / "grant-calls.jsonl",
+        response_cache_dir=tmp_path / "grant-response-cache",
+        state_store=store,
+        task_id="grant-task",
+        budget_scope_id="provider-run-grant:synthetic-grant",
+        task_provider_call_limit=5,
+        retain_preconnect_reservation=True,
+    )
+    budget.limit_next_task(10)
+
+    for index in range(5):
+        with pytest.raises(URLError):
+            client.complete(
+                [{"role": "user", "content": f"synthetic request {index}"}],
+                budget=budget,
+                role="synthetic",
+            )
+    assert len(calls) == 5
+    assert budget.provider_call_count == 5
+    assert all(row["status"] == "failed_before_connect" for row in budget.calls)
+
+    with pytest.raises(RuntimeError, match="shared model call budget exhausted"):
+        client.complete(
+            [{"role": "user", "content": "sixth synthetic request"}],
+            budget=budget,
+            role="synthetic",
+        )
+    assert len(calls) == 5
+
+    # A fresh output ledger cannot reset the durable project-level attempt count.
+    resumed_budget = CallBudget(
+        max_calls=5,
+        ledger_path=tmp_path / "different-output-root" / "grant-calls.jsonl",
+        response_cache_dir=tmp_path / "different-output-root" / "grant-response-cache",
+        state_store=store,
+        task_id="grant-task",
+        budget_scope_id="provider-run-grant:synthetic-grant",
+        task_provider_call_limit=5,
+        retain_preconnect_reservation=True,
+    )
+    resumed_budget.limit_next_task(10)
+    with pytest.raises(StateBudgetExhausted, match="task provider-call budget exhausted"):
+        client.complete(
+            [{"role": "user", "content": "new output root request"}],
+            budget=resumed_budget,
+            role="synthetic",
+        )
+    assert len(calls) == 5
+    with sqlite3.connect(store.path) as connection:
+        task_count = connection.execute(
+            "SELECT provider_calls_used FROM tasks WHERE task_id='grant-task'",
+        ).fetchone()[0]
+        scope_count = connection.execute(
+            "SELECT calls_used FROM budget_scopes WHERE scope_id='provider-run-grant:synthetic-grant'",
+        ).fetchone()[0]
+        attempt_count = connection.execute(
+            "SELECT COUNT(*) FROM provider_attempts WHERE task_id='grant-task' AND status='failed_before_connect'",
+        ).fetchone()[0]
+    assert (task_count, scope_count, attempt_count) == (5, 5, 5)
 
 
 def test_task_request_artifact_feedback_and_execution_survive_reopen_idempotently(tmp_path):

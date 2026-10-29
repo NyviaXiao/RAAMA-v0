@@ -4,12 +4,57 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Mapping
+
+
+PROVIDER_RUN_GRANT_SCHEMA = "raama.provider-run-grant.v1"
+PROVIDER_RUN_GRANT_MAX_CALLS = 5
+PROVIDER_RUN_GRANT_SCOPE_FIELDS = frozenset({
+    "project_id",
+    "run_id",
+    "model",
+    "endpoint_hostname",
+    "source_run_id",
+    "source_run_identity_sha256",
+    "source_manifest_sha256",
+    "source_retrieval_trace_sha256",
+    "run_bundle_sha256",
+    "case_id",
+    "case_identity_sha256",
+    "question_sha256",
+})
+
+
+def _provider_run_grant(value: Mapping[str, object]) -> dict[str, object]:
+    required = {
+        "schema_version", "grant_id", "approval_event_id", "max_provider_calls",
+        *PROVIDER_RUN_GRANT_SCOPE_FIELDS,
+    }
+    grant = dict(value)
+    if set(grant) != required or grant.get("schema_version") != PROVIDER_RUN_GRANT_SCHEMA:
+        raise ValueError("provider run grant has an unsupported schema or field set")
+    grant_id = grant.get("grant_id")
+    if not isinstance(grant_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", grant_id):
+        raise ValueError("provider run grant ID is not a safe immutable identifier")
+    for key in ("approval_event_id", *PROVIDER_RUN_GRANT_SCOPE_FIELDS):
+        if not isinstance(grant.get(key), str) or not str(grant[key]).strip():
+            raise ValueError(f"provider run grant {key} must be a nonempty string")
+    for key in (
+        "source_run_identity_sha256", "source_manifest_sha256", "source_retrieval_trace_sha256", "run_bundle_sha256",
+        "case_identity_sha256", "question_sha256",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(grant[key])):
+            raise ValueError(f"provider run grant {key} must be a lowercase SHA-256")
+    maximum = grant.get("max_provider_calls")
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= PROVIDER_RUN_GRANT_MAX_CALLS:
+        raise ValueError(f"provider run grant max_provider_calls must be within 1..{PROVIDER_RUN_GRANT_MAX_CALLS}")
+    return grant
 
 
 class StateConflict(RuntimeError):
@@ -122,6 +167,17 @@ class HarnessStateStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(task_id, execution_id)
                 );
+                CREATE TABLE IF NOT EXISTS provider_run_grants (
+                    grant_id TEXT PRIMARY KEY,
+                    approval_event_id TEXT NOT NULL UNIQUE,
+                    scope_json TEXT NOT NULL,
+                    scope_hash TEXT NOT NULL,
+                    max_provider_calls INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    consumed_task_id TEXT,
+                    consumed_at TEXT,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             request_columns = {
@@ -216,6 +272,83 @@ class HarnessStateStore:
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
             return self._task_dict(row)
+
+    def register_provider_run_grant(self, value: Mapping[str, object]) -> dict[str, object]:
+        """Persist a new single-use provider grant; this never creates grants implicitly."""
+        grant = _provider_run_grant(value)
+        scope = {key: grant[key] for key in PROVIDER_RUN_GRANT_SCOPE_FIELDS}
+        scope_json = _json(scope)
+        scope_hash = hashlib.sha256(scope_json.encode("utf-8")).hexdigest()
+        now = _now()
+        with self._connection() as connection:
+            self._begin(connection)
+            connection.execute(
+                """INSERT INTO provider_run_grants(
+                    grant_id,approval_event_id,scope_json,scope_hash,max_provider_calls,
+                    status,created_at
+                ) VALUES(?,?,?,?,?,'granted',?)""",
+                (grant["grant_id"], grant["approval_event_id"], scope_json, scope_hash,
+                 grant["max_provider_calls"], now),
+            )
+            connection.commit()
+        return {**grant, "scope_sha256": scope_hash, "status": "granted"}
+
+    def consume_provider_run_grant(
+        self,
+        grant_id: str,
+        expected_scope: Mapping[str, object],
+        *,
+        task_id: str,
+    ) -> dict[str, object]:
+        """Atomically consume one exact-scope grant before model loading or network access."""
+        if not isinstance(grant_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", grant_id
+        ):
+            raise PermissionError("a valid explicit provider authorization grant ID is required")
+        if not task_id.strip():
+            raise ValueError("task_id must be nonempty")
+        scope = dict(expected_scope)
+        if set(scope) != PROVIDER_RUN_GRANT_SCOPE_FIELDS:
+            raise ValueError("provider authorization scope has an unsupported field set")
+        for key in PROVIDER_RUN_GRANT_SCOPE_FIELDS:
+            if not isinstance(scope.get(key), str) or not str(scope[key]).strip():
+                raise ValueError(f"provider authorization scope {key} must be a nonempty string")
+        for key in (
+            "source_run_identity_sha256", "source_manifest_sha256", "source_retrieval_trace_sha256",
+            "run_bundle_sha256", "case_identity_sha256", "question_sha256",
+        ):
+            if not re.fullmatch(r"[0-9a-f]{64}", str(scope[key])):
+                raise ValueError(f"provider authorization scope {key} must be a lowercase SHA-256")
+        scope_json = _json(scope)
+        scope_hash = hashlib.sha256(scope_json.encode("utf-8")).hexdigest()
+        with self._connection() as connection:
+            self._begin(connection)
+            row = connection.execute(
+                "SELECT * FROM provider_run_grants WHERE grant_id=?", (grant_id,)
+            ).fetchone()
+            if row is None:
+                raise PermissionError("provider authorization grant is missing or unknown")
+            if row["scope_hash"] != scope_hash or row["scope_json"] != scope_json:
+                raise PermissionError("provider authorization grant does not match this exact run scope")
+            if row["status"] != "granted":
+                raise StateConflict("provider authorization grant has already been consumed")
+            now = _now()
+            updated = connection.execute(
+                """UPDATE provider_run_grants SET status='consumed',consumed_task_id=?,consumed_at=?
+                   WHERE grant_id=? AND status='granted'""",
+                (task_id, now, grant_id),
+            )
+            if updated.rowcount != 1:
+                raise StateConflict("provider authorization grant was consumed concurrently")
+            connection.commit()
+        return {
+            "grant_id": grant_id,
+            "approval_event_id": str(row["approval_event_id"]),
+            "max_provider_calls": int(row["max_provider_calls"]),
+            "scope": scope,
+            "scope_sha256": scope_hash,
+            "status": "consumed",
+        }
 
     def checkpoint_task(
         self, task_id: str, stage: str, payload: Mapping[str, object] | None = None,
@@ -684,9 +817,10 @@ class HarnessStateStore:
             connection.commit()
 
     def fail_provider_request_before_connect(
-        self, task_id: str, request_hash: str, *, scope_id: str, attempt_id: str | None = None
+        self, task_id: str, request_hash: str, *, scope_id: str, attempt_id: str | None = None,
+        preserve_reservation: bool = False,
     ) -> None:
-        """Release a reservation only when the caller proves no socket connected."""
+        """Resolve a proven pre-connect failure, optionally retaining its call reservation."""
         now = _now()
         with self._connection() as connection:
             self._begin(connection)
@@ -710,13 +844,14 @@ class HarnessStateStore:
                     "UPDATE provider_attempts SET status='failed_before_connect',updated_at=? WHERE attempt_id=? AND task_id=? AND request_hash=?",
                     (now, attempt_id, task_id, request_hash),
                 )
-            connection.execute(
-                "UPDATE tasks SET provider_calls_used=MAX(provider_calls_used-1,0),updated_at=? WHERE task_id=?",
-                (now, task_id),
-            )
-            connection.execute(
-                "UPDATE budget_scopes SET calls_used=MAX(calls_used-1,0) WHERE scope_id=?", (scope_id,)
-            )
+            if not preserve_reservation:
+                connection.execute(
+                    "UPDATE tasks SET provider_calls_used=MAX(provider_calls_used-1,0),updated_at=? WHERE task_id=?",
+                    (now, task_id),
+                )
+                connection.execute(
+                    "UPDATE budget_scopes SET calls_used=MAX(calls_used-1,0) WHERE scope_id=?", (scope_id,)
+                )
             connection.commit()
 
     def fail_provider_request_quota_rejected(

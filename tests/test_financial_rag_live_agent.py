@@ -4,8 +4,10 @@ import io
 import json
 import hashlib
 import shutil
+import sys
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
@@ -436,6 +438,43 @@ def test_versioned_run_bundle_requires_exact_caller_supplied_bundle_hash(tmp_pat
 
     with pytest.raises(capture.RunIdentityError, match="caller-supplied expected hash"):
         live_agent._load_run_bundle(bundle_path, expected_bundle_sha256)
+
+
+def test_live_agent_unknown_grant_fails_before_local_models_or_provider_load(tmp_path, monkeypatch):
+    envelope, progress, spec, _store = _synthetic_bound_case(tmp_path, monkeypatch)
+    source_run_dir = tmp_path / "authorization-source"
+    source_run_dir.mkdir()
+    (source_run_dir / "retrieval_trace.jsonl").write_text("synthetic trace\n", encoding="utf-8")
+    bundle = SimpleNamespace(
+        source_run_id=str(envelope["run_identity"]["run_id"]),
+        source_manifest_sha256=str(envelope["run_identity"]["source_manifest_sha256"]),
+        bundle_sha256="6" * 64,
+        source_run_dir=source_run_dir,
+        case_id=str(spec["case_id"]),
+    )
+    monkeypatch.setattr(live_agent, "_default_run_bundle", lambda: bundle)
+    monkeypatch.setattr(
+        live_agent, "_verify_capture_run",
+        lambda _bundle: (envelope, {}, spec, progress),
+    )
+    monkeypatch.setattr(live_agent, "AUTHORIZATION_STATE_PATH", tmp_path / "authorization.sqlite3")
+    monkeypatch.setattr(live_agent, "LIVE_OUTPUT_ROOT", tmp_path / "outputs")
+    monkeypatch.setattr(
+        live_agent, "_load_service",
+        lambda *_args, **_kwargs: pytest.fail("local Qwen model loader ran without a grant"),
+    )
+    monkeypatch.setattr(
+        live_agent, "_load_provider_client",
+        lambda *_args, **_kwargs: pytest.fail("provider client loaded without a grant"),
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run_financial_rag_live_agent.py", "--authorization-grant-id", "unknown-grant"],
+    )
+
+    with pytest.raises(PermissionError, match="missing or unknown"):
+        live_agent.main()
+    assert not (tmp_path / "outputs").exists()
 
 
 @pytest.mark.parametrize(

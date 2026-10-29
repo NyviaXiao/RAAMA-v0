@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -34,6 +35,7 @@ from adaptive_mas.industrial_rag.qwen_models import (  # noqa: E402
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService  # noqa: E402
 from adaptive_mas.industrial_rag.object_store import LocalContentAddressedStore, ObjectStoreError  # noqa: E402
 from adaptive_mas.industrial_rag.repository import IndustrialRagStore  # noqa: E402
+from adaptive_mas.harness_state import HarnessStateStore  # noqa: E402
 from scripts import run_financial_rag_current_capture as capture  # noqa: E402
 
 
@@ -43,6 +45,7 @@ SOURCE_RUNTIME_MODEL_IDENTITY_SHA256 = "1a9250a6bbdbed5140e6c99868c2954bbf47d2b5
 SOURCE_CASE_IDENTITY_SHA256 = "b0e3da8fbbe19b9a90eca7969b0b18d0bb6cb46db553edd2f77778dcc65a9899"
 SOURCE_RUN_DIR = ROOT / ".tmp" / "industrial_rag_current_capture_20261026" / SOURCE_RUN_ID
 LIVE_OUTPUT_ROOT = ROOT / ".tmp" / "industrial_rag_live_agent_20261027"
+AUTHORIZATION_STATE_PATH = ROOT / ".tmp" / "industrial_rag_supervision_20261025" / "provider_authorization.sqlite3"
 MAX_PROVIDER_CALLS = 5
 MAX_LOGICAL_TURNS = 5
 RUN_BUNDLE_SCHEMA = "raama.financial-rag.live-agent-run-bundle.v1"
@@ -465,6 +468,41 @@ def _verify_capture_run(
     return envelope, baseline_progress, dict(expected_case), case_identity
 
 
+def _provider_run_scope(
+    *,
+    run_id: str,
+    model: str,
+    bundle: LiveAgentRunBundle,
+    source_envelope: dict[str, Any],
+    case_identity: dict[str, object],
+    endpoint: str,
+) -> dict[str, str]:
+    endpoint_hostname = urlsplit(endpoint).hostname
+    if not endpoint_hostname:
+        raise ValueError("configured provider endpoint must include a hostname")
+    source_identity = source_envelope["run_identity"]
+    question = source_identity.get("query")
+    if not isinstance(question, str) or not question.strip():
+        raise capture.RunIdentityError("provider authorization requires the exact verified source question")
+    trace_path = bundle.source_run_dir / "retrieval_trace.jsonl"
+    if not trace_path.is_file():
+        raise capture.RunIdentityError("provider authorization requires the verified source retrieval trace")
+    return {
+        "project_id": "RAAMA/adaptive-mas",
+        "run_id": run_id,
+        "model": model,
+        "endpoint_hostname": endpoint_hostname.lower(),
+        "source_run_id": bundle.source_run_id,
+        "source_run_identity_sha256": str(source_envelope["run_identity_sha256"]),
+        "source_manifest_sha256": bundle.source_manifest_sha256,
+        "source_retrieval_trace_sha256": hashlib.sha256(trace_path.read_bytes()).hexdigest(),
+        "run_bundle_sha256": bundle.bundle_sha256,
+        "case_id": bundle.case_id,
+        "case_identity_sha256": str(case_identity["case_identity_sha256"]),
+        "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
+    }
+
+
 def _load_service(
     source_envelope: dict[str, Any],
     bundle: LiveAgentRunBundle | None = None,
@@ -519,6 +557,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Exact configured Qwen model identifier")
+    parser.add_argument(
+        "--authorization-grant-id", required=True,
+        help="single-use grant previously registered for this exact source, question, model, and run",
+    )
     parser.add_argument("--run-bundle", type=Path, help="Versioned identity-locked JSON bundle for a source capture")
     parser.add_argument("--expected-bundle-sha256", help="Out-of-band SHA-256 pin for --run-bundle raw bytes")
     parser.add_argument("--output-root", type=Path, help="Parent directory for a new, non-overwriting live-agent run")
@@ -543,6 +585,38 @@ def main() -> None:
         raise ValueError("this approved run requires the exact model identifier qwen3.8-27b")
 
     source_envelope, _baseline_progress, spec, case_identity = _verify_capture_run(bundle)
+    configured_endpoint = os.environ.get("POPAGENT_LLM_URL", agent_harness.DEFAULT_ENDPOINT)
+    authorization_scope = _provider_run_scope(
+        run_id=run_id,
+        model=args.model,
+        bundle=bundle,
+        source_envelope=source_envelope,
+        case_identity=case_identity,
+        endpoint=configured_endpoint,
+    )
+    authorization_store = HarnessStateStore(AUTHORIZATION_STATE_PATH)
+    authorization_task_id = "provider-run-" + hashlib.sha256(
+        args.authorization_grant_id.encode("utf-8")
+    ).hexdigest()
+    consumed_grant = authorization_store.consume_provider_run_grant(
+        args.authorization_grant_id,
+        authorization_scope,
+        task_id=authorization_task_id,
+    )
+    grant_max_calls = int(consumed_grant["max_provider_calls"])
+    if not 1 <= grant_max_calls <= MAX_PROVIDER_CALLS:
+        raise capture.RunIdentityError("consumed provider grant exceeds the live-agent five-call cap")
+    authorization_store.open_task(
+        authorization_task_id,
+        f"provider-run-grant:{args.authorization_grant_id}",
+        {
+            "authorization_grant_id": args.authorization_grant_id,
+            "approval_event_id": consumed_grant["approval_event_id"],
+            "scope_sha256": consumed_grant["scope_sha256"],
+            "scope": authorization_scope,
+        },
+        max_provider_calls=grant_max_calls,
+    )
     dense_cache_source_path = capture._resolve_dense_cache_path(
         run_dir=bundle.source_run_dir,
         explicit_path=args.dense_cache or bundle.dense_cache_path,
@@ -566,6 +640,8 @@ def main() -> None:
     permission_revision, continuation_revision = _verify_runtime_access_revisions(store, case_identity)
     model_selected_at = datetime.now().astimezone().isoformat()
     provider_client = _load_provider_client(args.model)
+    if urlsplit(provider_client.endpoint).hostname != authorization_scope["endpoint_hostname"]:
+        raise capture.RunIdentityError("configured provider endpoint changed after authorization was consumed")
     runtime_identity_sha256 = capture._canonical_hash(runtime_identity)
     source_run_identity = source_envelope["run_identity"]
     implementation_hashes = _implementation_hashes()
@@ -590,7 +666,14 @@ def main() -> None:
             "previous_preview_quota_status": "human-reported exhausted; not retried",
         },
         "fallback_policy": "disabled; preserve quota or availability failures",
-        "max_provider_calls": MAX_PROVIDER_CALLS,
+        "authorization": {
+            "grant_id": args.authorization_grant_id,
+            "approval_event_id": consumed_grant["approval_event_id"],
+            "scope_sha256": consumed_grant["scope_sha256"],
+            "max_provider_calls": grant_max_calls,
+            "consumed": True,
+        },
+        "max_provider_calls": grant_max_calls,
         "max_logical_turns": MAX_LOGICAL_TURNS,
         "implementation_sha256": implementation_hashes,
     }
@@ -604,11 +687,16 @@ def main() -> None:
         raise capture.RunIdentityError("configured provider model changed after live identity was bound")
     client = provider_client
     budget = CallBudget(
-        max_calls=MAX_PROVIDER_CALLS,
+        max_calls=grant_max_calls,
         ledger_path=output_dir / "provider_request_ledger.jsonl",
         response_cache_dir=output_dir / "provider_response_cache",
         request_archive_dir=output_dir / "provider_request_archive",
         package_identity_sha256=live_identity_sha256,
+        state_store=authorization_store,
+        task_id=authorization_task_id,
+        budget_scope_id=f"provider-run-grant:{args.authorization_grant_id}",
+        task_provider_call_limit=grant_max_calls,
+        retain_preconnect_reservation=True,
     )
     budget.limit_next_task(MAX_LOGICAL_TURNS)
 

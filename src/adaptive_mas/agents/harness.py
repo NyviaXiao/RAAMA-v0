@@ -116,6 +116,7 @@ class CallBudget:
     budget_scope_id: str | None = None
     task_provider_call_limit: int | None = None
     imported_scope_calls: int = 0
+    retain_preconnect_reservation: bool = False
     package_identity_sha256: str | None = None
     package_identity_manifest: dict[str, object] | None = None
     request_archive_dir: Path | None = None
@@ -243,7 +244,10 @@ class CallBudget:
 
     @property
     def provider_call_count(self) -> int:
-        return sum(row.get("status") in {"started", "completed", "quota_rejected"} for row in self.calls)
+        counted_statuses = {"started", "completed", "quota_rejected"}
+        if self.retain_preconnect_reservation:
+            counted_statuses.add("failed_before_connect")
+        return sum(row.get("status") in counted_statuses for row in self.calls)
 
     @property
     def remaining_provider_calls(self) -> int:
@@ -685,6 +689,7 @@ class QwenClient:
                         request_sha256,
                         scope_id=str(budget.budget_scope_id),
                         attempt_id=durable_attempt_id,
+                        preserve_reservation=budget.retain_preconnect_reservation,
                     )
             raise
         elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
