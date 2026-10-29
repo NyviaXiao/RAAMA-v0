@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import adaptive_mas.agents.harness as harness_module
 from gepa.optimize_anything import _build_reflection_prompt_template
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
@@ -16,6 +17,7 @@ from adaptive_mas.agents.harness import (
     FIXED_RESEARCH_POLICY,
     InvalidResearchOutput,
     InvalidToolInput,
+    ToolResultReplayHooks,
     SUBMIT_REPORT,
     _accept_report,
     _calculation_operand,
@@ -53,6 +55,7 @@ from adaptive_mas.harness_evolution import (
     run_gepa_evolution,
 )
 from adaptive_mas.data.research import MembershipSnapshot, ResearchData
+from adaptive_mas.harness_state import HarnessStateStore, StateConflict
 from adaptive_mas.industrial_rag.models import (
     Block,
     CorpusReleaseSpec,
@@ -399,7 +402,9 @@ def test_gepa_run_freezes_case_manifest_compares_actions_and_rejects_manifest_dr
         and ablation_payload["rows"][module_id - 1]["status"] == "planned_sensitivity_not_executed"
         for module_id in (15, 16)
     )
-    assert "indexed row-group records stay fixed" in ablation_payload["rows"][2]["runtime_control"]["scope"]
+    assert ablation_payload["rows"][2]["runtime_control"]["scope"] == (
+        "retrieval-time inclusion of existing semantic row-group candidates; indexed records stay fixed"
+    )
     assert "parser normalization" in ablation_payload["rows"][13]["runtime_control"]["scope"]
     assert ablation_payload["execution_status"].startswith("No module intervention or parameter sensitivity was executed")
     assert ablation_payload["rows"][16]["mode"] == "immutable_safety_policy"
@@ -2013,6 +2018,159 @@ def test_tool_agent_reserves_a_final_validation_correction_turn() -> None:
     assert "leave the derived observation to the runtime" in client.system_prompts[0]
     retry = next(message for message in result["tool_trace"] if message.get("status") == "correctable_rejection")
     assert retry["result"]["error_category"] == "missing_calculation_evidence"
+
+
+def test_task_backed_tool_agent_reuses_completed_tool_result_after_retry(tmp_path) -> None:
+    store = HarnessStateStore(tmp_path / "tool-recovery.sqlite3")
+    store.open_task("tool-recovery-task", "tool-recovery-key", {"operation": "research"}, max_provider_calls=0)
+    budget = CallBudget(
+        max_calls=10,
+        state_store=store,
+        task_id="tool-recovery-task",
+        budget_scope_id="tool-recovery-run-1",
+        package_identity_sha256="a" * 64,
+        persistent_tool_names=frozenset({"query_specialist"}),
+    )
+    query_calls = 0
+    submit_calls = 0
+    manager_state = {"query_count": 0, "reports": []}
+
+    def query_specialist(_arguments):
+        nonlocal query_calls
+        query_calls += 1
+        manager_state["query_count"] += 1
+        manager_state["reports"].append({"evidence_id": "public-evidence-1"})
+        return {"status": "completed", "findings": [{"evidence_id": "public-evidence-1"}]}
+
+    def capture_manager_state():
+        return json.loads(json.dumps(manager_state))
+
+    def restore_manager_state(context):
+        manager_state.clear()
+        manager_state.update(context)
+
+    def submit_report(_arguments):
+        nonlocal submit_calls
+        submit_calls += 1
+        return {
+            "accepted": True,
+            "accepted_report": {"summary": "Recovered report.", "findings": [], "unresolved_items": []},
+        }
+
+    def response(call_id, name, arguments):
+        return {"choices": [{"message": {"tool_calls": [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    class InterruptedClient:
+        model = "fixture-only"
+
+        def __init__(self, first_arguments, *, interrupt_second_call=False):
+            self.calls = 0
+            self.first_arguments = first_arguments
+            self.interrupt_second_call = interrupt_second_call
+
+        def complete(self, messages, tools, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return response("query-call-1", "query_specialist", self.first_arguments)
+            if self.interrupt_second_call and self.calls == 2:
+                raise RuntimeError("injected worker interruption after tool result persistence")
+            return response("submit-call-2", "submit_report", {
+                "summary": "Recovered report.", "findings": [], "unresolved_items": [],
+            })
+
+    tools = [
+        {"type": "function", "function": {"name": "query_specialist", "parameters": {"type": "object", "properties": {}}}},
+        SUBMIT_REPORT,
+    ]
+    handlers = {"query_specialist": query_specialist, "submit_report": submit_report}
+    common = {
+        "role_id": "research_manager",
+        "system_prompt": "Fixture prompt.",
+        "task": {"question": "Use the evidence."},
+        "tools": tools,
+        "handlers": handlers,
+        "budget": budget,
+        "max_turns": 3,
+        "tool_result_replay_hooks": {
+            "query_specialist": ToolResultReplayHooks(capture_manager_state, restore_manager_state),
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="after tool result persistence"):
+        _run_tool_agent(**common, client=InterruptedClient({}, interrupt_second_call=True))
+    assert query_calls == 1
+    assert manager_state["query_count"] == 1
+    events_after_interruption = store.list_task_events("tool-recovery-task")
+    assert [event["stage"] for event in events_after_interruption] == [
+        "created", "agent_tool_started", "agent_tool_persisted",
+    ]
+
+    manager_state.clear()
+    result = _run_tool_agent(**common, client=InterruptedClient({}))
+    assert result["status"] == "completed"
+    assert result["report"]["summary"] == "Recovered report."
+    assert query_calls == 1
+    assert manager_state == {"query_count": 1, "reports": [{"evidence_id": "public-evidence-1"}]}
+    assert submit_calls == 1
+    assert [event["stage"] for event in store.list_task_events("tool-recovery-task")].count("agent_tool_replayed") == 1
+    with pytest.raises(ValueError, match="service-backed evidence runs"):
+        harness_module.run_research_harness(
+            None, date(2026, 1, 2), None, {}, None, budget,
+            industrial_rag_service=object(),
+        )
+
+    with pytest.raises(StateConflict, match="persisted agent tool result"):
+        _run_tool_agent(**common, client=InterruptedClient({"query": "changed"}))
+    assert query_calls == 1
+
+    fresh_package_budget = CallBudget(
+        max_calls=10,
+        state_store=store,
+        task_id="tool-recovery-task",
+        budget_scope_id="tool-recovery-run-1",
+        package_identity_sha256="b" * 64,
+        persistent_tool_names=frozenset({"query_specialist"}),
+    )
+    manager_state.clear()
+    manager_state.update({"query_count": 0, "reports": []})
+    fresh_package_result = _run_tool_agent(
+        **{**common, "budget": fresh_package_budget},
+        client=InterruptedClient({}),
+    )
+    assert fresh_package_result["status"] == "completed"
+    assert query_calls == 2
+
+    uncertain_store = HarnessStateStore(tmp_path / "tool-recovery-uncertain.sqlite3")
+    uncertain_store.open_task(
+        "uncertain-tool-task", "uncertain-tool-key", {"operation": "research"}, max_provider_calls=0,
+    )
+    uncertain_budget = CallBudget(
+        max_calls=10,
+        state_store=uncertain_store,
+        task_id="uncertain-tool-task",
+        budget_scope_id="uncertain-tool-run",
+        package_identity_sha256="c" * 64,
+        persistent_tool_names=frozenset({"query_specialist"}),
+    )
+    uncertain_calls = 0
+
+    def uncertain_lookup(_arguments):
+        nonlocal uncertain_calls
+        uncertain_calls += 1
+        raise RuntimeError("handler outcome is uncertain")
+
+    uncertain_arguments = {**common, "budget": uncertain_budget, "handlers": {
+        "query_specialist": uncertain_lookup, "submit_report": submit_report,
+    }}
+    with pytest.raises(RuntimeError, match="outcome is uncertain"):
+        _run_tool_agent(**uncertain_arguments, client=InterruptedClient({}))
+    with pytest.raises(StateConflict, match="no persisted result"):
+        _run_tool_agent(**uncertain_arguments, client=InterruptedClient({}))
+    assert uncertain_calls == 1
 
 
 def test_unknown_basis_is_source_observable_but_rejected_by_every_calculation_gate() -> None:

@@ -243,6 +243,42 @@ class HarnessStateStore:
             )
             connection.commit()
 
+    def claim_task_event(
+        self,
+        task_id: str,
+        stage: str,
+        payload: Mapping[str, object],
+        *,
+        event_key: str,
+    ) -> bool:
+        """Atomically claim one idempotent event key; return False when already claimed."""
+        if not event_key.strip() or not stage.strip():
+            raise ValueError("event_key and stage must be nonempty")
+        payload_json = _json(dict(payload))
+        now = _now()
+        with self._connection() as connection:
+            self._begin(connection)
+            task = connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise KeyError(f"unknown task_id {task_id}")
+            prior = connection.execute(
+                "SELECT stage,payload_json FROM task_events WHERE task_id=? AND event_key=?",
+                (task_id, event_key),
+            ).fetchone()
+            if prior is not None:
+                if prior["stage"] != stage or prior["payload_json"] != payload_json:
+                    raise StateConflict("task event key was already claimed with different content")
+                connection.commit()
+                return False
+            connection.execute(
+                "INSERT INTO task_events(task_id,event_key,stage,payload_json,created_at) VALUES(?,?,?,?,?)",
+                (task_id, event_key, stage, payload_json, now),
+            )
+            connection.commit()
+            return True
+
     def transition_task_status(
         self,
         task_id: str,

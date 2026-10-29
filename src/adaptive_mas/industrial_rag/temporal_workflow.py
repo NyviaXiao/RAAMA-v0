@@ -856,6 +856,7 @@ def run_research_activity(value: IndustrialRagResearchActivityInput) -> dict[str
         budget_scope_id=f"temporal-offline:{request.task_id}",
         task_provider_call_limit=0,
         package_identity_sha256=str(bundle["package_identity_sha256"]),
+        persistent_tool_names=frozenset({"plan_research", "query_specialist", "finalize_research"}),
     )
     budget.limit_next_task(10)
     client = QwenClient(

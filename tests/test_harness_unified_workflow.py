@@ -9,6 +9,7 @@ import pytest
 from adaptive_mas.agents.harness import CallBudget, run_research_harness
 from adaptive_mas.agents.harness_prompts import seed_candidate
 from adaptive_mas.data.research import MembershipSnapshot, ResearchData
+from adaptive_mas.harness_state import HarnessStateStore
 
 
 AS_OF = date(2026, 9, 1)
@@ -355,6 +356,82 @@ def test_manager_changes_actions_from_new_evidence_and_stops_on_repeat_or_no_gai
     assert client.role_counts["news"] == 0
     assert client.role_counts["market_attention"] == 0
     assert RAW_NEWS_FIXTURE not in json.dumps(client.calls, ensure_ascii=False)
+
+
+def test_offline_manager_query_state_recovers_from_persisted_tool_result(tmp_path) -> None:
+    task_id = "durable-manager-replay"
+    state = HarnessStateStore(tmp_path / "manager-replay.sqlite3")
+    state.open_task(
+        task_id,
+        "durable-manager-replay-key",
+        {"operation": "offline_research", "source_bundle_sha256": "f" * 64},
+        max_provider_calls=0,
+    )
+    budget = CallBudget(
+        max_calls=10,
+        state_store=state,
+        task_id=task_id,
+        budget_scope_id=f"temporal-offline:{task_id}",
+        package_identity_sha256="a" * 64,
+        persistent_tool_names=frozenset({"plan_research", "query_specialist", "finalize_research"}),
+    )
+    research = _research_data()
+    snapshot = _public_snapshot()
+    config = {
+        "feature_trend_sessions": 1,
+        "feature_reversal_sessions": 1,
+        "feature_liquidity_return_sessions": 1,
+        "feature_recent_amount_sessions": 1,
+        "feature_reference_amount_sessions": 1,
+        "prediction_horizon_sessions": 3,
+    }
+
+    class InterruptAfterManagerQuery:
+        model = "fixture-only"
+
+        def __init__(self) -> None:
+            self.inner = HarnessFlowClient("followup")
+            self.interrupted = False
+
+        def complete(self, messages, tools, **kwargs):
+            if not self.interrupted and any(
+                message.get("role") == "tool" and message.get("name") == "query_specialist"
+                for message in messages
+            ):
+                self.interrupted = True
+                raise RuntimeError("injected activity interruption after manager query result")
+            return self.inner.complete(messages, tools, **kwargs)
+
+    def run(client):
+        return run_research_harness(
+            research,
+            AS_OF,
+            snapshot,
+            seed_candidate(),
+            client,
+            budget,
+            config=config,
+        )
+
+    with pytest.raises(RuntimeError, match="after manager query result"):
+        run(InterruptAfterManagerQuery())
+    persisted_tools = [
+        event["payload"]["tool_name"]
+        for event in state.list_task_events(task_id)
+        if event["stage"] == "agent_tool_persisted"
+    ]
+    assert persisted_tools == ["plan_research", "query_specialist"]
+
+    result = run(HarnessFlowClient("followup"))
+    assert result["status"] == "completed"
+    assert result["research_loop"]["action_count"] == 2
+    assert result["research_loop"]["stop_code"] == "manager_chose_to_stop"
+    replayed_tools = [
+        event["payload"]["tool_name"]
+        for event in state.list_task_events(task_id)
+        if event["stage"] == "agent_tool_replayed"
+    ]
+    assert replayed_tools == ["plan_research", "query_specialist"]
 
 
 @pytest.mark.parametrize("dimension", ["event", "industry", "model"])

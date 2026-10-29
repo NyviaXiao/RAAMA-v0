@@ -23,7 +23,7 @@ from adaptive_mas.agents.public_prompt_context import build_public_context
 from adaptive_mas.agents.harness_prompts import parse_research_policy
 from adaptive_mas.agents.quantitative import quantitative_agents
 from adaptive_mas.data.research import ResearchData
-from adaptive_mas.harness_state import HarnessStateStore
+from adaptive_mas.harness_state import HarnessStateStore, StateConflict
 from adaptive_mas.industrial_rag.models import QueryPlan
 from adaptive_mas.industrial_rag.planning import accounting_basis_status
 from adaptive_mas.industrial_rag.retrieval import IndustrialRagService
@@ -38,6 +38,7 @@ PUBLIC_PRICE_SOURCE_URL = "https://www.alibabacloud.com/help/zh/model-studio/qwe
 MAX_CALLS_PER_EXPERIMENT = 160
 MAX_INPUT_BYTES_PER_CALL = 24_000
 MAX_OUTPUT_TOKENS_PER_CALL = 1_200
+MAX_PERSISTED_TOOL_RESULT_BYTES = 4 * 1024 * 1024
 FINANCIAL_FACT_UNITS = {
     "revenue_yoy_pct": "percent",
     "parent_net_profit_yoy_pct": "percent",
@@ -118,6 +119,7 @@ class CallBudget:
     package_identity_sha256: str | None = None
     package_identity_manifest: dict[str, object] | None = None
     request_archive_dir: Path | None = None
+    persistent_tool_names: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_calls <= MAX_CALLS_PER_EXPERIMENT:
@@ -183,7 +185,6 @@ class CallBudget:
                         row.get("task_id"),
                     ))
             self.unresolved_call = any(row.get("status") == "started" for row in self.calls)
-
     @staticmethod
     def _logical_call(
         usage: dict[str, object], role: str, request_sha256: str, source: str,
@@ -499,6 +500,12 @@ class CallBudget:
             },
             "calls": self.calls,
         }
+
+
+@dataclass(frozen=True)
+class ToolResultReplayHooks:
+    capture: Callable[[], dict[str, object]]
+    restore: Callable[[dict[str, object]], None]
 
 
 @dataclass(frozen=True)
@@ -956,6 +963,126 @@ def _tool(
     }
 
 
+def _execute_or_replay_tool(
+    *,
+    role_id: str,
+    turn_index: int,
+    tool_call_id: str,
+    tool_name: str,
+    arguments: dict[str, object],
+    handler: Callable[[dict[str, object]], dict[str, object]],
+    budget: CallBudget,
+    replay_hooks: ToolResultReplayHooks | None,
+) -> dict[str, object]:
+    """Persist allow-listed tool results plus state needed to replay their effects."""
+    state_store = budget.state_store
+    task_id = budget.task_id
+    if state_store is None or task_id is None or tool_name not in budget.persistent_tool_names:
+        return handler(arguments)
+    if replay_hooks is None:
+        raise ValueError(f"persistent tool {tool_name!r} requires replay-state capture and restore hooks")
+    if (
+        not isinstance(budget.package_identity_sha256, str)
+        or len(budget.package_identity_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in budget.package_identity_sha256)
+        or not budget.budget_scope_id
+    ):
+        raise ValueError("persistent tool results require a fixed package identity and budget scope")
+
+    task = state_store.get_task(task_id)
+    if task is None or not isinstance(task.get("request_hash"), str):
+        raise KeyError(f"persistent tool result requires a durable task request for {task_id}")
+
+    call_key = {
+        "schema_version": "adaptive-mas.agent-tool-call.v1",
+        "task_request_sha256": task["request_hash"],
+        "run_identity": {
+            "package_identity_sha256": budget.package_identity_sha256,
+            "budget_scope_id": budget.budget_scope_id,
+        },
+        "role_id": role_id,
+        "turn_index": turn_index,
+        "tool_call_id": tool_call_id,
+        "replay_context_version": 1,
+    }
+    call_key_sha256 = hashlib.sha256(_json(call_key).encode("utf-8")).hexdigest()
+    artifact_name = f"agent_tool_result_v1_{call_key_sha256}"
+    identity = {
+        **call_key,
+        "tool_name": tool_name,
+        "arguments_sha256": hashlib.sha256(_json(arguments).encode("utf-8")).hexdigest(),
+    }
+
+    def replay_saved(saved: dict[str, object]) -> dict[str, object]:
+        result = saved.get("result")
+        if (
+            saved.get("schema_version") != "adaptive-mas.agent-tool-result.v1"
+            or saved.get("identity") != identity
+            or not isinstance(result, dict)
+            or saved.get("result_sha256") != hashlib.sha256(_json(result).encode("utf-8")).hexdigest()
+            or not isinstance(saved.get("context"), dict)
+        ):
+            raise StateConflict("persisted agent tool result does not match the replayed tool call")
+        replay_hooks.restore(saved["context"])
+        state_store.checkpoint_task(
+            task_id,
+            "agent_tool_replayed",
+            {"role_id": role_id, "turn_index": turn_index, "tool_name": tool_name,
+             "tool_call_id": tool_call_id, "result_sha256": saved["result_sha256"]},
+            event_key=f"agent-tool:{call_key_sha256}:replayed",
+        )
+        return result
+
+    saved = state_store.get_artifact(task_id, artifact_name)
+    if saved is not None:
+        return replay_saved(saved)
+
+    started_payload = {
+        "role_id": role_id,
+        "turn_index": turn_index,
+        "tool_name": tool_name,
+        "tool_call_id": tool_call_id,
+        "arguments_sha256": identity["arguments_sha256"],
+    }
+    claimed = state_store.claim_task_event(
+        task_id,
+        "agent_tool_started",
+        started_payload,
+        event_key=f"agent-tool:{call_key_sha256}:started",
+    )
+    if not claimed:
+        saved = state_store.get_artifact(task_id, artifact_name)
+        if saved is not None:
+            return replay_saved(saved)
+        raise StateConflict("previous agent tool attempt has no persisted result; reconciliation is required")
+
+    result = handler(arguments)
+    if not isinstance(result, dict):
+        raise TypeError("persistent agent tool handlers must return a JSON object")
+    context = replay_hooks.capture()
+    if not isinstance(context, dict):
+        raise TypeError("persistent agent tool replay context must be a JSON object")
+    result_sha256 = hashlib.sha256(_json(result).encode("utf-8")).hexdigest()
+    artifact = {
+        "schema_version": "adaptive-mas.agent-tool-result.v1",
+        "identity": identity,
+        "result_sha256": result_sha256,
+        "result": result,
+        "context": context,
+    }
+    if len(_json(artifact).encode("utf-8")) > MAX_PERSISTED_TOOL_RESULT_BYTES:
+        raise ValueError("agent tool result exceeds the durable task-artifact limit")
+    state_store.put_artifact(task_id, artifact_name, artifact)
+    state_store.checkpoint_task(
+        task_id,
+        "agent_tool_persisted",
+        {"role_id": role_id, "turn_index": turn_index, "tool_name": tool_name,
+         "tool_call_id": tool_call_id, "result_sha256": result_sha256},
+        event_key=f"agent-tool:{call_key_sha256}:persisted",
+    )
+    return result
+
+
 SUBMIT_REPORT = _tool(
     "submit_report",
     "Finish the specialist review using only evidence IDs returned by your tools.",
@@ -1039,6 +1166,7 @@ def _run_tool_agent(
     max_turns: int,
     visible_evidence_ids: set[str] | None = None,
     reserve_correction_turn: bool = False,
+    tool_result_replay_hooks: Mapping[str, ToolResultReplayHooks] | None = None,
 ) -> dict[str, object]:
     final_tool = "finalize_research" if "finalize_research" in handlers else "submit_report"
     if final_tool not in handlers:
@@ -1205,7 +1333,16 @@ def _run_tool_agent(
                         for evidence_id in operand_ids
                     ):
                         raise InvalidToolInput("calculation operands must already be visible to this specialist")
-                result = handlers[name](arguments)
+                result = _execute_or_replay_tool(
+                    role_id=role_id,
+                    turn_index=turn_index,
+                    tool_call_id=str(call["id"]),
+                    tool_name=name,
+                    arguments=arguments,
+                    handler=handlers[name],
+                    budget=budget,
+                    replay_hooks=(tool_result_replay_hooks or {}).get(name),
+                )
             except InvalidResearchOutput as exc:
                 exc.context_compression = list(context_compression)
                 exc.partial_tool_trace = [
@@ -3885,6 +4022,11 @@ def run_research_harness(
     research_ablation_id: int | None = None,
 ) -> dict[str, object]:
     """Run market and fundamental specialists, then a planning/query/finalize manager."""
+    if industrial_rag_service is not None and budget.persistent_tool_names:
+        raise ValueError(
+            "persistent tool-result replay is disabled for service-backed evidence runs; "
+            "current permissions and source versions must be checked by each live handler"
+        )
     decision_time = datetime.combine(as_of, datetime.min.time()).replace(hour=16, tzinfo=SHANGHAI)
     settings = config or {}
     industrial_rag_snapshot: dict[str, object] = {"status": "disabled"}
@@ -4484,6 +4626,93 @@ def run_research_harness(
         "query_specialist": query_specialist_adaptive,
         "finalize_research": finalize,
     }
+    manager_base_catalog = deepcopy(evidence_catalog)
+    manager_base_reports = deepcopy(all_reports)
+
+    def capture_plan_replay_context() -> dict[str, object]:
+        return {"plan": deepcopy(manager_state.get("plan"))}
+
+    def restore_plan_replay_context(context: dict[str, object]) -> None:
+        plan = context.get("plan")
+        if plan is not None and not isinstance(plan, dict):
+            raise StateConflict("persisted manager plan context is malformed")
+        manager_state["plan"] = deepcopy(plan)
+
+    def capture_query_replay_context() -> dict[str, object]:
+        state = deepcopy(manager_state)
+        seen_actions = state.get("seen_actions", set())
+        if not isinstance(seen_actions, set):
+            raise TypeError("manager action state must remain a set before persistence")
+        state["seen_actions"] = sorted(seen_actions)
+        return {
+            "manager_state": state,
+            "all_reports_delta": {
+                key: deepcopy(report) for key, report in all_reports.items()
+                if manager_base_reports.get(key) != report
+            },
+            "evidence_catalog_delta": {
+                key: deepcopy(row) for key, row in evidence_catalog.items()
+                if manager_base_catalog.get(key) != row
+            },
+            "manager_visible_evidence_ids": sorted(manager_visible_evidence_ids),
+            "optional_expert_runs": deepcopy(optional_expert_runs),
+        }
+
+    def restore_query_replay_context(context: dict[str, object]) -> None:
+        state = context.get("manager_state")
+        reports_delta = context.get("all_reports_delta")
+        catalog_delta = context.get("evidence_catalog_delta")
+        visible_ids = context.get("manager_visible_evidence_ids")
+        expert_runs = context.get("optional_expert_runs")
+        if (
+            not isinstance(state, dict)
+            or not isinstance(reports_delta, dict)
+            or not isinstance(catalog_delta, dict)
+            or not isinstance(visible_ids, list)
+            or any(not isinstance(value, str) for value in visible_ids)
+            or not isinstance(expert_runs, dict)
+        ):
+            raise StateConflict("persisted manager query context is malformed")
+        restored_state = deepcopy(state)
+        seen_actions = restored_state.get("seen_actions")
+        if not isinstance(seen_actions, list) or any(not isinstance(value, str) for value in seen_actions):
+            raise StateConflict("persisted manager action context is malformed")
+        restored_state["seen_actions"] = set(seen_actions)
+        manager_state.clear()
+        manager_state.update(restored_state)
+        for key, report in reports_delta.items():
+            if not isinstance(key, str) or not isinstance(report, dict):
+                raise StateConflict("persisted manager report context is malformed")
+            all_reports[key] = deepcopy(report)
+        for key, row in catalog_delta.items():
+            if not isinstance(key, str) or not isinstance(row, dict):
+                raise StateConflict("persisted manager evidence context is malformed")
+            evidence_catalog[key] = deepcopy(row)
+        manager_visible_evidence_ids.clear()
+        manager_visible_evidence_ids.update(visible_ids)
+        optional_expert_runs.clear()
+        optional_expert_runs.update(deepcopy(expert_runs))
+
+    def capture_finalize_replay_context() -> dict[str, object]:
+        return {"final": deepcopy(manager_state.get("final"))}
+
+    def restore_finalize_replay_context(context: dict[str, object]) -> None:
+        final = context.get("final")
+        if final is not None and not isinstance(final, dict):
+            raise StateConflict("persisted manager final context is malformed")
+        manager_state["final"] = deepcopy(final)
+
+    manager_tool_replay_hooks = {
+        "plan_research": ToolResultReplayHooks(
+            capture_plan_replay_context, restore_plan_replay_context,
+        ),
+        "query_specialist": ToolResultReplayHooks(
+            capture_query_replay_context, restore_query_replay_context,
+        ),
+        "finalize_research": ToolResultReplayHooks(
+            capture_finalize_replay_context, restore_finalize_replay_context,
+        ),
+    }
     manager_task = {
         "as_of": as_of.isoformat(),
         "decision_time": decision_time.isoformat(),
@@ -4529,6 +4758,7 @@ def run_research_harness(
             budget=budget,
             max_turns=5,
             visible_evidence_ids=manager_visible_evidence_ids,
+            tool_result_replay_hooks=manager_tool_replay_hooks,
         )
     except InvalidResearchOutput as exc:
         exc.partial_tool_trace = [

@@ -567,6 +567,10 @@ def test_temporal_research_recovers_saved_manager_result_after_task_ack_loss_off
         assert public_snapshot is None
         assert candidate["manager_prompt"]
         assert kwargs["candidate_version_id"] == "synthetic-seed-v1"
+        assert budget.task_id == captured.task_id
+        assert budget.budget_scope_id == f"temporal-offline:{captured.task_id}"
+        assert isinstance(budget.package_identity_sha256, str) and len(budget.package_identity_sha256) == 64
+        assert budget.persistent_tool_names == frozenset({"plan_research", "query_specialist", "finalize_research"})
         return {"status": "completed", "tool_trace": [{"role": "manager", "status": "completed"}]}
 
     monkeypatch.setattr(temporal_workflow, "run_research_harness", fake_research_runner)
